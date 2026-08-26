@@ -119,7 +119,7 @@ The Voice settings page currently shows "Engine: Gemini Live API" (single fixed 
 
 ## M3-03 — G-Brain radial layout redesign
 **Priority:** High (previously queued, not yet started)
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-03" section.
 
 Timo centered/large, Corporate Office ring, Operating Company ring, worker ring, size decreasing by depth, hover-card with full agent details.
 

@@ -1063,6 +1063,38 @@ body { background: #020914; }
 .executive-flank .branch-column { min-width:110px; }
 .ceo-wrap { display:flex; justify-content:center; flex:0 0 auto; }
 
+/* ---- M3-03: radial layout — Temo centered, concentric rings by depth ---- */
+.radial-stage { position:relative; z-index:1; margin:8px auto 0; padding:16px; }
+.radial-canvas { position:relative; width:min(100%, 980px); aspect-ratio:1 / 1; margin:0 auto; }
+.radial-lines { position:absolute; inset:0; z-index:1; width:100%; height:100%; pointer-events:none; overflow:visible; }
+.radial-node { position:absolute; z-index:2; transform:translate(-50%, -50%); }
+.radial-node-ceo { z-index:4; }
+.radial-node-worker { z-index:2; pointer-events:none; }
+.radial-node-worker .node { pointer-events:auto; }
+
+.radial-hover-card {
+  position:absolute; left:50%; transform:translateX(-50%);
+  z-index:10; width:max-content; max-width:220px; padding:10px 12px;
+  border:1px solid color-mix(in srgb,var(--tone),transparent 45%); border-radius:12px;
+  background:rgba(4,10,22,.94); backdrop-filter:blur(10px);
+  box-shadow:0 8px 26px rgba(0,0,0,.5), 0 0 20px color-mix(in srgb,var(--tone),transparent 65%);
+  text-align:left; pointer-events:none;
+  animation:radial-hover-in .15s ease-out;
+}
+/* Default (and .radial-hover-below): card opens downward, away from a node
+   in the lower half of the ring. .radial-hover-above flips it upward for a
+   node in the upper half — otherwise the card would land back on top of
+   Temo or an inner ring instead of out toward open space. */
+.radial-hover-below { top:calc(100% + 10px); }
+.radial-hover-above { bottom:calc(100% + 10px); }
+@keyframes radial-hover-in { from { opacity:0; transform:translateX(-50%) translateY(-4px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+.radial-hover-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.radial-hover-head strong { color:var(--tone); font-size:11px; letter-spacing:.1em; text-shadow:0 0 10px var(--tone); }
+.radial-hover-role { margin:3px 0 0; color:#bae6fd; font-size:9px; letter-spacing:.04em; }
+.radial-hover-company { display:block; margin-top:2px; color:var(--tone); opacity:.8; font-size:8px; font-style:normal; letter-spacing:.08em; text-transform:uppercase; }
+.radial-hover-desc { margin:6px 0 0; color:#8ba3b8; font-size:9px; line-height:1.4; }
+.radial-hover-hint { display:block; margin-top:6px; color:#64748b; font-size:7px; letter-spacing:.1em; text-transform:uppercase; }
+
 /* ---- Frameless floating node ---- */
 .node { position:relative; display:flex; flex-direction:column; align-items:center; text-align:center; gap:10px; }
 .node-avatar { position:relative; display:grid; place-items:center; }
@@ -1088,9 +1120,9 @@ body { background: #020914; }
 .node-btn:hover { transform:translateY(-4px); }
 
 /* ---- Voice / speaking aura ---- */
-.node-aura { position:absolute; inset:-38%; z-index:0; border-radius:50%; background:radial-gradient(circle, color-mix(in srgb,var(--tone),transparent 50%), transparent 66%); filter:blur(8px); animation:node-aura 2.6s ease-in-out infinite; }
+.node-aura { position:absolute; inset:-38%; z-index:0; border-radius:50%; background:radial-gradient(circle, color-mix(in srgb,var(--tone),transparent 50%), transparent 66%); filter:blur(8px); animation:node-aura 2.6s ease-in-out infinite; pointer-events:none; }
 @keyframes node-aura { 0%,100%{ transform:scale(.88); opacity:.45 } 50%{ transform:scale(1.14); opacity:.9 } }
-.node-sonar { position:absolute; inset:-8%; z-index:1; border-radius:50%; border:2px solid color-mix(in srgb,var(--tone),transparent 20%); opacity:0; animation:node-sonar 2.8s ease-out infinite; }
+.node-sonar { position:absolute; inset:-8%; z-index:1; border-radius:50%; border:2px solid color-mix(in srgb,var(--tone),transparent 20%); opacity:0; animation:node-sonar 2.8s ease-out infinite; pointer-events:none; }
 .node-sonar.s2 { animation-delay:.9s; }
 .node-sonar.s3 { animation-delay:1.8s; }
 @keyframes node-sonar { 0%{ transform:scale(.7); opacity:.85 } 100%{ transform:scale(1.95); opacity:0 } }
@@ -1176,13 +1208,22 @@ body { background: #020914; }
 .agent-card .node-avatar { margin: 0 auto 8px; }
 
 /* Live Command Bridge — company clusters mirroring G-Brain's own grouping */
-.agent-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 18px; }
-.agent-cluster { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+/* M3-03: this is a MINI PREVIEW (the real detail lives one click away on
+   the full G-Brain page via the button above — M3-04) — it previously used
+   an unbounded flex-wrap that grew a new row per Operating Company
+   regardless of how many existed, pushing .hero-bridge's actual rendered
+   height to 1000px+ against its 760px min-height (confirmed live: 6
+   companies wrapped into 4+ uneven rows). A fixed 3-column grid bounds it
+   to a predictable 2 rows for today's 5 companies (and degrades gracefully
+   as more are added) instead of growing indefinitely. */
+.agent-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); justify-items: center; align-items: start; gap: 10px 14px; }
+.agent-cluster { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
 /* Corporate Office always forms its own full-width row — directly under
    Temo, above the Operating Companies — regardless of viewport width. */
-.agent-cluster.cluster-corporate { flex-basis: 100%; order: -1; margin-bottom: 6px; }
-.agent-cluster-label { padding: 3px 10px; border: 1px solid color-mix(in srgb, var(--tone), transparent 55%); border-radius: 999px; background: color-mix(in srgb, var(--tone), transparent 90%); color: var(--tone); font-size: 8px; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap; }
-.agent-cluster-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+.agent-cluster.cluster-corporate { grid-column: 1 / -1; order: -1; margin-bottom: 4px; }
+.agent-cluster.cluster-corporate .agent-cluster-row { flex-wrap: wrap; }
+.agent-cluster-label { padding: 2px 8px; border: 1px solid color-mix(in srgb, var(--tone), transparent 55%); border-radius: 999px; background: color-mix(in srgb, var(--tone), transparent 90%); color: var(--tone); font-size: 7px; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.agent-cluster-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 
 /* Command Deck hub — Quick Access to every real page (reuses LeftNav's menu) */
 .widget-wide { min-height: unset; }
