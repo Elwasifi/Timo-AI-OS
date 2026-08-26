@@ -1,7 +1,7 @@
 // Tool Engine initialization — registers built-in tools and connects
 // the executor's event stream to the UI store. Called once at app startup.
 
-import { registerBuiltinTools } from './builtin-tools';
+import { ensureBuiltinToolsRegistered } from './builtin-tools';
 import { toolExecutor } from './executor';
 import { useToolStore } from '@/stores/toolStore';
 import { logger } from '@/lib/utils/logger';
@@ -12,7 +12,7 @@ export function initToolEngine(): void {
   if (initialized) return;
   initialized = true;
 
-  registerBuiltinTools();
+  ensureBuiltinToolsRegistered();
 
   // Wire executor events → tool store (for timeline + debug panel)
   toolExecutor.onEvent((event) => {

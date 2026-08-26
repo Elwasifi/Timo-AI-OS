@@ -16,6 +16,7 @@ import type {
   ToolParamSchema, RegisteredTool,
 } from './types';
 import { toolRegistry } from './registry';
+import { ensureBuiltinToolsRegistered } from './builtin-tools';
 import { permissionEngine } from './permissions';
 import { logger } from '@/lib/utils/logger';
 import { requestApproval } from '@/lib/governance/approvals';
@@ -41,6 +42,7 @@ class ToolExecutorImpl {
 
   /** Execute a single tool request. */
   async execute(request: ToolRequest): Promise<ToolResultEnvelope> {
+    ensureBuiltinToolsRegistered();
     const start = Date.now();
     const { toolId, agentId, arguments: args, timeout = 30000, retries = 0 } = request;
 

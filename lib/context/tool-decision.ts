@@ -3,6 +3,7 @@
 // Never fabricate success. If the tool fails, return the error.
 
 import { toolRegistry } from '@/lib/tools/registry';
+import { ensureBuiltinToolsRegistered } from '@/lib/tools/builtin-tools';
 import { toolPlanner } from '@/lib/tools/planner';
 import { permissionEngine } from '@/lib/tools/permissions';
 import { toolExecutor } from '@/lib/tools/executor';
@@ -25,7 +26,17 @@ export async function decideTools(
   agentId: string,
   tenantId?: string | null,
   isSimulation?: boolean,
+  missionId?: string | null,
+  taskId?: string | null,
 ): Promise<ToolDecisionResult> {
+  // toolRegistry is an in-memory singleton per JS process; the browser tab
+  // and the Next.js server process each hold their own instance. Registration
+  // used to only happen client-side (components/providers.tsx's mount
+  // effect), so a server-executed caller (the background task-queue
+  // processor) would see an empty registry here and silently never resolve
+  // a tool candidate. Idempotent — safe to call on every decision.
+  ensureBuiltinToolsRegistered();
+
   if (!intent.asksForToolAction || intent.toolCategoryHint === 'none') {
     return {
       shouldUseTool: false,
@@ -71,6 +82,8 @@ export async function decideTools(
         arguments: t.arguments,
         tenantId,
         isSimulation,
+        missionId,
+        taskId,
       };
 
       try {

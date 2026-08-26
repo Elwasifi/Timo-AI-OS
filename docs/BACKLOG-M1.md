@@ -7,7 +7,7 @@
 
 ## M1-01 — Wire the Tool Executor into the Mission Engine
 **Priority:** Critical (blocks the core product promise)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-25). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-01" section for the full change/verification trace. Note: per explicit instruction this ticket was implemented directly on `milestone-1-reliability` rather than a separate `task/M1-01-...` branch — flagging this as a deviation from `docs/GOVERNANCE.md` Section 2/3's stated per-ticket branch convention, for Claude Cowork's awareness during review.
 
 **Problem:** `lib/swarm/executionLayer.ts`'s `executeTask()` only calls the LLM directly. It never invokes `lib/tools/executor.ts`. Missions (multi-step, delegated work) cannot use any tool, including n8n — only the synchronous chat path can.
 

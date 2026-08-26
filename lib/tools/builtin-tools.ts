@@ -360,6 +360,25 @@ export function registerBuiltinTools(): void {
   logger.n8n(`Built-in tools registered: ${toolRegistry.count()} total`);
 }
 
+// toolRegistry is an in-memory singleton scoped to whatever JS process holds
+// it — the browser tab (client-side chat/mission execution) and the Next.js
+// server process (API routes, including the background task-queue processor
+// at app/api/tasks/process) are separate processes with separate instances.
+// registerBuiltinTools() was previously only ever called from the client-side
+// initToolEngine() (components/providers.tsx's mount effect), so a
+// server-executed task's tool decision always saw an empty registry and
+// silently fell through to the LLM — never a crash, just a tool call that
+// quietly never happened. This guard makes registration idempotent
+// (register() safely no-ops/re-registers on repeat calls) so any caller, in
+// any process, can call it defensively without needing to reason about
+// whether some other code path already did.
+let builtinToolsRegistered = false;
+export function ensureBuiltinToolsRegistered(): void {
+  if (builtinToolsRegistered) return;
+  builtinToolsRegistered = true;
+  registerBuiltinTools();
+}
+
 // ---- Memory Engine Tools ----
 
 function registerMemoryTools(): void {

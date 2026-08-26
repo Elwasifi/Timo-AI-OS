@@ -30,6 +30,8 @@ import { route, classifyTask } from '@/lib/ai/router';
 import { loadSettings } from '@/lib/settings/settings-service';
 import { getAgentById } from '@/lib/agents/agentRegistryService';
 import { executeWorker, managerReview, type WorkerTask } from '@/lib/crew/manager-delegation';
+import { detectIntent } from '@/lib/context/intent-detector';
+import { decideTools } from '@/lib/context/tool-decision';
 import { buildManagerContext } from './managerContext';
 import { updateTask, claimTask, appendExecutionLog, getTasks, updateMission } from './missionService';
 import { recalculateProgress } from './missionEngine';
@@ -44,6 +46,7 @@ import { findWorkerForTask, resolveRoleId } from './workerRouter';
 import type { MissionTask, Mission, MissionObjective } from './types';
 import type { ExecutionResult, ExecutionStep, ExecutionContext, PriorTaskResult, ManagerContext } from './executionTypes';
 import type { AgentRecord } from '@/lib/agents/types';
+import type { Intent } from '@/types';
 
 // ---- Timeout helper ----
 
@@ -154,110 +157,179 @@ export async function executeTask(
 
   while (retries <= maxRetries) {
     try {
-      // Build manager context (memory, knowledge, tools, workflows, prior results)
-      const ctxStep = trackStep('Context Building', async () => {
-        const ctx = await buildManagerContext(task, mission, objective, priorResults);
-        if (!ctx) throw new Error('Failed to build manager context');
-        return ctx;
+      // Tool Decision — same gate the chat path already runs via
+      // decideTools() (lib/context/tool-decision.ts), reused here rather
+      // than duplicated. If the task itself reads as a tool action (e.g.
+      // "run the daily report workflow"), the real tool executor runs —
+      // respecting requiresApproval/isSimulation exactly as it already does
+      // for chat, since both callers share the same toolExecutor.execute().
+      const taskText = `${task.title}. ${task.description}`;
+      const toolStep = await trackStep('Tool Decision', async () => {
+        const routingIntentStub: Intent = {
+          category: 'general',
+          confidence: 0.5,
+          matchedKeywords: [],
+          reason: 'mission-task',
+          needsClarification: false,
+        };
+        const detectedIntent = detectIntent(taskText, routingIntentStub);
+        return decideTools(taskText, detectedIntent, managerId, mission.tenantId, mission.isSimulation, mission.id, task.id);
       });
-      const ctxResult = await ctxStep;
-      steps.push(ctxResult.step);
+      steps.push(toolStep.step);
+      const toolResult = toolStep.value;
 
-      if (ctxResult.value.relevantMemory) {
-        await recordEvent(mission.id, 'memory_retrieved', {
+      if (toolResult.shouldUseTool) {
+        await recordEvent(mission.id, 'tool_selected', {
           entityType: 'task',
           entityId: task.id,
-          title: 'Memory retrieved for context',
-          detail: ctxResult.value.relevantMemory.slice(0, 200),
+          title: `Tool selected: ${toolResult.selectedToolIds.join(', ') || 'none'}`,
+          detail: `Category matched for: ${task.title}`,
+          metadata: { toolIds: toolResult.selectedToolIds },
         });
       }
 
-      if (ctxResult.value.relevantKnowledge) {
-        await recordEvent(mission.id, 'knowledge_retrieved', {
+      let output: string;
+
+      if (toolResult.shouldUseTool && toolResult.success && toolResult.toolAnswer) {
+        // Tool fully answered the task — mirrors the chat path's
+        // shouldCallLLM:false shortcut (context-manager.ts). No LLM/worker
+        // call needed.
+        await recordEvent(mission.id, 'workflow_executed', {
           entityType: 'task',
           entityId: task.id,
-          title: 'Knowledge retrieved for context',
-          detail: ctxResult.value.relevantKnowledge.slice(0, 200),
+          title: `Tool execution succeeded: ${toolResult.selectedToolIds.join(', ')}`,
+          detail: toolResult.toolAnswer.slice(0, 300),
+          metadata: { toolIds: toolResult.selectedToolIds, executions: toolResult.executions.length },
         });
-      }
+        steps.push({
+          step: 'Tool Execution',
+          status: 'completed',
+          detail: `${toolResult.selectedToolIds.join(', ')} succeeded`,
+          durationMs: 0,
+        });
+        output = toolResult.toolAnswer;
+      } else if (toolResult.shouldUseTool && !toolResult.success) {
+        // A failed tool call is a failed task, not silently swallowed —
+        // unlike the chat path (which degrades to an LLM response), a
+        // mission task IS the concrete work item, so a real tool failure
+        // must propagate. Throwing here routes it through the exact same
+        // retry/backoff/fail loop as any other execution failure below.
+        await recordEvent(mission.id, 'workflow_executed', {
+          entityType: 'task',
+          entityId: task.id,
+          title: `Tool execution failed: ${toolResult.selectedToolIds.join(', ')}`,
+          detail: toolResult.error ?? 'Unknown tool error',
+          metadata: { toolIds: toolResult.selectedToolIds, failed: true },
+        });
+        throw new Error(toolResult.error || `Tool execution failed for: ${toolResult.selectedToolIds.join(', ')}`);
+      } else {
+        // No tool action needed — existing LLM/worker execution, unchanged.
 
-      // Execute via LLM provider with timeout
-      // When a valid worker exists in the manager's hierarchy, delegate
-      // through the SAME manager-delegation core the chat pipeline uses
-      // (lib/crew/manager-delegation.ts) — real AGENT_TO_AGENT routing for
-      // the worker turn, followed by a real manager review whose output
-      // becomes the task's final result. Otherwise, fall back to direct
-      // manager LLM execution (the existing behavior, unchanged).
-      const llmStep = await trackStep(
-        workerId ? 'Worker Execution' : 'LLM Execution',
-        async () => {
-          const settings = await loadSettings();
+        // Build manager context (memory, knowledge, tools, workflows, prior results)
+        const ctxStep = trackStep('Context Building', async () => {
+          const ctx = await buildManagerContext(task, mission, objective, priorResults);
+          if (!ctx) throw new Error('Failed to build manager context');
+          return ctx;
+        });
+        const ctxResult = await ctxStep;
+        steps.push(ctxResult.step);
 
-          if (workerId && workerRecord) {
-            // Worker execution and manager review are each independently
-            // timeout-bounded inside executeDelegatedTask (matching the
-            // original single-call budget) rather than sharing one combined
-            // budget here — two sequential LLM calls under one timeoutMs
-            // would time out far more often than either call alone did.
-            return executeDelegatedTask(mission, task, managerId, managerName, managerRecord, workerRecord, ctxResult.value, timeoutMs);
-          }
-
-          const systemPrompt = ctxResult.value.systemPrompt;
-          const messages: ChatMessage[] = [
-            { role: 'user', content: ctxResult.value.userPrompt },
-          ];
-
-          // Dynamic Model Router: classify this task and let the router pick
-          // provider+model instead of always using whatever app_settings has
-          // globally configured. Never throws — route() degrades to an empty
-          // candidate list on any failure, which chatWithFallback treats
-          // exactly like today's un-routed behavior (see resolveOrderedPairs
-          // in lib/ai/ai-provider.ts).
-          const classification = classifyTask({
-            text: `${task.title}. ${task.description}`,
-            isMissionTask: true,
-            missionComplexity: mission.estimatedComplexity,
-            requiredCapability: task.requiredCapability,
-          });
-          const decision = await route({ classification, tenantId: mission.tenantId });
-
-          await recordEvent(mission.id, 'provider_selected', {
+        if (ctxResult.value.relevantMemory) {
+          await recordEvent(mission.id, 'memory_retrieved', {
             entityType: 'task',
             entityId: task.id,
-            title: decision.selected
-              ? `Provider: ${decision.selected.provider}`
-              : `Provider: ${settings.active_provider} (router fallback)`,
-            detail: decision.selected
-              ? `Model: ${decision.selected.model} — ${decision.reason}`
-              : `Model: ${ctxResult.value.agent.model}`,
+            title: 'Memory retrieved for context',
+            detail: ctxResult.value.relevantMemory.slice(0, 200),
           });
+        }
 
-          const result = await withTimeout(
-            chatWithFallback(messages, {
-              systemPrompt,
-              temperature: settings.temperature,
-              maxTokens: settings.max_tokens,
-              candidates: decision.candidates,
-              usageContext: {
-                operation: 'mission_task',
-                missionId: mission.id,
-                taskId: task.id,
-                agentId: managerId,
-                managerId,
-                tenantId: mission.tenantId,
-                metadata: { taskType: decision.taskType, routingMode: decision.mode },
-              },
-            }),
-            timeoutMs,
-          );
+        if (ctxResult.value.relevantKnowledge) {
+          await recordEvent(mission.id, 'knowledge_retrieved', {
+            entityType: 'task',
+            entityId: task.id,
+            title: 'Knowledge retrieved for context',
+            detail: ctxResult.value.relevantKnowledge.slice(0, 200),
+          });
+        }
 
-          return result.content;
-        },
-      );
-      steps.push(llmStep.step);
+        // Execute via LLM provider with timeout
+        // When a valid worker exists in the manager's hierarchy, delegate
+        // through the SAME manager-delegation core the chat pipeline uses
+        // (lib/crew/manager-delegation.ts) — real AGENT_TO_AGENT routing for
+        // the worker turn, followed by a real manager review whose output
+        // becomes the task's final result. Otherwise, fall back to direct
+        // manager LLM execution (the existing behavior, unchanged).
+        const llmStep = await trackStep(
+          workerId ? 'Worker Execution' : 'LLM Execution',
+          async () => {
+            const settings = await loadSettings();
+
+            if (workerId && workerRecord) {
+              // Worker execution and manager review are each independently
+              // timeout-bounded inside executeDelegatedTask (matching the
+              // original single-call budget) rather than sharing one combined
+              // budget here — two sequential LLM calls under one timeoutMs
+              // would time out far more often than either call alone did.
+              return executeDelegatedTask(mission, task, managerId, managerName, managerRecord, workerRecord, ctxResult.value, timeoutMs);
+            }
+
+            const systemPrompt = ctxResult.value.systemPrompt;
+            const messages: ChatMessage[] = [
+              { role: 'user', content: ctxResult.value.userPrompt },
+            ];
+
+            // Dynamic Model Router: classify this task and let the router pick
+            // provider+model instead of always using whatever app_settings has
+            // globally configured. Never throws — route() degrades to an empty
+            // candidate list on any failure, which chatWithFallback treats
+            // exactly like today's un-routed behavior (see resolveOrderedPairs
+            // in lib/ai/ai-provider.ts).
+            const classification = classifyTask({
+              text: taskText,
+              isMissionTask: true,
+              missionComplexity: mission.estimatedComplexity,
+              requiredCapability: task.requiredCapability,
+            });
+            const decision = await route({ classification, tenantId: mission.tenantId });
+
+            await recordEvent(mission.id, 'provider_selected', {
+              entityType: 'task',
+              entityId: task.id,
+              title: decision.selected
+                ? `Provider: ${decision.selected.provider}`
+                : `Provider: ${settings.active_provider} (router fallback)`,
+              detail: decision.selected
+                ? `Model: ${decision.selected.model} — ${decision.reason}`
+                : `Model: ${ctxResult.value.agent.model}`,
+            });
+
+            const result = await withTimeout(
+              chatWithFallback(messages, {
+                systemPrompt,
+                temperature: settings.temperature,
+                maxTokens: settings.max_tokens,
+                candidates: decision.candidates,
+                usageContext: {
+                  operation: 'mission_task',
+                  missionId: mission.id,
+                  taskId: task.id,
+                  agentId: managerId,
+                  managerId,
+                  tenantId: mission.tenantId,
+                  metadata: { taskType: decision.taskType, routingMode: decision.mode },
+                },
+              }),
+              timeoutMs,
+            );
+
+            return result.content;
+          },
+        );
+        steps.push(llmStep.step);
+        output = llmStep.value;
+      }
 
       // Success — record completion
-      const output = llmStep.value;
       const durationMs = Date.now() - startTime;
 
       await updateTask(task.id, {

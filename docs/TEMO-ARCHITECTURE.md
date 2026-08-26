@@ -418,6 +418,7 @@ This is a target description only. No multi-company, multi-tenant, queue-based, 
 | Knowledge graph | PLACEHOLDER | Generic edges, not auto-populated; gbrain UI cosmetic | Low |
 | Context builder | WORKING | Complete intent → memory → tools → RAG → LLM pipeline | — |
 | Tool executor core | WORKING | Validation, permissions, retries, chaining all real | — |
+| Tool execution inside missions | WORKING | M1-01 (2026-08-25) — `executionLayer.ts`'s `executeTask()` now calls the real tool executor via `decideTools()`, same as the chat path; a failed tool call fails the task (existing retry loop), success bypasses the LLM entirely | — |
 | Tool permissions | PARTIAL | Flat hardcoded map, warn-only enforcement | Medium |
 | Built-in tools (n8n, memory) | WORKING | Real backends | — |
 | Built-in tools (Gmail/Drive/Calendar/GitHub/files/web search) | PLACEHOLDER | Explicitly unconfigured adapters | Medium |
@@ -985,15 +986,8 @@ the `ai-chat` edge function redeploy (item 2 above) to take effect.
 
 ### Known remaining gaps (honestly stated, not fixed in this pass)
 
-- **Tool execution inside missions**: `executionLayer.ts`'s `executeTask()`
-  only ever calls the LLM directly — it never invokes the tool executor.
-  Autonomous mission tasks cannot use tools today; only the synchronous
-  chat/tool-calling pipeline (`decideTools()`) can. This is a real
-  architectural gap, not a bug fix candidate — building it properly means
-  task→tool-selection logic, approval-gate interaction, and retry semantics
-  that don't yet exist, and was judged too large/risky to build
-  speculatively inside this pass per the brief's "do not invent unnecessary
-  workflows the runtime cannot support reliably."
+- ~~**Tool execution inside missions**~~ — Fixed by M1-01 (2026-08-25); see
+  the dated section near the end of this document.
 - **`memory-decision.ts`'s "remember" auto-summary merge path**
   (`summarizer.mergeMemories()`) still defaults to the internal tenant —
   `MemoryRecord` doesn't currently expose `tenantId` on read, so a merge
@@ -1441,7 +1435,35 @@ Per CLAUDE.md: cost-efficient models for simple/mechanical work, stronger reason
 
 ---
 
+## M1-01 — TOOL EXECUTOR WIRED INTO MISSION ENGINE (2026-08-25)
+
+**Ticket**: `docs/BACKLOG-M1.md` M1-01, first ticket of Milestone 1 (Reliability & Safety), opened by the Claude Cowork governance review. Branch: `milestone-1-reliability`.
+
+**Problem**: `lib/swarm/executionLayer.ts`'s `executeTask()` only ever called the LLM directly. It never invoked `lib/tools/executor.ts`. Missions (multi-step, delegated work) could not use any tool, including n8n — only the synchronous chat path could, via `decideTools()`.
+
+**What changed**:
+- `executeTask()` now runs the same `detectIntent()` → `decideTools()` gate the chat path already uses (`lib/context/tool-decision.ts`), reused rather than duplicated. If the task's title/description reads as a tool action, the real tool executor runs — `requiresApproval` and `isSimulation` are respected automatically, since both callers now share the exact same `toolExecutor.execute()` choke point.
+  - Tool fully answers the task → the LLM/worker call is skipped entirely (mirrors the chat path's `shouldCallLLM: false` shortcut).
+  - Tool call fails → the error is thrown into `executeTask()`'s existing retry/backoff loop, so a failed tool call is a failed task after retries are exhausted — not silently swallowed, and not papered over with an LLM fallback response (deliberately different from the chat path's graceful degradation, since a mission task is the concrete unit of work, not a conversational turn).
+  - No tool action detected → unchanged: existing LLM/worker execution path.
+  - New timeline events: `tool_selected` (before invocation) and `workflow_executed` (result, success or failure) — both pre-existing `mission_timeline_event` enum values added in an earlier migration for exactly this purpose, never wired up until now. No new migration needed.
+  - `decideTools()` gained two new optional trailing params, `missionId`/`taskId` (default `undefined`, so the chat path's call site is unaffected), threaded into the `ToolRequest` so approval requests created from a mission-originated tool call are correctly linked back to the mission/task that triggered them.
+- **A second, more consequential bug found and fixed while live-verifying the above**: `toolRegistry` (`lib/tools/registry.ts`) is an in-memory singleton scoped to whichever JS process holds it. Registration (`registerBuiltinTools()`) was only ever called from `initToolEngine()`, itself only ever called from `components/providers.tsx`'s client-side mount effect. The synchronous chat/voice mission path runs client-side (`orchestrate()` is called directly from `app/chat/page.tsx`), so it happened to work — but the background task-queue processor (`app/api/tasks/process/route.ts`) runs server-side, in a separate process that never populated the registry. A server-executed task's tool decision would have silently seen an empty registry and always fallen through to the LLM — no error, no signal, just a tool call that quietly never happened. Fixed by adding `ensureBuiltinToolsRegistered()` (`lib/tools/builtin-tools.ts`), an idempotent guard now called defensively from both `decideTools()` and `toolExecutor.execute()` itself, so registration happens correctly regardless of which process/caller reaches it first. `initToolEngine()` now calls the same guard instead of `registerBuiltinTools()` directly.
+
+**Live verification performed** (not typecheck-only): typecheck and lint clean. A throwaway `tsx` script (deleted after use) created a real mission + real tasks via the service-role client and called `executeTask()` directly against the running codebase:
+- **Success path** (`memory.timeline`, a real DB-backed tool, not a placeholder): task completed with steps `["Tool Decision", "Tool Execution"]` — the LLM was never invoked. `mission_timeline` shows real `tool_selected`/`workflow_executed` events.
+- **Failure path** (`n8n.triggerWorkflowByName`, with local n8n intentionally not running in this dev environment): the tool genuinely failed (`"The n8n integration service returned an invalid response."`), retried once per `maxRetries`, then the task ended in `status: 'failed'` with the real error message persisted to `error_message` — confirmed via direct DB read, not inferred.
+- **`requiresApproval` gate**: called `toolExecutor.execute()` directly for `memory.forget` (a `requiresApproval: true` tool) with `missionId`/`taskId` set — got `ok: false`, `pendingApprovalId` set, and confirmed a real row in `approval_requests` correctly linked to the test mission and task.
+- `isSimulation` was not separately live-tested this pass — it follows the exact same parameter-threading path as `tenantId`/`missionId`, which was live-confirmed via the approval test, and the branch itself (`executor.ts`) is unconditional/caller-agnostic; noted as CODE VERIFIED rather than re-proven redundantly.
+- All test missions/tasks/timeline rows/approval requests were deleted via service-role cleanup after verification; nothing test-related was left in the database.
+
+**Known limitation, explicitly not fixed this pass**: a genuinely *successful* n8n workflow trigger was not live-tested, because local n8n (Docker) is not running in this dev environment and starting it (plus `cloudflared` tunnel configuration) is exactly the undocumented tribal-knowledge gap `docs/GOVERNANCE.md` Section 5 and backlog ticket M1-08 exist to close — attempting to bootstrap that infrastructure ad hoc mid-ticket was judged out of scope for M1-01's actual code change. The failure path above proves the tool genuinely runs (real HTTP attempt, real error) rather than being mocked, which is the part M1-01 owns; a true n8n-success E2E test should be re-run once M1-08's runbook exists and local n8n is up.
+
+**Also noted, not fixed this pass (pre-existing, unrelated to M1-01's own scope)**: `requestApproval()` (`lib/governance/approvals.ts`) has no deduplication — a tool call that hits the approval gate on every retry attempt would create one `approval_requests` row per attempt. This already existed for the chat path; M1-01's retry loop makes it slightly more likely to surface (up to `maxRetries + 1` rows for one blocked mission task) but did not introduce it. Worth a small follow-up ticket if it proves noisy in practice.
+
 ## ARCHITECTURE DOCUMENT VERSION
-Version: 2.6
-Date: 2026-08-20
+Version: 2.7
+Date: 2026-08-25
+Status: M1-01 (Milestone 1 — Reliability & Safety) implemented and live-verified: the tool executor is now wired into the mission engine's `executeTask()`, reusing the chat path's `decideTools()` rather than duplicating it, so mission tasks can genuinely call tools (n8n, memory, etc.) with `requiresApproval`/`isSimulation` respected exactly as they already are for chat. A second, more consequential latent bug was found and fixed in the same pass: the tool registry was only ever populated client-side, meaning the background task-queue processor (a server process) would have silently never executed any tool a mission task asked for — this is now fixed process-agnostically. Live-verified via direct `executeTask()` invocation against the real database and codebase: a real success path (task completes, LLM skipped), a real failure path (task fails after retries with a genuine tool error, not swallowed), and a real `requiresApproval` gate (blocked, linked to the originating mission/task in `approval_requests`). A true end-to-end n8n-success test remains outstanding pending local n8n/cloudflared infrastructure (tracked separately as M1-08). Full prior-version history remains in the dated sections above this footer.
+
 Status: Dynamic Model Router implemented — a new lib/ai/router/ module now sits between every real AI call site (11 total, all found and wired: mission tasks, chat responses streaming/non-streaming, tool-response formatting, manager→worker delegation, manager review, tool selection, memory summarization/importance/should-remember, intent classification) and chatWithFallback/streamWithFallback, deciding provider+model per request from task classification, real provider-reported capability/pricing data, live health tracking, and the existing budget hard-gate — instead of every call using one globally-configured model regardless of context. Two real, previously-unreachable gaps closed as part of this: the model catalog discovered by Provider Validation now persists server-side (provider_model_catalog), and provider/model health (success/failure/latency) is tracked for the first time (provider_model_health) since usage_ledger only ever recorded successes by design. A live RLS bug was found and fixed during verification (health writes from browser context were rejected — fixed via SECURITY DEFINER on the narrow update function, not by opening the table). Live-verified, not inferred: a real chat request was classified and routed to a different provider than the globally-configured one when that provider was genuinely rate-limited, with the failure correctly recorded in health tracking; a real 7-task mission showed per-task routing decisions; the Settings UI's Free Only strategy was selected, saved, and confirmed to route to a real zero-cost model. See the "DYNAMIC MODEL ROUTER" section above for full architecture detail and honestly-stated limitations (no per-task-type override UI yet, no real audio/vision provider to route VISION to, name-pattern capability inference kept structurally separate from real provider data), and the standalone "TEMO AI OS — DYNAMIC MODEL ROUTER IMPLEMENTATION REPORT" for the complete verification trace. Full prior-version history (V1 through the API Settings performance fix) remains in the dated sections above this footer, in order — this footer itself now only summarizes the current version rather than re-appending every prior status string, which had become unwieldy.
