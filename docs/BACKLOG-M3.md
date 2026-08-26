@@ -1,8 +1,10 @@
 # Milestone 3 — Speed & Stability + Visual/UX Fixes Backlog
 
-> **M3-01, M3-02, M3-04, and M3-05 reviewed, approved, and merged to `main` 2026-08-26.** M3-03 (G-Brain radial layout redesign) and M3-06 (Timo persona/system-prompt pass) remain `Open` — not part of this merge, still queued separately.
+> **M3-01, M3-02, M3-04, and M3-05 reviewed, approved, and merged to `main` 2026-08-26.**
+> **Completion pass (2026-08-26, branch `milestone-3b-voice-fixes`):** real usage testing on the deployed M3-01/02/04/05 changes surfaced 5 new issues (M3-07 through M3-11), fixed first since they're regressions/gaps in what was just shipped. Then M3-03 and M3-06 — queued from the original milestone scope, never started — are done to close out Milestone 3 entirely.
 > Owner: Claude Cowork (Technical Manager). Implemented by: Claude Code (local). Status values: `Open` → `In Progress` → `Pushed for Review` → `Reviewed — ready to merge` → `Merged`.
-> Branch: `milestone-3-experience` (merged to `main` via a clean fast-forward, no conflicts).
+> Branch: `milestone-3-experience` merged to `main` via a clean fast-forward (M3-01/02/04/05). `milestone-3b-voice-fixes` created from `main` for M3-07 through M3-11, M3-03, M3-06 — one commit per ticket, pushed as each completes.
+> Sequencing: M3-07 and M3-08 first (both break the just-shipped voice/mission features outright). M3-09/M3-10/M3-11 next (voice UX consistency and honesty). M3-03 and M3-06 last.
 
 ---
 
@@ -54,6 +56,77 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ---
 
-## Not part of this milestone (queued separately)
-- **M3-03** — G-Brain radial layout redesign.
-- **M3-06** — Timo persona / system-prompt pass.
+## M3-07 — Fix "No agent selected" voice error on Main Dashboard
+**Priority:** Critical
+**Status:** Open
+
+**Root cause found by direct code inspection**: `VoiceTrigger` (`components/temo/command-deck.tsx`, added in M3-05) calls `voiceManager`, whose `getActiveAgent()` (`lib/voice/voice-manager.ts` ~line 48-51) reads the agent list from the shared `useDashboardStore`. But `command-deck.tsx` loads its own agent list into local component state via `loadAgents()` imported directly from `lib/agents/agentRegistryService` (~line 385) — it never populates `useDashboardStore`. If a user opens Main Dashboard directly (without first visiting a page that populates that store, like `/chat`), `voiceManager` finds no agent for the default `activeAgentId` (`'temo'`) and `crew-coordinator.ts`'s `generateResponse()` throws "No agent selected" (confirmed at 3 call sites, ~lines 402/445/492) — spoken back via TTS, exactly what the user heard.
+
+**Acceptance criteria:**
+- Main Dashboard must populate the same shared `useDashboardStore` (reuse its existing `loadAgents` store action, the same one `app/chat/page.tsx` already uses) instead of — or in addition to — its own local state, so voice works correctly regardless of which page the user starts on.
+- Live-verified: open Main Dashboard as the very first page of a fresh session (no prior page visited), use the voice trigger, confirm Temo responds correctly with no "No agent selected" error.
+- Confirm the existing Main Dashboard agent-list rendering (org chart, Corporate Office bands, etc.) still works exactly as before — this is a store-population fix, not a rendering change.
+
+## M3-08 — Investigate the mission that stalled at 20%
+**Priority:** Critical
+**Status:** Open
+
+A voice-triggered mission started, was correctly created and visible in the Missions page, progressed to 20%, then stopped with no further progress and no error surfaced anywhere.
+
+**Acceptance criteria:**
+- Investigate the actual state in the database (`mission_tasks` status/`locked_at`, `mission_timeline` events) for the specific mission, not just the UI. Determine whether this is: (a) the already-known limitation that the background task queue exists but has no `pg_cron` schedule yet (`docs/TEMO-ARCHITECTURE.md`, "PARTIAL (V1)"), meaning only the first synchronously-executed task ran and the rest sit in `'ready'` state waiting for a scheduler that doesn't exist in local dev, or (b) a new bug — e.g. M3-01's provider health-skip logic (`lib/ai/ai-provider.ts`'s `isSkippableUnhealthy()`) causing a task's AI call to fail silently without marking the task itself as failed/retryable.
+- Root cause identified and documented, not guessed.
+- If (a): the mission's current state must at minimum surface an honest "still in progress, waiting on task processing" status to the user instead of silently going quiet at 20% — never a fabricated "complete" and never unexplained silence.
+- If (b): fix the actual bug.
+- Live-verified with a new real mission triggered the same way (voice, on Main Dashboard).
+
+## M3-09 — Remove the old floating voice control from all remaining pages
+**Priority:** High
+**Status:** Open
+
+`top-nav.tsx`'s `VoiceHud` suppression only covers `/` and `/dashboard` (~line 19-20's `isDashboard` check). Every other page (`/chat`, `/missions`, `/agents`, `/settings`, etc.) still renders the old floating voice orb with its unlabeled sub-buttons — the exact control M3-05 was supposed to replace everywhere, not just on 2 pages.
+
+**Acceptance criteria:**
+- `VoiceHud` is removed from every page except where a page has its own dedicated, purpose-built voice control (Main Dashboard's `VoiceTrigger`, and Chat's mic button next to Send — both already exist).
+- Pages with no voice control of their own (Missions, Agents, Settings, etc.) — decide and document one consistent approach: either no voice entry point on those pages at all (voice is a Main-Dashboard/Chat feature), or a minimal consistent trigger reusing the same visual language as `VoiceTrigger`. Do not leave the old unlabeled-sub-buttons version anywhere.
+- Live-verified by visiting every page in the app and confirming no old voice control remains.
+
+## M3-10 — Bring Chat page's voice mic to visual parity with Main Dashboard
+**Priority:** High
+**Status:** Open
+
+The chat page's mic button (fixed in M3-05 to actually start/stop listening) has no visual feedback at all — no listening indicator, no waveform, no sign it heard anything, and the user reported it sometimes produces no response with no explanation. Main Dashboard's `VoiceTrigger` component already has the right UX (listening animation, waveform, transcript-in-progress, status label) — reuse it, don't rebuild a second version.
+
+**Acceptance criteria:**
+- Chat page's mic control shows the same listening/thinking/speaking states and waveform as Main Dashboard's `VoiceTrigger` (extract it to a shared component if it isn't already reusable).
+- Any voice request that fails (recognition error, empty transcript, AI call failure) shows a real, visible error state in the chat UI — never silent nothing.
+- Live-verified: speak a message in Chat, confirm the same visual feedback quality as Main Dashboard, including a visible error state when something is deliberately made to fail (e.g. denying mic permission).
+
+## M3-11 — Fix Settings → Voice page to reflect the real engine
+**Priority:** Medium
+**Status:** Open
+
+The Voice settings page currently shows "Engine: Gemini Live API" (single fixed option) and "Voice: Microsoft David - English (United States)" — neither reflects the actual implementation, which is the browser's free Web Speech API (`services/voiceService.ts`). This is exactly the kind of fabricated-looking UI this project's own principles explicitly reject (CLAUDE.md rule 7: "never introduce mock/placeholder implementations disguised as real functionality").
+
+**Acceptance criteria:**
+- Engine field reflects reality (Web Speech API / browser-provided), not a fictional "Gemini Live API" option.
+- Voice dropdown is populated from the real available voices on the user's own browser (`voiceManager.getAvailableVoices()` / `player.getVoices()`), not a single hardcoded name.
+- Add a "test/preview" button that speaks a short sample using the currently selected voice/speed/pitch — so a user can actually hear before committing.
+- The selected voice must actually be applied to real TTS output, not just stored and ignored.
+- Live-verified: change the voice selection, hit test/preview, hear the actual different voice; confirm the same voice is then used in a real chat/voice interaction.
+
+---
+
+## M3-03 — G-Brain radial layout redesign
+**Priority:** High (previously queued, not yet started)
+**Status:** Open
+
+Timo centered/large, Corporate Office ring, Operating Company ring, worker ring, size decreasing by depth, hover-card with full agent details.
+
+**New input from live testing**: the current mini G-Brain preview on Main Dashboard is visibly too tall / has too much empty vertical space (screenshots provided by Amro showing a long vertical tree with large gaps) — factor this into the radial redesign: a circular layout centered on Temo should be inherently more compact vertically than the current top-to-bottom tree, but explicitly verify the mini-preview's aspect ratio/whitespace as part of this ticket's acceptance criteria, not just the full G-Brain page.
+
+## M3-06 — Timo persona/system-prompt pass
+**Priority:** Medium (previously queued, not yet started)
+**Status:** Open
+
+Punchier, more natural Egyptian-Arabic TEXT responses (independent of voice), less "generic AI," more decisive tone.
