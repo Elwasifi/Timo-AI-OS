@@ -1,15 +1,14 @@
 # Milestone 3 — Speed & Stability + Visual/UX Fixes Backlog
 
+> **M3-01, M3-02, M3-04, and M3-05 reviewed, approved, and merged to `main` 2026-08-26.** M3-03 (G-Brain radial layout redesign) and M3-06 (Timo persona/system-prompt pass) remain `Open` — not part of this merge, still queued separately.
 > Owner: Claude Cowork (Technical Manager). Implemented by: Claude Code (local). Status values: `Open` → `In Progress` → `Pushed for Review` → `Reviewed — ready to merge` → `Merged`.
-> Branch: `milestone-3-experience`, checked out locally for the whole milestone, one commit per ticket pushed immediately after each is done and live-verified, per `docs/GOVERNANCE.md`'s branching model.
-> Sequencing: M3-01 and M3-02 first (same root problem — provider retry/fallback tuning plus first-response guarantees, the true blocker for any beta user). M3-04 and M3-05 after, in either order.
-> **Explicitly out of scope for this milestone (queued separately): M3-03 (G-Brain radial layout redesign), M3-06 (Timo persona/system-prompt pass).**
+> Branch: `milestone-3-experience` (merged to `main` via a clean fast-forward, no conflicts).
 
 ---
 
 ## M3-01 — Diagnose and fix chat latency / silent non-response
 **Priority:** Critical
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-01" section for the full root-cause trace and fix.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-26. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-01" section for the full root-cause trace and fix.
 
 **Problem** (found by direct code inspection, not just the user's report): `lib/ai/ai-provider.ts`'s `chatWithFallback()`/`streamWithFallback()` walk up to 5 providers (Gemini→Groq→NVIDIA→OpenRouter→Ollama), and for EACH one that fails, retry 3 times with exponential backoff (1s, 2s, 4s) before moving to the next provider. If one provider near the front of the chain has a stale/dead free-tier model name (already flagged as a known live issue in `docs/GOVERNANCE.md` — "stale model names 404ing"), a single chat message can wait 30+ seconds, or fail entirely if Ollama isn't running locally, before the user sees anything.
 
@@ -24,7 +23,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-02 — Fast-first-response guarantee
 **Priority:** Critical
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-02" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-26. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-02" section.
 
 **Acceptance criteria:**
 - A plain question (no tool/mission execution needed) gets a visible first response within a defined, tested budget — target under 5 seconds on a healthy provider — even though a multi-step mission naturally takes longer after that.
@@ -33,7 +32,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-04 — Rename Command Deck to Main Dashboard; fix the G-Brain mini-view link
 **Priority:** High
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-04" section. Landed in the same commit as M3-05 (both touch `components/temo/command-deck.tsx`).
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-26. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-04" section. Landed in the same commit as M3-05 (both touch `components/temo/command-deck.tsx`).
 
 - Rename "Command Deck" to "Main Dashboard" everywhere it appears (page titles, `LeftNav.NAV_ITEMS`, any other UI string) — pure rename, no functional change beyond what's described below.
 - In `components/temo/command-deck.tsx` (~line 361-366), the hero-bridge section's caption block currently reads "LIVE COMMAND BRIDGE /// NEURAL SYNCHRONIZATION" — remove this text entirely. Replace it with a small, visually distinct "G-Brain" button/link (styled consistently with the existing cinematic design system) that navigates to the full G-Brain page (`/`). The hero-bridge section itself (the live mini team view) stays as-is — it's now framed as a preview of G-Brain, with this button being the obvious way to go see the full version.
@@ -41,7 +40,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-05 — Voice trigger redesign + fix the chat-page mic bug
 **Priority:** High
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-05" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-26. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-05" section.
 
 **Confirmed bug:** `app/chat/page.tsx` (~line 596) wires InputBar's `onVoiceToggle` to `() => router.push('/settings')` — the mic button next to the send button currently redirects to Settings instead of activating voice input.
 
