@@ -47,7 +47,7 @@
 
 ## M1-04 — Real n8n execution verification (no more fake success)
 **Priority:** Critical (trust)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-04" section. Also fixed two more real bugs found while verifying: a workflow-name parsing bug and a wrong execution-ID field name that was silently breaking the Workflows page's execution list.
 
 **Problem:** `lib/crew/n8n-action-handler.ts`'s `handleRun()` reports `success` based on the trigger's HTTP status only — it never confirms the workflow actually finished.
 

@@ -31,7 +31,10 @@ export interface N8nNode {
 }
 
 export interface N8nExecution {
-  executionId: string;
+  // n8n's real REST API returns `id`, not `executionId` — confirmed live
+  // (M1-04, 2026-08-26) against a running instance; this type had never
+  // round-tripped through one before and had the wrong field name.
+  id: string;
   finished: boolean;
   mode?: string;
   startedAt?: string;

@@ -363,7 +363,7 @@ function ExecutionsPanel({ addEvent, toast }: { addEvent: (e: { message: string;
             : null;
           return (
             <motion.div
-              key={e.executionId}
+              key={e.id}
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.03 }}
@@ -373,7 +373,7 @@ function ExecutionsPanel({ addEvent, toast }: { addEvent: (e: { message: string;
                 <div className="flex items-center gap-3">
                   <StatusIcon status={e.status} />
                   <div>
-                    <p className="font-data-point text-sm font-medium text-on-surface">Execution #{e.executionId}</p>
+                    <p className="font-data-point text-sm font-medium text-on-surface">Execution #{e.id}</p>
                     <p className="font-data-point text-xs text-on-surface-variant">
                       {e.mode ?? 'manual'} mode
                       {e.startedAt && ` · Started ${new Date(e.startedAt).toLocaleString()}`}

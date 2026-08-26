@@ -172,9 +172,10 @@ export async function listExecutions(
   config: N8nConfig,
   limit = 20,
   cursor?: string,
+  workflowId?: string,
 ): Promise<N8nExecutionList> {
   const res = await n8nRequest<{ data: N8nExecution[]; nextCursor?: string }>(config, EXEC_BASE, {
-    query: { limit, cursor },
+    query: { limit, cursor, workflowId },
   });
   return { data: res.data.data ?? [], nextCursor: res.data.nextCursor };
 }

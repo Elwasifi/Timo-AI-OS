@@ -4,7 +4,7 @@
 // n8n requests into structured actions, executes them, and returns a
 // human-readable summary for the agent to relay.
 
-import { n8n, N8nProxyError, type N8nWorkflow } from '@/services/n8n';
+import { n8n, N8nProxyError, type N8nWorkflow, type N8nExecution } from '@/services/n8n';
 import { logger } from '@/lib/utils/logger';
 
 export type N8nActionType =
@@ -55,8 +55,14 @@ export function parseN8nAction(input: string): ParsedAction {
 
   for (const { type, pattern } of ACTION_PATTERNS) {
     if (pattern.test(lower)) {
-      const nameMatch = input.match(/(?:workflow\s+(?:named|called|with name|id)\s+)?["']?([^"'\n]+?)["']?(?:\s+(?:workflow|now|please|$))/i);
-      const workflowName = nameMatch?.[1]?.trim();
+      // A quoted name is unambiguous — check it first. Without this, the
+      // fuzzy fallback regex below can be satisfied by the leading verb
+      // itself (e.g. "run workflow \"Daily Report\"" — the lazy capture
+      // group is satisfied by "run" the instant it hits the literal word
+      // "workflow" that follows it, never reaching the real quoted name).
+      const quotedMatch = input.match(/["']([^"'\n]+)["']/);
+      const nameMatch = quotedMatch ? null : input.match(/(?:workflow\s+(?:named|called|with name|id)\s+)?["']?([^"'\n]+?)["']?(?:\s+(?:workflow|now|please|$))/i);
+      const workflowName = quotedMatch?.[1]?.trim() ?? nameMatch?.[1]?.trim();
       const tagMatch = input.match(/\b(?:tag(?:ged)?|label(?:ed)?)\s+["']?([^"'\n]+?)["']?/i);
       return {
         type,
@@ -146,10 +152,42 @@ async function handleCreate(name: string): Promise<N8nActionResult> {
   return { action: 'create', success: true, summary: `Created workflow "${workflow.name}" (ID: ${workflow.id}).`, data: workflow };
 }
 
+// M1-04: the trigger's HTTP status only confirms the webhook was received,
+// not that the workflow actually finished (n8n's `onReceived` response mode
+// responds to the caller before execution completes). Poll the execution
+// history for the real terminal status instead of reporting the trigger's
+// HTTP 200 as "Done."
+const EXECUTION_POLL_INTERVAL_MS = 1500;
+const EXECUTION_POLL_TIMEOUT_MS = 20000;
+
+async function waitForExecutionResult(workflowId: string, triggeredAt: number): Promise<N8nExecution | null> {
+  const deadline = Date.now() + EXECUTION_POLL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const { data: executions } = await n8n.executions.listExecutions(5, undefined, workflowId);
+      const candidate = executions.find((e) => {
+        if (!e.startedAt) return false;
+        // A few seconds of slack for clock skew between this process and n8n.
+        return new Date(e.startedAt).getTime() >= triggeredAt - 5000;
+      });
+      if (candidate && (candidate.finished || candidate.status === 'error')) {
+        return candidate;
+      }
+    } catch {
+      // Transient poll failure — keep trying until the deadline; a real
+      // failure to ever confirm is handled by the timeout path below, not
+      // a single failed poll.
+    }
+    await new Promise((r) => setTimeout(r, EXECUTION_POLL_INTERVAL_MS));
+  }
+  return null;
+}
+
 async function handleRun(idOrName: string): Promise<N8nActionResult> {
   if (!idOrName) {
     return { action: 'run', success: false, summary: 'Please specify a workflow ID or name to run.' };
   }
+  const triggeredAt = Date.now();
   let result;
   if (/^\d+$/.test(idOrName)) {
     result = await n8n.executions.trigger(idOrName);
@@ -159,7 +197,33 @@ async function handleRun(idOrName: string): Promise<N8nActionResult> {
   if (result.message) {
     return { action: 'run', success: false, summary: result.message, data: result };
   }
-  return { action: 'run', success: result.httpStatus ? result.httpStatus < 400 : false, summary: `Triggered workflow "${result.workflowName}". Trigger: ${result.triggerType}. HTTP ${result.httpStatus ?? 'N/A'} in ${result.latencyMs}ms.`, data: result };
+  if (!result.httpStatus || result.httpStatus >= 400) {
+    return { action: 'run', success: false, summary: `Trigger request to "${result.workflowName}" failed (HTTP ${result.httpStatus ?? 'N/A'}).`, data: result };
+  }
+
+  const execution = await waitForExecutionResult(result.workflowId, triggeredAt);
+  if (!execution) {
+    return {
+      action: 'run',
+      success: false,
+      summary: `I triggered "${result.workflowName}" but couldn't confirm it finished within ${EXECUTION_POLL_TIMEOUT_MS / 1000}s — check n8n directly.`,
+      data: result,
+    };
+  }
+  if (execution.status === 'error') {
+    return {
+      action: 'run',
+      success: false,
+      summary: `Workflow "${result.workflowName}" ran but failed: ${execution.data?.resultData?.error?.message ?? 'unknown error'}.`,
+      data: { ...result, execution },
+    };
+  }
+  return {
+    action: 'run',
+    success: true,
+    summary: `Workflow "${result.workflowName}" completed successfully (execution ${execution.id}).`,
+    data: { ...result, execution },
+  };
 }
 
 async function handleActivate(idOrName: string): Promise<N8nActionResult> {

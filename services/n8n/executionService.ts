@@ -18,8 +18,8 @@ export const executionService = {
     return proxy<N8nExecution>({ action: 'get-execution', executionId });
   },
 
-  async listExecutions(limit = 20, cursor?: string): Promise<N8nExecutionList> {
-    return proxy<N8nExecutionList>({ action: 'list-executions', limit, cursor });
+  async listExecutions(limit = 20, cursor?: string, workflowId?: string): Promise<N8nExecutionList> {
+    return proxy<N8nExecutionList>({ action: 'list-executions', limit, cursor, workflowId });
   },
 
   async triggerWebhook(

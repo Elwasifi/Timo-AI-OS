@@ -103,7 +103,7 @@ async function dispatch(config: Parameters<typeof resolveCredentials> extends ne
       require(body.executionId, "executionId");
       return executionService.getExecution(config, body.executionId!);
     case "list-executions":
-      return executionService.listExecutions(config, body.limit, body.cursor);
+      return executionService.listExecutions(config, body.limit, body.cursor, body.workflowId);
 
     case "generate-webhook-url":
       require(body.webhookPath, "webhookPath");
