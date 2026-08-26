@@ -161,8 +161,11 @@ export async function triggerWorkflowByName(
 // ---- Execution history (read-only, still supported by n8n API) ----
 
 export async function getExecution(config: N8nConfig, executionId: string) {
-  const res = await n8nRequest<{ data: N8nExecution }>(config, `${EXEC_BASE}/${executionId}`);
-  return res.data.data;
+  // Single-resource endpoint — flat response, not wrapped in { data }. Same
+  // fix as workflowService.ts's single-resource functions (M1-01 addendum,
+  // 2026-08-26).
+  const res = await n8nRequest<N8nExecution>(config, `${EXEC_BASE}/${executionId}`);
+  return res.data;
 }
 
 export async function listExecutions(
