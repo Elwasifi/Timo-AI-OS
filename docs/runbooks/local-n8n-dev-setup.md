@@ -1,6 +1,6 @@
 # Local n8n + cloudflared dev setup
 
-> `docs/BACKLOG-M1.md` M1-08. Documentation only — no code changes. Written by inspecting the actual running Docker container and `cloudflared` process on Amro's machine (2026-08-26), not from memory or assumption — see each section for how it was captured.
+> `docs/BACKLOG-M1.md` M1-08. Documentation only — no code changes. Written by inspecting the actual running Docker container and `cloudflared` process on Amro's machine (2026-08-26), not from memory or assumption — see each section for how it was captured. Updated the same day with Claude Cowork's Milestone 1 review decision to move from a quick tunnel to a named tunnel (section 2) — that switch is documented but not yet executed, pending Amro's one required interactive step.
 
 ## Why this exists
 
@@ -38,19 +38,41 @@ The named volume (`n8n_data`) is what actually matters for not losing workflows 
 
 ## 2. Exposing it publicly (cloudflared)
 
-Confirmed via `Get-CimInstance Win32_Process` against the actual running process on 2026-08-26:
+**Decision (2026-08-26, Claude Cowork review of Milestone 1): use a named tunnel, not the quick tunnel this was originally set up with.** A stable hostname avoids reconfiguring `app_settings.n8n_url` (and re-validating the connection in Settings) every time `cloudflared` restarts — which the quick tunnel required, since it mints a brand-new random URL on every launch.
 
-```
-cloudflared tunnel --url http://localhost:5678
-```
+**Current state as of this decision**: still running the quick tunnel — `cloudflared tunnel --url http://localhost:5678`, confirmed via `Get-CimInstance Win32_Process` against the actual running process on 2026-08-26, currently exposing `https://jesse-coins-data-mounting.trycloudflare.com` (a `trycloudflare.com` domain, which only quick tunnels produce). The switch below has **not been executed yet** — step 1 requires Amro's own interactive Cloudflare login, which Claude Code cannot perform.
 
-This is a **quick tunnel** (no `--config`/named-tunnel flags) — cloudflared generates a random `https://<random-words>.trycloudflare.com` URL each time it starts, valid only for that process's lifetime. Confirmed by direct observation: the URL currently configured in `app_settings.n8n_url` is `https://jesse-coins-data-mounting.trycloudflare.com` — a `trycloudflare.com` domain, which only quick tunnels produce.
+### Named tunnel setup (one-time)
 
-**Run it** (leave the terminal window open, or run it as a background process — it must stay running for the tunnel to stay up):
-```
-cloudflared tunnel --url http://localhost:5678
-```
-Watch its output for a line like `https://<random-words>.trycloudflare.com` — that's the URL to configure in step 3.
+1. **Log in** (interactive — opens a browser, Amro authorizes the CLI against his own Cloudflare account):
+   ```
+   cloudflared tunnel login
+   ```
+   This writes a certificate to `~/.cloudflared/cert.pem`. Nothing after this step needs to be interactive again.
+
+2. **Create the tunnel** (once — this generates a stable Tunnel ID and a credentials JSON file under `~/.cloudflared/`):
+   ```
+   cloudflared tunnel create temo-n8n
+   ```
+   Note the Tunnel ID it prints. A named tunnel gets a stable `<tunnel-id>.cfargotunnel.com` address automatically — no custom domain/DNS registration required to use it, though one can be added later (`cloudflared tunnel route dns temo-n8n <hostname>`, if Amro wants a nicer custom hostname than the auto-generated one and has a domain on Cloudflare DNS to route it to).
+
+3. **Config file** (`~/.cloudflared/config.yml`), pointing the tunnel at the local n8n port:
+   ```yaml
+   tunnel: temo-n8n
+   credentials-file: <path cloudflared printed in step 2>
+   ingress:
+     - hostname: <the tunnel's assigned hostname, or a custom one from the optional DNS route above>
+       service: http://localhost:5678
+     - service: http_status:404
+   ```
+
+4. **Run it** (replaces the quick-tunnel command from here on):
+   ```
+   cloudflared tunnel run temo-n8n
+   ```
+   This is a long-running process — same as the quick tunnel, it needs to stay running for the tunnel to stay up, but unlike the quick tunnel, restarting it does **not** change the URL.
+
+**This procedure has not been run end-to-end in this environment** — it's the standard, documented `cloudflared` named-tunnel flow, written out precisely so step 1 (the one part only Amro can do) is unblocked; steps 2–4 can be completed by either Amro or Claude Code immediately after step 1 finishes, and this runbook should be updated with the actual resulting hostname once that happens.
 
 ## 3. Where the URL gets configured in TEMO
 
@@ -62,9 +84,9 @@ Watch its output for a line like `https://<random-words>.trycloudflare.com` — 
 
 ## 4. When the tunnel URL changes
 
-Because this is a quick tunnel, **the URL changes every time `cloudflared` is restarted** — after a reboot, a crash, or just closing the terminal it was running in. When that happens:
+**Until the named-tunnel switch (section 2) is actually carried out**, this environment is still running the quick tunnel, whose URL changes every time `cloudflared` is restarted — after a reboot, a crash, or just closing the terminal it was running in. When that happens:
 1. Restart `cloudflared tunnel --url http://localhost:5678` and note the new URL it prints.
 2. Update `n8n_url` in Settings (step 3) to the new URL.
 3. Click "Validate Connection" to confirm it's reachable again.
 
-**Open decision, not made here**: the ticket that requested this runbook explicitly asks whether to move to a **named tunnel** instead — a stable subdomain (e.g. `n8n-temo.yourdomain.com` or a `*.cfargotunnel.com` address) that doesn't change across restarts, at the cost of one-time setup (a Cloudflare account, `cloudflared tunnel login`, `cloudflared tunnel create <name>`, a DNS route, and a small config file instead of a bare `--url` flag). This is a real tradeoff — mostly-set-and-forget stability vs. an extra setup step that also ties the tunnel to a specific Cloudflare account/domain — and it's **Amro's call to make**, not something inferred from the current quick-tunnel setup. If a named tunnel is wanted, this runbook should be updated with the exact `cloudflared tunnel create`/config-file steps once that decision is made.
+**Once the named tunnel from section 2 is set up**, this entire section becomes unnecessary — `cloudflared tunnel run temo-n8n`'s hostname is stable across restarts, so `n8n_url` in Settings only needs to be set once, ever (barring deliberately recreating the tunnel). Update this section to remove the quick-tunnel steps once the switch is confirmed live.
