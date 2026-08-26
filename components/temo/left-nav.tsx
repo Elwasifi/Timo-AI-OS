@@ -17,7 +17,7 @@ export type NavItem = { path: string; icon: LucideIcon; label: string };
 // always-in-sync menu instead of two hand-maintained lists.
 export const NAV_ITEMS: NavItem[] = [
   { path: '/', icon: Network, label: 'G-Brain' },
-  { path: '/dashboard', icon: LayoutDashboard, label: 'Command Deck' },
+  { path: '/dashboard', icon: LayoutDashboard, label: 'Main Dashboard' },
   { path: '/chat', icon: MessageSquare, label: 'Chat' },
   { path: '/missions', icon: Workflow, label: 'Missions' },
   { path: '/agents', icon: Bot, label: 'Agents' },

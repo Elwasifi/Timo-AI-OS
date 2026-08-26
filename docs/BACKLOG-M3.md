@@ -24,7 +24,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-02 — Fast-first-response guarantee
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-02" section.
 
 **Acceptance criteria:**
 - A plain question (no tool/mission execution needed) gets a visible first response within a defined, tested budget — target under 5 seconds on a healthy provider — even though a multi-step mission naturally takes longer after that.
@@ -33,7 +33,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-04 — Rename Command Deck to Main Dashboard; fix the G-Brain mini-view link
 **Priority:** High
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-04" section. Landed in the same commit as M3-05 (both touch `components/temo/command-deck.tsx`).
 
 - Rename "Command Deck" to "Main Dashboard" everywhere it appears (page titles, `LeftNav.NAV_ITEMS`, any other UI string) — pure rename, no functional change beyond what's described below.
 - In `components/temo/command-deck.tsx` (~line 361-366), the hero-bridge section's caption block currently reads "LIVE COMMAND BRIDGE /// NEURAL SYNCHRONIZATION" — remove this text entirely. Replace it with a small, visually distinct "G-Brain" button/link (styled consistently with the existing cinematic design system) that navigates to the full G-Brain page (`/`). The hero-bridge section itself (the live mini team view) stays as-is — it's now framed as a preview of G-Brain, with this button being the obvious way to go see the full version.
@@ -41,7 +41,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-05 — Voice trigger redesign + fix the chat-page mic bug
 **Priority:** High
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-05" section.
 
 **Confirmed bug:** `app/chat/page.tsx` (~line 596) wires InputBar's `onVoiceToggle` to `() => router.push('/settings')` — the mic button next to the send button currently redirects to Settings instead of activating voice input.
 

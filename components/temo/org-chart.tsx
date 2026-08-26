@@ -459,7 +459,7 @@ export function OrgChart() {
         <div className="org-topbar-actions">
           <Link href="/dashboard" className="org-dash-link">
             <LayoutDashboard size={14} />
-            Command Deck
+            Main Dashboard
           </Link>
           <div className="org-live">
             <i />

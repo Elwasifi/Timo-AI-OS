@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback, memo } from 'react';
-import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Send,
@@ -77,10 +76,10 @@ function agentAnimationState(agentId: string): AgentAnimationState {
 }
 
 export default function ChatPage() {
-  const router = useRouter();
   const agents = useDashboardStore((s) => s.agents);
   const loadAgents = useDashboardStore((s) => s.loadAgents);
   const isMuted = useVoiceStore((s) => s.isMuted);
+  const isListening = useVoiceStore((s) => s.isListening);
   const activeAgentId = useVoiceStore((s) => s.activeAgentId);
   const setActiveAgent = useVoiceStore((s) => s.setActiveAgent);
 
@@ -353,6 +352,28 @@ export default function ChatPage() {
         stream: true,
         tenantId: useAuthStore.getState().currentTenantId ?? '00000000-0000-0000-0000-000000000001',
         isSimulation: simulationMode,
+        // M3-02: the mission pipeline has no other progress signal until it
+        // fully completes (unlike the simple pipeline, which already
+        // streams live timeline events) — post an immediate, real
+        // acknowledgment message as soon as we know a mission was picked,
+        // instead of leaving the user looking at just a typing indicator
+        // for however long the mission takes.
+        onDecision: (pipeline) => {
+          if (pipeline !== 'mission') return;
+          setMessages((m) => [
+            ...m,
+            {
+              id: `ack${Date.now()}`,
+              role: 'assistant',
+              content: "Got it — this needs a full mission, so I'm breaking it down and getting to work. I'll follow up here with the result.",
+              agentId: 'temo',
+              agentName: 'Temo',
+              agentColor: '#00E5FF',
+              agentIcon: 'Sparkles',
+              time: nowTime(),
+            },
+          ]);
+        },
       });
       const routing = result.routing;
       const response = result.response;
@@ -594,7 +615,17 @@ export default function ChatPage() {
           </div>
           <InputBar
             onSend={send}
-            onVoiceToggle={() => router.push('/settings')}
+            onVoiceToggle={() => {
+              // M3-05: this used to redirect to /settings instead of
+              // activating voice input — reuse the same VoiceManager
+              // start/stop toggle every other voice entry point in the
+              // app already uses (components/layout/voice-hud.tsx).
+              if (isListening) {
+                void voiceManager.stopListening();
+              } else {
+                void voiceManager.startListening();
+              }
+            }}
             isStreaming={isStreaming || isRouting}
             placeholder="Tell Temo what you need..."
             simulationMode={simulationMode}
@@ -761,7 +792,7 @@ const MessageBubble = memo(function MessageBubble({
           <span className="text-[10px] text-muted-foreground">{message.time}</span>
         </div>
         <div className="rounded-2xl glass text-foreground rounded-tl-sm px-4 py-2.5">
-          <Markdown content={message.content} />
+          {message.streaming && !message.content ? <TypingIndicator color={color} /> : <Markdown content={message.content} />}
         </div>
 
         {!message.streaming && message.content && (
@@ -777,6 +808,27 @@ const MessageBubble = memo(function MessageBubble({
     </motion.div>
   );
 });
+
+// M3-02: a streaming assistant bubble with no content yet previously
+// rendered as an empty box — visually indistinguishable from a frozen/
+// broken page. This gives the user an immediate, visible acknowledgment
+// the instant the bubble is created (0ms — no LLM round trip required),
+// which real content then replaces as soon as the first tokens arrive.
+function TypingIndicator({ color }: { color: string }) {
+  return (
+    <div className="flex items-center gap-1 py-0.5" aria-label="Temo is responding">
+      {[0, 1, 2].map((i) => (
+        <motion.span
+          key={i}
+          className="h-1.5 w-1.5 rounded-full"
+          style={{ backgroundColor: color }}
+          animate={{ opacity: [0.3, 1, 0.3] }}
+          transition={{ duration: 1.1, repeat: Infinity, delay: i * 0.15, ease: 'easeInOut' }}
+        />
+      ))}
+    </div>
+  );
+}
 
 const TimelineStrip = memo(function TimelineStrip({ events }: { events: TimelineEvent[] }) {
   const hasActive = events.some((e) => e.status === 'active');

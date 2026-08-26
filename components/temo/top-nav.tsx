@@ -13,7 +13,12 @@ import { cn } from '@/lib/utils';
 export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
-  const isDashboard = pathname === '/';
+  // M3-05: the G-Brain page ('/') never had a working voice control of its
+  // own, and Main Dashboard ('/dashboard') now has a dedicated mic trigger
+  // under the central Temo hologram (components/temo/command-deck.tsx) —
+  // suppress the top-bar VoiceHud on both so there's exactly one obvious
+  // voice entry point per page instead of two competing ones.
+  const isDashboard = pathname === '/' || pathname === '/dashboard';
   const setCommandOpen = useUIStore((s) => s.setCommandOpen);
   const health = useSystemStore((s) => s.health);
   const agents = useDashboardStore((s) => s.agents);

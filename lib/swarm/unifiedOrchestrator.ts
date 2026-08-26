@@ -25,7 +25,7 @@ import {
   type RuntimeState,
   type ExecutionState,
 } from './runtimeStore';
-import type { OrchestratorResult } from './executionTypes';
+import type { OrchestratorResult, PipelineType } from './executionTypes';
 import type { Mission } from './types';
 import type { RoutingResult, TaskRecord } from '@/types';
 
@@ -38,6 +38,19 @@ export interface OrchestrateOptions {
   isSimulation?: boolean;
   /** Dynamic Model Router: this turn originated from a voice interaction — biases model selection toward latency (see lib/ai/router/taskClassifier.ts's VOICE profile). */
   isVoice?: boolean;
+  /**
+   * M3-02: fires synchronously right after the Decision Engine classifies
+   * the request, before either pipeline actually runs. The mission
+   * pipeline (launchMission + executeMissionTasks) has no other way to
+   * signal the caller until the ENTIRE mission finishes — orchestrate()
+   * is a single await with no intermediate callback otherwise, unlike the
+   * simple pipeline which already streams live progress via
+   * CrewCoordinator's onTimeline/onActivity callbacks. Callers use this to
+   * show an immediate "received, working on it" acknowledgment for a
+   * mission request instead of leaving the user looking at a bare typing
+   * indicator for however long the mission takes.
+   */
+  onDecision?: (pipeline: PipelineType, reason: string) => void;
 }
 
 export interface OrchestrateResult extends OrchestratorResult {
@@ -250,6 +263,10 @@ export async function orchestrate(
   // 1. Decision Engine: classify the request
   const decision = makeDecision(userRequest);
   const now0 = new Date().toISOString();
+
+  // M3-02: notify the caller which pipeline was picked before running it —
+  // see OrchestrateOptions.onDecision for why this exists.
+  options.onDecision?.(decision.pipeline, decision.reason);
 
   // 2. Emit thinking event — Temo is analyzing the request
   await emitRuntimeEvent({

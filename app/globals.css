@@ -1022,8 +1022,13 @@ body { background: #020914; }
 
 
 /* ============ Dashboard additions ============ */
-.gbrain-link { display:inline-flex; align-items:center; gap:6px; border:1px solid rgba(103,232,249,.4); border-radius:8px; padding:6px 11px; color:#a5f3fc; font-size:10px; letter-spacing:.1em; text-transform:uppercase; background:rgba(34,211,238,.08); box-shadow:0 0 16px rgba(34,211,238,.15); transition:.2s; }
+.gbrain-link { display:inline-flex; align-items:center; gap:6px; border:1px solid rgba(103,232,249,.4); border-radius:8px; padding:6px 11px; color:#a5f3fc; font-size:10px; letter-spacing:.1em; text-transform:uppercase; background:rgba(34,211,238,.08); box-shadow:0 0 16px rgba(34,211,238,.15); transition:.2s; cursor:pointer; }
 .gbrain-link:hover { border-color:#67e8f9; background:rgba(34,211,238,.18); box-shadow:0 0 22px rgba(34,211,238,.35); }
+/* M3-04: the hero-bridge's live mini team view is now framed as a preview
+   of the full G-Brain page — this button replaces the old static
+   "LIVE COMMAND BRIDGE /// NEURAL SYNCHRONIZATION" caption in the exact
+   same top-left slot. */
+.hero-gbrain-link { position:absolute; top:14px; left:16px; z-index:2; }
 .network-node { background-position:center 22% !important; background-size:cover !important; border:1px solid var(--agent-color,#67e8f9) !important; box-shadow:0 0 12px var(--agent-color,#22d3ee); overflow:hidden; }
 .network-node.selected { box-shadow:0 0 22px var(--agent-color,#22d3ee), 0 0 0 2px var(--agent-color,#22d3ee) inset; transform:translate(-50%,-50%) scale(1.12); }
 .footer-agents button > span { background-position:center 20% !important; background-size:cover !important; border:1px solid var(--agent-color,#67e8f9); box-shadow:0 0 10px var(--agent-color,#22d3ee); }
