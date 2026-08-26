@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
-import { getTimeline } from '@/lib/swarm/missionService';
+import { getMission, getTimeline } from '@/lib/swarm/missionService';
 import { formatSSE, type StreamEvent } from '@/lib/api/realtime';
-import { requireUser } from '@/lib/auth/apiAuth';
+import { requireUser, isTenantMember } from '@/lib/auth/apiAuth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -35,6 +35,19 @@ export async function GET(req: NextRequest) {
       JSON.stringify({ error: 'missionId query parameter required' }),
       { status: 400, headers: { 'Content-Type': 'application/json' } },
     );
+  }
+
+  // M1-06: this route's missionService.ts client is service-role
+  // server-side (RLS is not a backstop) — without this check, any
+  // authenticated user could stream any tenant's mission timeline for up
+  // to 5 minutes by guessing/passing a missionId. Same pattern already
+  // applied to /api/missions/[id]/timeline (the non-streaming sibling).
+  const mission = await getMission(missionId);
+  if (!mission || !(await isTenantMember(user.id, mission.tenantId))) {
+    return new Response(JSON.stringify({ error: 'Mission not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
   const encoder = new TextEncoder();

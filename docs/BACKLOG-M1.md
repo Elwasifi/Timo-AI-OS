@@ -73,7 +73,7 @@
 
 ## M1-06 — `requireUser()` audit on remaining API routes
 **Priority:** High (security)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-06" section for the full classification table. **Needs an explicit decision from Amro, not a guess**: 16 routes serve global/aggregate operational data (dashboard stats, runtime state, the shared agent registry) with no tenant filtering — correct if these are meant as shared ops views (matching the agent registry's documented global-by-design model), wrong if they're meant to show a tenant only its own data. 2 real IDOR gaps (unrelated to that question) were found and fixed regardless.
 
 **Problem:** Per `docs/TEMO-ARCHITECTURE.md`, only the 4 agent-registry mutating routes got explicit `requireUser()` hardening during the V1 auth pass. Every other route touching tenant-scoped or sensitive data needs the same audit, since the shared Supabase client resolves to the service-role key server-side (RLS is not a backstop there).
 
