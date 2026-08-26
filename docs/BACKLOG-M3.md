@@ -69,7 +69,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-08 — Investigate the mission that stalled at 20%
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified against the real stalled mission from the user's own session. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-08" section for the full root-cause trace.
 
 A voice-triggered mission started, was correctly created and visible in the Missions page, progressed to 20%, then stopped with no further progress and no error surfaced anywhere.
 

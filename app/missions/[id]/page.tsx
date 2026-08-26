@@ -13,6 +13,26 @@ import type { Mission, MissionObjective, MissionTask, TimelineEntry } from '@/li
 
 const NON_TERMINAL_MISSION_STATUSES: Mission['status'][] = ['pending', 'planning', 'ready', 'executing', 'reviewing', 'paused'];
 
+// M3-08: missions execute synchronously in the browser tab that triggered
+// them (lib/swarm/unifiedOrchestrator.ts's runMissionPipeline) — there is
+// no server-side scheduler running in this environment to resume a task
+// left mid-execution if that tab closes/navigates away before the mission
+// finishes (docs/TEMO-ARCHITECTURE.md's "PARTIAL (V1)" task-queue entry;
+// claim_ready_tasks() already resets a 'running' task stuck past this same
+// 10-minute window back to 'ready', but nothing calls it without a
+// pg_cron schedule, which needs a deployed URL this local environment
+// doesn't have). A task frozen in 'running' this long, with no error and
+// no further log entries, is abandoned — the UI must say so rather than
+// showing a static progress bar with no explanation.
+const STALLED_TASK_THRESHOLD_MS = 10 * 60 * 1000;
+
+function isTaskStalled(task: MissionTask): boolean {
+  if (task.status !== 'running') return false;
+  const reference = task.startedAt ?? task.updatedAt;
+  if (!reference) return false;
+  return Date.now() - new Date(reference).getTime() > STALLED_TASK_THRESHOLD_MS;
+}
+
 interface FullMission {
   mission: Mission | null;
   objectives: MissionObjective[];
@@ -106,6 +126,7 @@ function MissionDetail({
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const canCancel = NON_TERMINAL_MISSION_STATUSES.includes(mission.status);
+  const stalledTasks = tasks.filter(isTaskStalled);
 
   const submitCancel = async () => {
     setCancelling(true);
@@ -167,6 +188,15 @@ function MissionDetail({
           </div>
         </div>
 
+        {stalledTasks.length > 0 && (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <p className="font-mono text-[11px] text-amber-200">
+              {stalledTasks.length === 1 ? 'A task hasn’t' : `${stalledTasks.length} tasks haven’t`} progressed in over 10 minutes — still in progress, waiting on task processing. This environment has no automatic background scheduler active, so an interrupted task won’t resume on its own; it will need to be reprocessed manually or the mission restarted.
+            </p>
+          </div>
+        )}
+
         <div className="mt-4">
           <ProgressBar value={mission.progress} color={accent} />
           <div className="mt-1 flex items-center justify-between font-mono text-[11px] text-temo-titanium">
@@ -190,12 +220,20 @@ function MissionDetail({
             {tasks.length === 0 && <p className="font-mono text-xs text-temo-titanium">No tasks yet.</p>}
             {tasks.map((t) => {
               const c = STATUS_COLOR[t.status] ?? '#94A3B8';
+              const stalled = isTaskStalled(t);
               return (
                 <div key={t.id} className="rounded-lg border border-white/[0.06] bg-white/[0.015] p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-sans text-sm text-temo-led">{t.title}</span>
-                    <span className="shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] uppercase" style={{ color: c, backgroundColor: `${c}15` }}>
-                      {t.status}
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      {stalled && (
+                        <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] uppercase text-amber-300">
+                          Stalled
+                        </span>
+                      )}
+                      <span className="rounded-full px-2 py-0.5 font-mono text-[10px] uppercase" style={{ color: c, backgroundColor: `${c}15` }}>
+                        {t.status}
+                      </span>
                     </span>
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 font-mono text-[10px] text-temo-titanium">
