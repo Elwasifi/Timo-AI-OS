@@ -82,7 +82,7 @@ A voice-triggered mission started, was correctly created and visible in the Miss
 
 ## M3-09 — Remove the old floating voice control from all remaining pages
 **Priority:** High
-**Status:** Open
+**Status:** Pushed for review — live-verified across every page. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-09" section.
 
 `top-nav.tsx`'s `VoiceHud` suppression only covers `/` and `/dashboard` (~line 19-20's `isDashboard` check). Every other page (`/chat`, `/missions`, `/agents`, `/settings`, etc.) still renders the old floating voice orb with its unlabeled sub-buttons — the exact control M3-05 was supposed to replace everywhere, not just on 2 pages.
 

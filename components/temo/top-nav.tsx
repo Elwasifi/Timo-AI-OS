@@ -1,24 +1,16 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { Search, Bell, Settings, Activity } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useSystemStore } from '@/stores/systemStore';
 import { useVoiceStore } from '@/stores/voiceStore';
-import { VoiceHud } from '@/components/layout/voice-hud';
 import { cn } from '@/lib/utils';
 
 export function TopNav() {
-  const pathname = usePathname();
   const router = useRouter();
-  // M3-05: the G-Brain page ('/') never had a working voice control of its
-  // own, and Main Dashboard ('/dashboard') now has a dedicated mic trigger
-  // under the central Temo hologram (components/temo/command-deck.tsx) —
-  // suppress the top-bar VoiceHud on both so there's exactly one obvious
-  // voice entry point per page instead of two competing ones.
-  const isDashboard = pathname === '/' || pathname === '/dashboard';
   const setCommandOpen = useUIStore((s) => s.setCommandOpen);
   const health = useSystemStore((s) => s.health);
   const agents = useDashboardStore((s) => s.agents);
@@ -103,9 +95,6 @@ export function TopNav() {
 
         {/* Time */}
         <span className="hidden font-mono text-[11px] text-temo-titanium lg:inline">{time}</span>
-
-        {/* Voice HUD — compact orb + popover controls (hidden on dashboard where ChatDock has mic) */}
-        {!isDashboard && <VoiceHud />}
       </div>
     </header>
   );
