@@ -16,7 +16,9 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { useRouter } from 'next/navigation';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useDashboardStore } from '@/stores/dashboardStore';
 import { voiceManager } from '@/lib/voice/voice-manager';
+import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { loadAgents, loadBusinessUnitsWithDepartments } from '@/lib/agents/agentRegistryService';
 import { listMissions } from '@/lib/swarm/missionService';
 import {
@@ -270,6 +272,18 @@ function VoiceTrigger() {
 export function CommandDeck() {
   const router = useRouter();
   const rightSidebarOpen = useUIStore((s) => s.rightSidebarOpen);
+  // M3-07: this page loads its own agent list into local component state
+  // (data.agents, below) via lib/agents/agentRegistryService's loadAgents()
+  // directly — it never populated the shared useDashboardStore. voiceManager
+  // reads its active agent from that shared store (lib/voice/voice-manager.ts's
+  // getActiveAgent()), so a user opening Main Dashboard as their first page
+  // (never visiting /chat, which does populate the store) hit "No agent
+  // selected" the moment they used the voice trigger. Populating the shared
+  // store here too — same action app/chat/page.tsx already calls — fixes
+  // voice regardless of which page loads first, without touching this
+  // page's own local-state rendering.
+  const loadDashboardAgents = useDashboardStore((s) => s.loadAgents);
+  const dashboardAgents = useDashboardStore((s) => s.agents);
   const [data, setData] = useState<Snapshot | null>(null);
   const [selected, setSelected] = useState<AgentUI | null>(null);
   const [activeNav, setActiveNav] = useState('Overview');
@@ -380,6 +394,21 @@ export function CommandDeck() {
     const route = NAV_ROUTES[label];
     if (route && route !== '/dashboard') router.push(route);
   };
+
+  useEffect(() => {
+    void loadDashboardAgents();
+  }, [loadDashboardAgents]);
+
+  // M3-07: crewCoordinator.registry (used to resolve the agent a routed
+  // response is generated for — see lib/crew/crew-coordinator.ts's
+  // generateResponse()) is only ever populated by whichever page happens
+  // to call crewCoordinator.init(agents) — previously only app/chat/page.tsx
+  // did. Main Dashboard never did, so a voice request made here with no
+  // prior /chat visit hit "No agent selected" the moment a response tried
+  // to generate. Mirrors app/chat/page.tsx's identical effect.
+  useEffect(() => {
+    crewCoordinator.init(dashboardAgents);
+  }, [dashboardAgents]);
 
   useEffect(() => {
     Promise.all([loadAgents(), listMissions(10)]).then(([records, missions]) => {

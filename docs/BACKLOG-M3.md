@@ -58,7 +58,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-07 — Fix "No agent selected" voice error on Main Dashboard
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-07" section.
 
 **Root cause found by direct code inspection**: `VoiceTrigger` (`components/temo/command-deck.tsx`, added in M3-05) calls `voiceManager`, whose `getActiveAgent()` (`lib/voice/voice-manager.ts` ~line 48-51) reads the agent list from the shared `useDashboardStore`. But `command-deck.tsx` loads its own agent list into local component state via `loadAgents()` imported directly from `lib/agents/agentRegistryService` (~line 385) — it never populates `useDashboardStore`. If a user opens Main Dashboard directly (without first visiting a page that populates that store, like `/chat`), `voiceManager` finds no agent for the default `activeAgentId` (`'temo'`) and `crew-coordinator.ts`'s `generateResponse()` throws "No agent selected" (confirmed at 3 call sites, ~lines 402/445/492) — spoken back via TTS, exactly what the user heard.
 
