@@ -29,7 +29,7 @@ import {
   getTimeline,
   getFullMission,
 } from '@/lib/swarm/missionService';
-import { getRuntimeState, getRuntimeActivity, type RuntimeActivityItem } from '@/lib/swarm/runtimeStore';
+import { getRuntimeState, getRuntimeStateForTenant, getRuntimeActivity, getRuntimeActivityForTenant, type RuntimeActivityItem } from '@/lib/swarm/runtimeStore';
 import { AGENT_DEFINITIONS, getManagers, getChief } from '@/lib/agents/definitions';
 import type { Mission, MissionTask, MissionObjective, TimelineEntry } from '@/lib/swarm/types';
 import type { AgentRecord } from '@/lib/agents/types';
@@ -142,8 +142,8 @@ export interface CurrentActiveMission {
 
 // ---- Mission Services ----
 
-export async function getMissionSummary(): Promise<MissionSummary> {
-  const missions = await listMissions(200);
+export async function getMissionSummary(tenantId?: string | null): Promise<MissionSummary> {
+  const missions = await listMissions(200, undefined, tenantId ?? undefined);
   const running = missions.filter((m) => m.status === 'executing').length;
   const completed = missions.filter((m) => m.status === 'completed').length;
   const failed = missions.filter((m) => m.status === 'failed').length;
@@ -156,16 +156,16 @@ export async function getMissionSummary(): Promise<MissionSummary> {
   return { total: missions.length, running, completed, failed, cancelled, paused, averageProgress: avgProgress };
 }
 
-export async function getRecentMissions(limit = 10): Promise<Mission[]> {
-  return listMissions(limit);
+export async function getRecentMissions(limit = 10, tenantId?: string | null): Promise<Mission[]> {
+  return listMissions(limit, undefined, tenantId ?? undefined);
 }
 
 export async function getMissionTimeline(missionId: string): Promise<TimelineEntry[]> {
   return getTimeline(missionId);
 }
 
-export async function getCurrentActiveMission(): Promise<CurrentActiveMission> {
-  const state = await getRuntimeState();
+export async function getCurrentActiveMission(tenantId?: string | null): Promise<CurrentActiveMission> {
+  const state = tenantId ? await getRuntimeStateForTenant(tenantId) : await getRuntimeState();
 
   if (!state.currentMissionId) {
     return { mission: null, objectives: [], tasks: [], timeline: [], progress: 0, executionState: state.executionState };
@@ -184,16 +184,25 @@ export async function getCurrentActiveMission(): Promise<CurrentActiveMission> {
 
 // ---- Task Queue Services ----
 
-export async function getTaskQueue(missionId?: string): Promise<MissionTask[]> {
-  if (missionId) return getTasks(missionId);
+// M2-01: a caller-supplied missionId must be verified as belonging to the
+// caller's own tenant before its tasks are returned — same IDOR class
+// already fixed for missions/[id]/timeline and stream/mission in M1-06.
+export async function getTaskQueue(missionId?: string, tenantId?: string | null): Promise<MissionTask[]> {
+  if (missionId) {
+    if (tenantId) {
+      const { data: mission } = await supabase.from('missions').select('id').eq('id', missionId).eq('tenant_id', tenantId).maybeSingle();
+      if (!mission) return [];
+    }
+    return getTasks(missionId);
+  }
 
-  const state = await getRuntimeState();
+  const state = tenantId ? await getRuntimeStateForTenant(tenantId) : await getRuntimeState();
   if (state.currentMissionId) return getTasks(state.currentMissionId);
   return [];
 }
 
-export async function getTaskQueueSummary(): Promise<TaskQueueSummary> {
-  const state = await getRuntimeState();
+export async function getTaskQueueSummary(tenantId?: string | null): Promise<TaskQueueSummary> {
+  const state = tenantId ? await getRuntimeStateForTenant(tenantId) : await getRuntimeState();
   let tasks: MissionTask[] = [];
   if (state.currentMissionId) tasks = await getTasks(state.currentMissionId);
 
@@ -243,8 +252,8 @@ function formatDepartmentName(id: string): string {
 
 // ---- Execution Statistics ----
 
-export async function getExecutionStats(): Promise<ExecutionStats> {
-  const missions = await listMissions(200);
+export async function getExecutionStats(tenantId?: string | null): Promise<ExecutionStats> {
+  const missions = await listMissions(200, undefined, tenantId ?? undefined);
   const allTasks: MissionTask[] = [];
   for (const m of missions) {
     const tasks = await getTasks(m.id);
@@ -284,13 +293,18 @@ export async function getExecutionStats(): Promise<ExecutionStats> {
 
 // ---- Provider Statistics ----
 
-export async function getProviderStats(): Promise<ProviderStats[]> {
+// Provider configuration (which providers are set up, which model, the
+// active one) is genuinely global today — a single shared app_settings
+// row, not per-tenant credentials — so that part is intentionally NOT
+// tenant-filtered (documented as global-by-design, M2-01). Usage counts
+// (usage_ledger has a real tenant_id) are filtered when tenantId is given.
+export async function getProviderStats(tenantId?: string | null): Promise<ProviderStats[]> {
   const { loadSettings, FALLBACK_ORDER, PROVIDER_KEY_FIELD, PROVIDER_MODEL_FIELD } =
     await import('@/lib/settings/settings-service');
 
   const settings = await loadSettings();
 
-  const providerUsage = await getProviderUsageFromLedger();
+  const providerUsage = await getProviderUsageFromLedger(tenantId);
 
   return FALLBACK_ORDER.map((id) => {
     const keyField = PROVIDER_KEY_FIELD[id] as keyof typeof settings;
@@ -314,11 +328,10 @@ export async function getProviderStats(): Promise<ProviderStats[]> {
 // mission_timeline's 'provider_selected' events, whose `metadata` is `{}`
 // today (the provider name only exists inside the event's `title` string,
 // e.g. "Provider: gemini", not as structured data usable for aggregation).
-async function getProviderUsageFromLedger(): Promise<Record<string, { count: number; avgLatencyMs: number | null }>> {
-  const { data } = await supabase
-    .from('usage_ledger')
-    .select('provider, latency_ms')
-    .limit(2000);
+async function getProviderUsageFromLedger(tenantId?: string | null): Promise<Record<string, { count: number; avgLatencyMs: number | null }>> {
+  let query = supabase.from('usage_ledger').select('provider, latency_ms').limit(2000);
+  if (tenantId) query = query.eq('tenant_id', tenantId);
+  const { data } = await query;
 
   const totals: Record<string, { count: number; latencySum: number; latencyCount: number }> = {};
   for (const row of (data ?? []) as Array<{ provider: string; latency_ms: number | null }>) {
@@ -376,10 +389,10 @@ export async function getWorkflowStats(): Promise<WorkflowStats> {
 
 // ---- Memory Statistics ----
 
-export async function getMemoryStats(): Promise<MemoryStats> {
+export async function getMemoryStats(tenantId?: string | null): Promise<MemoryStats> {
   const { memory } = await import('@/lib/memory/memoryService');
   try {
-    const stats = await memory.stats();
+    const stats = await memory.stats(tenantId);
     return {
       totalMemories: stats.total,
       byType: stats.byType,
@@ -462,8 +475,13 @@ export async function getToolUsageStats(): Promise<ToolUsageStats> {
 
 // ---- System Statistics ----
 
-export async function getSystemStats(): Promise<SystemStats> {
-  const missions = await listMissions(200);
+// totalMissions/totalTasks are tenant-scoped when tenantId is given.
+// totalAgents/activeManagers stay global — the agent registry is shared
+// workforce by design (CLAUDE.md), not per-tenant. lastActivity stays a
+// global heartbeat (a raw timestamp carries no tenant-identifying content
+// on its own, unlike the activity feed's titles/details).
+export async function getSystemStats(tenantId?: string | null): Promise<SystemStats> {
+  const missions = await listMissions(200, undefined, tenantId ?? undefined);
   let totalTasks = 0;
   for (const m of missions) {
     const tasks = await getTasks(m.id);
@@ -473,7 +491,7 @@ export async function getSystemStats(): Promise<SystemStats> {
   const agents = AGENT_DEFINITIONS.filter((a) => a.isActive);
   const managers = agents.filter((a) => a.level === 'manager');
 
-  const activity = await getRuntimeActivity(1);
+  const activity = tenantId ? await getRuntimeActivityForTenant(tenantId, 1) : await getRuntimeActivity(1);
   const lastActivity = activity.length > 0 ? activity[0].createdAt : null;
 
   return {
@@ -488,6 +506,6 @@ export async function getSystemStats(): Promise<SystemStats> {
 
 // ---- Runtime Activity Feed ----
 
-export async function getRecentActivity(limit = 30): Promise<RuntimeActivityItem[]> {
-  return getRuntimeActivity(limit);
+export async function getRecentActivity(limit = 30, tenantId?: string | null): Promise<RuntimeActivityItem[]> {
+  return tenantId ? getRuntimeActivityForTenant(tenantId, limit) : getRuntimeActivity(limit);
 }

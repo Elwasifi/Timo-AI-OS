@@ -233,7 +233,14 @@ export const memory = {
   },
 
   // ---- Stats ----
-  async stats(): Promise<{
+  // M2-01: total/byType are now real per-tenant numbers when tenantId is
+  // passed (memoryStore.list()/countByType() filter on memories.tenant_id).
+  // embeddings/links/events remain global raw counts — those tables have no
+  // tenant_id of their own (they key off memory_id, not memories directly),
+  // and a fully correct per-tenant count would need a join through
+  // memories; left as a known, documented partial limitation rather than
+  // silently claimed as scoped.
+  async stats(tenantId?: string | null): Promise<{
     total: number;
     byType: Record<string, number>;
     embeddings: number;
@@ -241,8 +248,8 @@ export const memory = {
     events: number;
   }> {
     const [memories, byType, embeddings, links, events] = await Promise.all([
-      memoryStore.list({ limit: 10000 }),
-      memoryStore.countByType(),
+      memoryStore.list({ limit: 10000, tenantId }),
+      memoryStore.countByType(tenantId),
       supabaseCount('memory_embeddings'),
       supabaseCount('memory_links'),
       supabaseCount('memory_events'),

@@ -1635,7 +1635,42 @@ Claude Cowork (Technical Manager) reviewed all 9 Milestone 1 commits on `milesto
 
 **Milestone 1 status**: all 9 tickets `Merged` in `docs/BACKLOG-M1.md`. Branch `milestone-1-reliability` merged to `main` the same day.
 
+## M2-01 — TENANT-SCOPE THE 16 GLOBALLY-SCOPED API ROUTES (2026-08-26)
+
+**Ticket**: `docs/BACKLOG-M2.md` M2-01. Branch: `milestone-2-beta-readiness`. Priority: Blocking (before any external beta user).
+
+**Method**: each of the 16 routes M1-06 left as "authenticated, not tenant-scoped" was traced to its actual data source, and given a definitive resolution — no route was left in the undecided middle M1-06 explicitly flagged. Two outcomes only: real tenant filtering added (where the underlying data genuinely belongs to one tenant), or documented as intentionally global (where it doesn't).
+
+**New shared helper**: `getCallerTenantId(userId, requestedTenantId?)` (`lib/auth/apiAuth.ts`) — resolves which tenant a dashboard-style route should scope to. An explicit `?tenantId=` is verified via `isTenantMember()` (403 if not a member); otherwise falls back to the caller's own membership (the common single-tenant-per-user case resolves cleanly; a user in zero or multiple tenants gets `null`, since guessing which one would be as wrong as showing them combined).
+
+### 8 routes — real tenant filtering added
+
+| Route | What changed |
+|---|---|
+| `missions/summary` | `listMissions()` already had an unused `tenantId` param (added in an earlier pass, never threaded through) — now actually passed from the caller's resolved tenant. |
+| `runtime/state` | New `getRuntimeStateForTenant()` (`lib/swarm/runtimeStore.ts`) — `runtime_state` is a literal global singleton row with no `tenant_id` column (predates V1), so mission-specific fields (`currentMissionId`, `missionProgress`, `timelineSummary`) are redacted when the current mission doesn't belong to the caller's tenant, via a lookup against `missions` (which is tenant-scoped) — a real fix without a schema migration. |
+| `runtime/activity` | New `getRuntimeActivityForTenant()` — `runtime_activity` also has no `tenant_id`; rows tied to a mission the caller doesn't own are filtered out via the same missions-lookup pattern. Rows with no `missionId` (generic system events) remain visible to everyone, since they carry no tenant-specific content. |
+| `tasks/active` | `getReadyTasks()` (`lib/swarm/missionService.ts`) — `mission_tasks` has no `tenant_id` of its own either; an inner join against `missions` scopes the result. |
+| `tasks/queue` | The `missionId`-provided case was already fixed in M1-06; the no-`missionId` (current-mission) case now goes through the same `getRuntimeStateForTenant()` redaction as `runtime/state`. |
+| `stats/dashboard` | `totalMissions`/`totalTasks` now tenant-scoped; `totalAgents`/`activeManagers` intentionally stay global (shared workforce, see below). |
+| `stats/memory` | `memoryStore.list()`/`countByType()` gained a `tenantId` filter (previously had none at all — the service-role client server-side made this a genuine cross-tenant leak of `total`/`byType`, not just an oversight). `embeddings`/`links`/`events` sub-counts remain global — those tables key off `memory_id`, not a direct `tenant_id`; a fully correct per-tenant count would need a join through `memories` and was judged disproportionate for this ticket. Documented in code, not silently left inconsistent. |
+| `stats/providers` | Usage counts (`usage_ledger` has real `tenant_id`) now tenant-scoped. Provider **configuration** (which providers are set up, active model) stays global — intentionally, see below. |
+
+**Live-verified**, real two-tenant tests against the running dev server: a throwaway second tenant never saw the internal tenant's mission ID, task ID, or memory ID across `missions/summary`/`runtime/state`/`runtime/activity`/`tasks/active`/`tasks/queue` (5/5 clean). Numeric counts confirmed to differ correctly: `stats/dashboard`'s `totalMissions` (22 for the internal tenant vs. 0 for the throwaway tenant), `stats/memory`'s `totalMemories` (11 vs. 0), `stats/providers`' `usageCount` for `gemini` (16 vs. 0). All test tenants/users/data deleted afterward.
+
+### 8 routes — documented as intentionally global, not filtered
+
+| Route | Why global |
+|---|---|
+| `agents/departments`, `agents/managers`, `agents/registry`, `agents/registry/[id]` | The shared agent registry — already explicitly documented in `CLAUDE.md` and this document as global-by-design ("shared workforce... never one physical agent per customer"). This ticket doesn't change that; it confirms it as the final, permanent answer rather than an implicit assumption. |
+| `runtime/health` | Aggregate infrastructure health only (provider-configured/not, raw counts of memories/facts/workflows, tool registry size) — no mission titles, no business content, nothing that identifies a specific tenant's data. Traced through `lib/dashboard/healthService.ts` line by line to confirm this before deciding, not assumed from the route name. |
+| `stats/knowledge` | `structured_facts` has no `tenant_id` column at all (confirmed by direct schema inspection) — extracted knowledge facts are a shared knowledge base today, architecturally, not per-tenant. Adding one would be a schema-level project disproportionate to this ticket; documented as the honest current state rather than half-fixed. |
+| `stats/tools` | The tool registry itself (which tools exist, their categories) is shared workforce infrastructure, same framing as the agent registry — Temo's tools are shared team capabilities, not a per-tenant private inventory. The execution-count sub-fields (`mission_timeline` events) *could* be tenant-filtered via a join, but doing that while leaving the registry listing global would be an inconsistent half-measure; kept coherently global for this pass. |
+| `stats/workflows` | `workflow_registry` has no `tenant_id` — n8n integration is currently account-wide (one shared n8n instance/credential set per `docs/runbooks/local-n8n-dev-setup.md`), not per-tenant, so a shared workflow catalog is the architecturally honest framing, not an oversight. |
+
+**Not touched**: `missions/[id]`, `missions/[id]/timeline`, `missions/[id]/cancel`, `stream/mission`, `tasks/queue` (missionId case), `settings/validate-provider` — already `PROPERLY-SCOPED` per M1-06.
+
 ## ARCHITECTURE DOCUMENT VERSION
-Version: 3.7
+Version: 3.8
 Date: 2026-08-26
-Status: **Milestone 1 (Reliability & Safety) complete and merged to `main`.** M1-01 through M1-09 all implemented and live-verified — tool execution inside missions, a real pre-spend budget gate, API rate limiting, verified (not assumed) n8n execution success, persistent chat conversations, an audited/hardened API surface (2 real IDOR fixes), a real automated test suite, a written n8n dev runbook, and the first Internal Operator Mode capability. Claude Cowork reviewed and approved the full branch; the three items explicitly left open during implementation were resolved (M1-02's budget figure stays as a provisional placeholder, M1-06's 16 global routes stay temporarily acceptable but are now `M2-01` — Blocking before any beta user, M1-08 moves to a named Cloudflare tunnel pending Amro's one required login step), plus a fourth gap the review itself surfaced (the primary chat path has no rate limiting at all, now `M2-02`). Predecessor milestone: the Dynamic Model Router (`lib/ai/router/`, 2026-08-20) sits between every real AI call site and `chatWithFallback`/`streamWithFallback` — see the "DYNAMIC MODEL ROUTER" section above for full detail. Full prior-version history remains in the dated sections above this footer, in order.
+Status: Milestone 1 complete and merged to `main`. Milestone 2 (Beta Readiness) underway on `milestone-2-beta-readiness`: **M2-01 done and live-verified** — all 16 routes M1-06 left undecided now have a definitive resolution (8 real tenant-filtering fixes, 8 documented as permanently global-by-design), closing the blocking item before any external beta user. Predecessor milestone: the Dynamic Model Router (`lib/ai/router/`, 2026-08-20) sits between every real AI call site and `chatWithFallback`/`streamWithFallback` — see the "DYNAMIC MODEL ROUTER" section above for full detail. Full prior-version history remains in the dated sections above this footer, in order.

@@ -133,6 +133,7 @@ export const memoryStore = {
     includeDeleted?: boolean;
     limit?: number;
     offset?: number;
+    tenantId?: string | null;
   }): Promise<MemoryRecord[]> {
     let q = supabase.from(TABLE).select('*');
     if (opts?.type) q = q.eq('type', opts.type);
@@ -140,6 +141,13 @@ export const memoryStore = {
     if (opts?.project) q = q.eq('project', opts.project);
     if (opts?.tags && opts.tags.length > 0) q = q.overlaps('tags', opts.tags);
     if (!opts?.includeDeleted) q = q.is('deleted_at', null);
+    // M2-01: list() had no tenant filter at all — the service-role client
+    // used server-side bypasses RLS, so this returned every tenant's
+    // memories combined for any caller. Explicit opt-in filter rather than
+    // a default, since some legitimate callers (the internal tool
+    // registry's own memory tools) intentionally want the caller's own
+    // scoping decision, not a silent one made here.
+    if (opts?.tenantId) q = q.eq('tenant_id', opts.tenantId);
     q = q.order('created_at', { ascending: false });
     if (opts?.limit) q = q.limit(opts.limit);
     if (opts?.offset) q = q.range(opts.offset, (opts.offset ?? 0) + (opts.limit ?? 50) - 1);
@@ -220,11 +228,10 @@ export const memoryStore = {
     }));
   },
 
-  async countByType(): Promise<Record<MemoryType, number>> {
-    const { data, error } = await supabase
-      .from(TABLE)
-      .select('type')
-      .is('deleted_at', null);
+  async countByType(tenantId?: string | null): Promise<Record<MemoryType, number>> {
+    let q = supabase.from(TABLE).select('type').is('deleted_at', null);
+    if (tenantId) q = q.eq('tenant_id', tenantId);
+    const { data, error } = await q;
     if (error) return { short_term: 0, long_term: 0, episodic: 0, semantic: 0 };
     const counts = { short_term: 0, long_term: 0, episodic: 0, semantic: 0 };
     for (const row of data as Array<{ type: MemoryType }>) {

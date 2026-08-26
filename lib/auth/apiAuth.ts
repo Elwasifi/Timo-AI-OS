@@ -63,3 +63,32 @@ export async function isTenantMember(userId: string, tenantId: string): Promise<
     .maybeSingle();
   return !!data;
 }
+
+/**
+ * Resolves which tenant a dashboard/stats-style route (M2-01) should scope
+ * its query to. If the caller explicitly names one (`?tenantId=`), it's
+ * verified via isTenantMember() and used — 403 if they don't belong to it.
+ * Otherwise falls back to the caller's own tenant membership: the common
+ * case (exactly one) resolves cleanly; a user who belongs to zero tenants
+ * gets null (nothing to scope to — caller should treat this as "no data");
+ * a user who belongs to more than one gets null too, since silently
+ * picking one for them would be as wrong as showing all of them combined —
+ * they must pass `?tenantId=` explicitly in that case.
+ */
+export async function getCallerTenantId(
+  userId: string,
+  requestedTenantId?: string | null,
+): Promise<{ tenantId: string | null; forbidden: boolean }> {
+  const { getServiceRoleClient } = await import('@/lib/supabase/serverClient');
+  const client = getServiceRoleClient();
+
+  if (requestedTenantId) {
+    const allowed = await isTenantMember(userId, requestedTenantId);
+    return allowed ? { tenantId: requestedTenantId, forbidden: false } : { tenantId: null, forbidden: true };
+  }
+
+  const { data } = await client.from('tenant_members').select('tenant_id').eq('user_id', userId);
+  const tenantIds = (data ?? []).map((r) => r.tenant_id as string);
+  if (tenantIds.length === 1) return { tenantId: tenantIds[0], forbidden: false };
+  return { tenantId: null, forbidden: false };
+}

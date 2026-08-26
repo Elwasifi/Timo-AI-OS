@@ -394,14 +394,29 @@ export async function getRecentTasksByManager(
   return (data as TaskRow[]).map(mapTask);
 }
 
-export async function getReadyTasks(): Promise<MissionTask[]> {
+// M2-01: mission_tasks has no tenant_id of its own — it links to
+// missions.tenant_id via mission_id, same pattern already used for this
+// table's RLS policies (mission_tasks_tenant_select, etc.). An inner join
+// filter scopes the result without a schema change.
+export async function getReadyTasks(tenantId?: string | null): Promise<MissionTask[]> {
+  if (tenantId) {
+    const { data, error } = await supabase
+      .from('mission_tasks')
+      .select('*, missions!inner(tenant_id)')
+      .eq('status', 'ready')
+      .eq('missions.tenant_id', tenantId)
+      .order('priority', { ascending: false })
+      .limit(20);
+    if (error || !data) return [];
+    return (data as unknown as TaskRow[]).map(mapTask);
+  }
+
   const { data, error } = await supabase
     .from('mission_tasks')
     .select('*')
     .eq('status', 'ready')
     .order('priority', { ascending: false })
     .limit(20);
-
   if (error || !data) return [];
   return (data as TaskRow[]).map(mapTask);
 }

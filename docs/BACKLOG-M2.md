@@ -1,13 +1,13 @@
-# Milestone 2 — Backlog (seed)
+# Milestone 2 — Beta Readiness Backlog
 
 > Owner: Claude Cowork (Technical Manager). Implemented by: Claude Code (local). Status values: `Open` → `In Progress` → `Pushed for Review` → `Reviewed — ready to merge` → `Merged`.
-> **This file is a seed, not the full Milestone 2 scope.** It holds only the two items Claude Cowork's review of Milestone 1 (2026-08-26) surfaced as needing to be tracked. The complete Milestone 2 backlog will be added separately by Claude Cowork — do not start implementation work here until that arrives.
+> **Confirmed by Claude Cowork (2026-08-26) as the final scope for Milestone 2** — short and focused on reaching a private beta, not a features milestone. M2-03 (named Cloudflare tunnel cutover) is an owner action tracked separately, not something Claude Code implements; it completes once Amro runs `cloudflared tunnel login` (see `docs/runbooks/local-n8n-dev-setup.md`).
 
 ---
 
 ## M2-01 — Tenant-scope the 16 globally-scoped API routes
 **Priority:** Blocking (must close before any external beta user, even one)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-2-beta-readiness` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M2-01" section for the full per-route table. 8 routes got real tenant filtering (including redacting `runtime_state`/`runtime_activity`'s mission-linked content without a schema migration), 8 documented as permanently global-by-design (matching the agent registry precedent, or because the underlying table genuinely has no `tenant_id`).
 
 **Problem:** M1-06's audit (`docs/TEMO-ARCHITECTURE.md`'s dated "M1-06" section) found 16 `app/api/**` routes that call `requireUser()` (so *some* auth is present) but return global/aggregate data with no tenant filtering anywhere in the underlying service functions (`lib/dashboard/dashboardService.ts`, `lib/dashboard/healthService.ts`, `lib/swarm/runtimeStore.ts`, `lib/agents/agentRegistryService.ts`): `missions/summary`, `runtime/activity`, `runtime/health`, `runtime/state`, `stats/dashboard`, `stats/knowledge`, `stats/memory`, `stats/providers`, `stats/tools`, `stats/workflows`, `tasks/active`, `tasks/queue` (no-`missionId` case), `agents/departments`, `agents/managers`, `agents/registry`, `agents/registry/[id]`.
 
