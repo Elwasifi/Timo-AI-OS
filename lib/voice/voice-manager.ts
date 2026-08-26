@@ -10,7 +10,7 @@ import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { orchestrate } from '@/lib/swarm';
 import { useAuthStore } from '@/stores/authStore';
 import { logger } from '@/lib/utils/logger';
-import type { VoiceSettings, Agent } from '@/types';
+import type { VoiceSettings } from '@/types';
 
 export type ReplyHandler = (response: string, transcript: string) => void;
 
@@ -44,11 +44,6 @@ export class VoiceManager {
 
   getAvailableVoices(): SpeechSynthesisVoice[] {
     return this.player.getVoices();
-  }
-
-  private getActiveAgent(): Agent | undefined {
-    const agentId = useVoiceStore.getState().activeAgentId;
-    return useDashboardStore.getState().agents.find((a) => a.id === agentId);
   }
 
   async connect(): Promise<void> {
@@ -312,20 +307,25 @@ export class VoiceManager {
 
     const spokenText = cleanForSpeech(text);
 
-    const agent = this.getActiveAgent();
-    const voiceConfig = agent?.voice;
-
-    logger.voiceDebug(`Speaking: "${spokenText.slice(0, 50)}"`, { voice: voiceConfig?.voiceName });
+    // M3-11: real DB-backed agents (agentRecordToRuntimeAgent()) all carried
+    // the identical placeholder voice config { voiceName: 'Default', lang:
+    // 'en-US', ... } — there is no real per-agent voice differentiation in
+    // the live path today. Preferring that config here silently ignored the
+    // user's own Settings → Voice selection on every real interaction (it
+    // was "stored and ignored", confirmed live). store.settings always has
+    // a real value (initialized to DEFAULT_SETTINGS, updated by Settings →
+    // Voice), so the user's explicit choice is used directly.
+    logger.voiceDebug(`Speaking: "${spokenText.slice(0, 50)}"`, { voice: store.settings.selectedVoice });
 
     store.startSpeaking();
 
     return new Promise((resolve) => {
       this.player.speak({
         text: spokenText,
-        voiceName: voiceConfig?.voiceName ?? store.settings.selectedVoice,
-        lang: voiceConfig?.lang ?? store.settings.language,
-        rate: voiceConfig?.rate ?? store.settings.speed,
-        pitch: voiceConfig?.pitch ?? store.settings.pitch,
+        voiceName: store.settings.selectedVoice,
+        lang: store.settings.language,
+        rate: store.settings.speed,
+        pitch: store.settings.pitch,
         volume: store.settings.volume,
         onEnd: () => {
           store.stopSpeaking();

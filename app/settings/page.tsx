@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { User, Bell, Shield, Palette, Volume2, Sparkles, Check, Loader2, Eye, EyeOff, Save, Workflow, Wifi, AlertCircle, Brain, Users, UserPlus, Trash2, Pencil, Globe, ShieldAlert, X as XIcon, CheckCircle2, XCircle, AlertTriangle, Clock, Settings as SettingsIcon } from 'lucide-react';
+import { User, Bell, Shield, Palette, Volume2, Sparkles, Check, Loader2, Eye, EyeOff, Save, Workflow, Wifi, AlertCircle, Brain, Users, UserPlus, Trash2, Pencil, Globe, ShieldAlert, X as XIcon, CheckCircle2, XCircle, AlertTriangle, Clock, Settings as SettingsIcon, Play } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useVoiceStore } from '@/stores/voiceStore';
@@ -1482,6 +1482,7 @@ function VoiceSection() {
   const isMuted = useVoiceStore((s) => s.isMuted);
   const toggleMuted = useVoiceStore((s) => s.toggleMuted);
   const [voices, setVoices] = useState<string[]>([]);
+  const [previewing, setPreviewing] = useState(false);
 
   useEffect(() => {
     const load = () => {
@@ -1512,23 +1513,50 @@ function VoiceSection() {
     { value: 'zh-CN', label: 'Chinese' },
   ];
 
+  const previewVoice = async () => {
+    setPreviewing(true);
+    try {
+      await voiceManager.speak("Hi, this is a preview of my voice.");
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   return (
     <div>
       <h2 className="font-grotesk text-lg font-semibold">Voice</h2>
       <p className="mt-1 text-sm text-muted-foreground">Configure the voice pipeline</p>
       <div className="mt-4 space-y-1">
+        {/* M3-11: this app's actual TTS/STT implementation is the browser's
+            free Web Speech API (services/voiceService.ts) — "Gemini Live
+            API" was never real, a fabricated-looking option this project's
+            own principles explicitly reject (CLAUDE.md rule 7). */}
         <SelectRow
           label="Engine"
-          value="Gemini Live API"
-          options={['Gemini Live API']}
+          value="Web Speech API (Browser)"
+          options={['Web Speech API (Browser)']}
           onChange={() => {}}
         />
-        <SelectRow
-          label="Voice"
-          value={settings.selectedVoice}
-          options={voices}
-          onChange={(v) => updateSettings({ selectedVoice: v })}
-        />
+        <div className="flex items-center gap-2">
+          <div className="flex-1">
+            <SelectRow
+              label="Voice"
+              value={settings.selectedVoice}
+              options={voices}
+              onChange={(v) => updateSettings({ selectedVoice: v })}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={previewVoice}
+            disabled={previewing}
+            title="Preview the selected voice"
+            className="flex h-8 items-center gap-1.5 rounded-lg border border-border/60 px-3 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:opacity-50"
+          >
+            {previewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            {previewing ? 'Playing…' : 'Test'}
+          </button>
+        </div>
         <SelectRow
           label="Language"
           value={langs.find((l) => l.value === settings.language)?.label ?? 'English (US)'}

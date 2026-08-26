@@ -104,7 +104,7 @@ The chat page's mic button (fixed in M3-05 to actually start/stop listening) has
 
 ## M3-11 — Fix Settings → Voice page to reflect the real engine
 **Priority:** Medium
-**Status:** Open
+**Status:** Pushed for review — live-verified end-to-end (Settings → real chat voice interaction). See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-11" section.
 
 The Voice settings page currently shows "Engine: Gemini Live API" (single fixed option) and "Voice: Microsoft David - English (United States)" — neither reflects the actual implementation, which is the browser's free Web Speech API (`services/voiceService.ts`). This is exactly the kind of fabricated-looking UI this project's own principles explicitly reject (CLAUDE.md rule 7: "never introduce mock/placeholder implementations disguised as real functionality").
 
