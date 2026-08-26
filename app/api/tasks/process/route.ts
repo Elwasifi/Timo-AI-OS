@@ -3,7 +3,8 @@ import { getServiceRoleClient } from '@/lib/supabase/serverClient';
 import { getMission, getObjectives, updateTask } from '@/lib/swarm/missionService';
 import { executeTask } from '@/lib/swarm/executionLayer';
 import { recalculateProgress } from '@/lib/swarm/missionEngine';
-import { ok, internalError, fail } from '@/lib/api/response';
+import { ok, internalError, fail, rateLimited } from '@/lib/api/response';
+import { checkRateLimit, getClientIp } from '@/lib/api/rateLimit';
 import type { MissionTask } from '@/lib/swarm/types';
 
 export const runtime = 'nodejs';
@@ -39,6 +40,16 @@ export async function POST(req: Request) {
   // an unauthenticated pass — this route runs with service-role privileges.
   if (!QUEUE_SECRET || req.headers.get('x-queue-secret') !== QUEUE_SECRET) {
     return NextResponse.json(fail('UNAUTHORIZED', 'Invalid queue secret', start), { status: 401 });
+  }
+
+  // M1-03: this route executes real tasks (AI calls + tool execution) —
+  // rate-limited per calling IP. There's no per-tenant caller here (one
+  // invocation can process tasks across many tenants), so IP is the only
+  // meaningful bucket key. Sized for a legitimate scheduler polling every
+  // few seconds, not for hammering.
+  const ipLimit = await checkRateLimit(`tasks-process:ip:${getClientIp(req)}`, { maxTokens: 12, refillPerSec: 1 / 5 });
+  if (!ipLimit.allowed) {
+    return NextResponse.json(rateLimited(start, ipLimit.resetSeconds), { status: 429 });
   }
 
   try {

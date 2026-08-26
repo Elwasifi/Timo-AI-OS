@@ -36,7 +36,7 @@
 
 ## M1-03 — Rate limiting on public API routes
 **Priority:** Critical (abuse/cost risk, prerequisite for any external user)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-03" section. Scoping note: only 2 of 23 `app/api/**` routes actually trigger an AI call or tool execution (confirmed by grep) — the primary chat/mission path runs client-side, not through an API route.
 
 **Acceptance criteria:**
 - Every route under `app/api/**` that can trigger an AI call or a tool execution has a per-tenant and per-IP rate limit (a simple token-bucket in Postgres or Supabase is enough for V1 — no new infrastructure dependency required).

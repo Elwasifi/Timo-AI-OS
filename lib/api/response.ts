@@ -77,3 +77,12 @@ export function notFound(message: string, startTime: number): ApiError {
 export function internalError(message: string, startTime: number, details?: unknown): ApiError {
   return fail('INTERNAL_ERROR', message, startTime, details);
 }
+
+export function rateLimited(startTime: number, resetSeconds: number): ApiError {
+  return fail(
+    'RATE_LIMITED',
+    `Too many requests. Try again in ${Math.max(1, Math.ceil(resetSeconds))}s.`,
+    startTime,
+    { resetSeconds },
+  );
+}

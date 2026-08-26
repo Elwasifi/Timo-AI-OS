@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireUser } from '@/lib/auth/apiAuth';
-import { fail, ok } from '@/lib/api/response';
+import { fail, ok, rateLimited } from '@/lib/api/response';
+import { checkRateLimit, getClientIp } from '@/lib/api/rateLimit';
 import type { ProviderId } from '@/lib/settings/settings-service';
 
 export const runtime = 'nodejs';
@@ -37,6 +38,18 @@ export async function POST(req: NextRequest) {
     const user = await requireUser(req);
     if (!user) {
       return NextResponse.json(fail('UNAUTHORIZED', 'Sign in required', start), { status: 401 });
+    }
+
+    // M1-03: this route calls a real provider through the ai-chat edge
+    // function — rate-limited per user and per IP so it can't be used to
+    // hammer a provider's API (or run up cost/quota) via repeated calls.
+    const userLimit = await checkRateLimit(`validate-provider:user:${user.id}`, { maxTokens: 10, refillPerSec: 10 / 60 });
+    if (!userLimit.allowed) {
+      return NextResponse.json(rateLimited(start, userLimit.resetSeconds), { status: 429 });
+    }
+    const ipLimit = await checkRateLimit(`validate-provider:ip:${getClientIp(req)}`, { maxTokens: 20, refillPerSec: 20 / 60 });
+    if (!ipLimit.allowed) {
+      return NextResponse.json(rateLimited(start, ipLimit.resetSeconds), { status: 429 });
     }
 
     const body = await req.json().catch(() => null) as ValidateBody | null;
