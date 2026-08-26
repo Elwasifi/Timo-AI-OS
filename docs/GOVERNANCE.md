@@ -21,12 +21,20 @@
 
 ## 2. Branching model
 
-- **`main`** — stable, matches what's actually deployed/deployable. Nothing is pushed here directly; only fast-forward merges from a verified task branch.
-- **`local-review`** — mirror of Amro's current local working copy, pushed manually whenever a meaningful snapshot needs review. Not a long-term branch to build on top of directly once task branches exist.
-- **`task/<ticket-id>-<short-name>`** — one branch per backlog ticket (e.g. `task/M1-01-tool-execution-in-missions`). Created locally by Claude Code off the latest reviewed base, pushed to GitHub when the ticket's acceptance criteria are met and verified live.
-- **`docs/<topic>`** — documentation-only branches (like this one), for governance/backlog/runbook changes that don't touch application code.
+**Revised 2026-08-26** (superseding the original per-ticket-branch draft below, per Amro's explicit preference): all of a milestone's work happens on a single long-lived milestone branch, checked out locally the entire time, so the local working copy and the GitHub branch are always the same tree. `main` is only touched once, at the end, when the whole milestone is verified.
 
-**Merge rule:** a task branch is only merged into `main` after: (1) `npx tsc --noEmit` and `next lint` pass, (2) the ticket's acceptance criteria are live-verified (not typecheck-only — this project's own established standard), (3) `docs/TEMO-ARCHITECTURE.md` is updated with a dated section, and (4) Claude Cowork has reviewed the diff on GitHub and marked the ticket "Reviewed" in `docs/BACKLOG-M1.md`.
+- **`main`** — stable, matches what's actually deployed/deployable. Nothing is pushed here directly; only merged in from a fully-verified milestone branch.
+- **`local-review`** — the original one-off snapshot branch used for the initial architecture review. No longer actively built on.
+- **`milestone-1-reliability`** (current) — the active branch for the whole of Milestone 1 (`docs/BACKLOG-M1.md`, tickets M1-01 through M1-09). Checked out locally for the full duration of the milestone. **One commit per ticket** (message prefixed `[M1-0x]`), pushed to `origin/milestone-1-reliability` as soon as each ticket is done and live-verified — not batched to the end — so Claude Cowork can review incrementally even though the merge into `main` itself happens only once, after the last ticket. Future milestones follow the same pattern (`milestone-2-<name>`, etc.).
+- **`docs/<topic>`** — documentation-only branches, for governance/backlog/runbook changes made outside an active milestone branch.
+
+**Merge-to-main rule (end of milestone):** the milestone branch merges into `main` only after: (1) `npx tsc --noEmit` and `next lint` pass on the final state, (2) every ticket's acceptance criteria has been live-verified (not typecheck-only), (3) `docs/TEMO-ARCHITECTURE.md` carries a dated section per completed ticket, and (4) Claude Cowork has reviewed every pushed commit on the branch and marked all tickets "Reviewed" in `docs/BACKLOG-M1.md`.
+
+<details><summary>Original per-ticket-branch model (superseded, kept for reference)</summary>
+
+- **`task/<ticket-id>-<short-name>`** — one branch per backlog ticket (e.g. `task/M1-01-tool-execution-in-missions`), merged into `main` individually as each ticket completes. Replaced by the single-milestone-branch model above because it added review overhead without a corresponding safety benefit at this project's current scale.
+
+</details>
 
 ---
 
