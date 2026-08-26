@@ -17,6 +17,10 @@ interface VoiceStoreState {
   orbState: OrbState;
   settings: VoiceSettings;
   sessionId: string | null;
+  /** M3-10: last voice-flow error (recognition failure, empty transcript,
+   * AI call failure) — surfaced by UI voice controls instead of only
+   * logging to console. Cleared automatically on the next startListening(). */
+  lastError: string | null;
 
   startListening: () => void;
   stopListening: () => void;
@@ -37,6 +41,7 @@ interface VoiceStoreState {
   updateSettings: (partial: Partial<VoiceSettings>) => void;
   setSelectedVoice: (v: string) => void;
   setLanguage: (l: VoiceLanguage) => void;
+  setError: (message: string | null) => void;
   reset: () => void;
 }
 
@@ -79,6 +84,7 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => ({
   orbState: 'idle',
   settings: DEFAULT_SETTINGS,
   sessionId: null,
+  lastError: null,
 
   startListening: () =>
     set((s) => ({
@@ -87,6 +93,7 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => ({
       isThinking: false,
       transcript: '',
       interimTranscript: '',
+      lastError: null,
       orbState: deriveOrb(s.isConnected, true, false, false),
     })),
 
@@ -143,6 +150,8 @@ export const useVoiceStore = create<VoiceStoreState>((set, get) => ({
 
   setLanguage: (language) =>
     set((s) => ({ settings: { ...s.settings, language } })),
+
+  setError: (message) => set({ lastError: message }),
 
   reset: () =>
     set({

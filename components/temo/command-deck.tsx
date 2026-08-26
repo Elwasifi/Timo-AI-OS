@@ -5,7 +5,6 @@ import {
   Activity,
   Bot,
   LayoutDashboard,
-  Mic,
   Network,
   Plus,
   ShieldCheck,
@@ -13,12 +12,11 @@ import {
   Workflow,
   X,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { useRouter } from 'next/navigation';
-import { useVoiceStore } from '@/stores/voiceStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
-import { voiceManager } from '@/lib/voice/voice-manager';
 import { crewCoordinator } from '@/lib/crew/crew-coordinator';
+import { VoiceTrigger } from './voice-trigger';
 import { loadAgents, loadBusinessUnitsWithDepartments } from '@/lib/agents/agentRegistryService';
 import { listMissions } from '@/lib/swarm/missionService';
 import {
@@ -161,111 +159,6 @@ function QuickAccessWidget({ router }: { router: ReturnType<typeof useRouter> })
         })}
       </div>
     </Panel>
-  );
-}
-
-// M3-05: replaces the old "Tap to Speak" control (a static kicker label
-// with no real interaction on this page) with a single clean mic button
-// positioned directly under Temo. Clicking it transforms the button into a
-// recording-bar with listening-state lighting/motion, reusing this app's
-// own established cyan/glow visual language (same color the central
-// hologram and hero-bridge lines already use) rather than a copied look.
-// Wires the same VoiceManager start/stop machinery every other voice entry
-// point in the app uses (components/layout/voice-hud.tsx) — purely a
-// trigger/visual change, the underlying Web Speech API engine is untouched.
-function VoiceTrigger() {
-  const isListening = useVoiceStore((s) => s.isListening);
-  const isThinking = useVoiceStore((s) => s.isThinking);
-  const isSpeaking = useVoiceStore((s) => s.isSpeaking);
-  const transcript = useVoiceStore((s) => s.transcript);
-  const interimTranscript = useVoiceStore((s) => s.interimTranscript);
-  const isActive = isListening || isThinking || isSpeaking;
-
-  const toggle = useCallback(() => {
-    if (isListening) {
-      void voiceManager.stopListening();
-    } else {
-      void voiceManager.startListening();
-    }
-  }, [isListening]);
-
-  const statusLabel = isListening ? 'Listening…' : isThinking ? 'Processing…' : isSpeaking ? 'Speaking…' : 'Tap to speak';
-  const displayText = transcript || interimTranscript;
-
-  return (
-    // Anchored to the same slot as the "holo-core" badge directly beneath
-    // Temo's avatar (a 52px circle, replaces its static Sparkles icon)
-    // instead of adding new vertical space to the already-compact hero
-    // preview stack — idle state keeps the exact footprint the old badge
-    // had; only the active/expanded recording bar grows outward from it,
-    // via position:absolute, without pushing the TEMO label or the agent
-    // row below it.
-    <div className="relative z-20 flex h-[52px] w-[52px] items-center justify-center">
-    <AnimatePresence mode="wait" initial={false}>
-      {!isActive ? (
-        <motion.button
-          key="collapsed"
-          type="button"
-          onClick={toggle}
-          initial={{ opacity: 0, scale: 0.9 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.9 }}
-          transition={{ duration: 0.2 }}
-          aria-label="Start voice input"
-          className="flex h-full w-full items-center justify-center rounded-full border border-temo-cyan/50 bg-temo-cyan/[0.08] text-temo-cyan shadow-[0_0_16px_rgba(0,243,255,0.22)] transition-all hover:border-temo-cyan/70 hover:bg-temo-cyan/[0.14] hover:shadow-[0_0_24px_rgba(0,243,255,0.35)]"
-        >
-          <Mic className="h-[18px] w-[18px]" />
-        </motion.button>
-      ) : (
-        <motion.div
-          key="expanded"
-          initial={{ opacity: 0, scale: 0.92, width: 52 }}
-          animate={{ opacity: 1, scale: 1, width: 280 }}
-          exit={{ opacity: 0, scale: 0.92, width: 52 }}
-          transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-          className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-2.5 rounded-full border border-temo-cyan/50 bg-[rgba(8,16,28,0.92)] px-3 py-2 shadow-[0_0_28px_rgba(0,243,255,0.28)] backdrop-blur-xl"
-        >
-          <button
-            type="button"
-            onClick={toggle}
-            aria-label="Stop voice input"
-            className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-temo-cyan/15 text-temo-cyan"
-          >
-            {isListening && (
-              <motion.span
-                className="absolute inset-0 rounded-full border border-temo-cyan/60"
-                animate={{ scale: [1, 1.6], opacity: [0.6, 0] }}
-                transition={{ duration: 1.4, repeat: Infinity, ease: 'easeOut' }}
-              />
-            )}
-            <Mic className="h-3.5 w-3.5" />
-          </button>
-
-          {/* Listening-state waveform */}
-          <div className="flex h-5 shrink-0 items-center gap-0.5">
-            {[0, 1, 2, 3, 4].map((i) => (
-              <motion.span
-                key={i}
-                className="w-0.5 rounded-full bg-temo-cyan"
-                animate={
-                  isListening
-                    ? { height: [4, 16, 6, 20, 4] }
-                    : isThinking
-                      ? { height: [6, 10, 6] }
-                      : { height: 10 }
-                }
-                transition={{ duration: 0.9, repeat: Infinity, delay: i * 0.08, ease: 'easeInOut' }}
-              />
-            ))}
-          </div>
-
-          <span className="min-w-0 flex-1 truncate text-[11px] text-temo-led/90">
-            {displayText || statusLabel}
-          </span>
-        </motion.div>
-      )}
-    </AnimatePresence>
-    </div>
   );
 }
 

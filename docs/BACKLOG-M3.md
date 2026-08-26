@@ -93,7 +93,7 @@ A voice-triggered mission started, was correctly created and visible in the Miss
 
 ## M3-10 — Bring Chat page's voice mic to visual parity with Main Dashboard
 **Priority:** High
-**Status:** Open
+**Status:** Pushed for review — live-verified (listening state, waveform, real answer, and error state). See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-10" section.
 
 The chat page's mic button (fixed in M3-05 to actually start/stop listening) has no visual feedback at all — no listening indicator, no waveform, no sign it heard anything, and the user reported it sometimes produces no response with no explanation. Main Dashboard's `VoiceTrigger` component already has the right UX (listening animation, waveform, transcript-in-progress, status label) — reuse it, don't rebuild a second version.
 

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
 import { InputBar } from '@/components/temo/input-bar';
+import { VoiceTrigger } from '@/components/temo/voice-trigger';
 import { Markdown } from '@/components/markdown';
 import { AgentAvatar, getAgentIcon } from '@/components/crew/agent-avatar';
 import { useDashboardStore } from '@/stores/dashboardStore';
@@ -80,6 +81,8 @@ export default function ChatPage() {
   const loadAgents = useDashboardStore((s) => s.loadAgents);
   const isMuted = useVoiceStore((s) => s.isMuted);
   const isListening = useVoiceStore((s) => s.isListening);
+  const isVoiceActive = useVoiceStore((s) => s.isListening || s.isThinking || s.isSpeaking);
+  const voiceError = useVoiceStore((s) => s.lastError);
   const activeAgentId = useVoiceStore((s) => s.activeAgentId);
   const setActiveAgent = useVoiceStore((s) => s.setActiveAgent);
 
@@ -600,26 +603,39 @@ export default function ChatPage() {
           )}
         </AnimatePresence>
 
-        <div className="space-y-2">
-          <div className="flex flex-wrap gap-2">
-            {QUICK_PROMPTS.map((p) => (
-              <button
-                key={p}
-                onClick={() => send(p)}
-                disabled={isStreaming || isRouting}
-                className="rounded-full border border-border/40 bg-white/[0.02] px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:opacity-40"
-              >
-                {p}
-              </button>
-            ))}
-          </div>
+        <div className="relative space-y-2">
+          {/* M3-10: the shared VoiceTrigger's recording-bar/error feedback
+              (same waveform + status + error UI as Main Dashboard) takes
+              over this row while voice is active — InputBar's own mic
+              button (right, next to Send) stays the click target,
+              unchanged from M3-05; this only adds the visual feedback that
+              was missing. Quick prompts hide while active so the bar has a
+              clean, uncluttered row instead of overlapping them. */}
+          {isVoiceActive || voiceError ? (
+            <div className="relative flex h-8 items-center justify-center">
+              <VoiceTrigger hideIdleTrigger size={0} expandedWidth={280} />
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {QUICK_PROMPTS.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => send(p)}
+                  disabled={isStreaming || isRouting}
+                  className="rounded-full border border-border/40 bg-white/[0.02] px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:opacity-40"
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+          )}
           <InputBar
             onSend={send}
             onVoiceToggle={() => {
               // M3-05: this used to redirect to /settings instead of
               // activating voice input — reuse the same VoiceManager
               // start/stop toggle every other voice entry point in the
-              // app already uses (components/layout/voice-hud.tsx).
+              // app already uses (components/temo/voice-trigger.tsx).
               if (isListening) {
                 void voiceManager.stopListening();
               } else {

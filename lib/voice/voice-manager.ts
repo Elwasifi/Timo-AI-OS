@@ -121,6 +121,7 @@ export class VoiceManager {
           if (error === 'no-speech' && this.mode === 'push-to-talk') {
             store.stopListening();
             store.reset();
+            store.setError("Didn't catch that — try again.");
           }
           return;
         }
@@ -128,8 +129,10 @@ export class VoiceManager {
           logger.error('Microphone permission denied');
           store.stopListening();
           store.reset();
+          store.setError('Microphone access denied — allow microphone permission and try again.');
           return;
         }
+        store.setError(`Voice recognition error: ${error}`);
         this.stopAll();
       },
       () => {
@@ -219,6 +222,7 @@ export class VoiceManager {
 
     if (!text) {
       store.reset();
+      store.setError("Didn't catch any speech — try again.");
       this.isProcessingVoice = false;
       return;
     }
@@ -287,6 +291,10 @@ export class VoiceManager {
       const message = err instanceof Error ? err.message : 'Voice processing failed';
       logger.error(`Voice processing error: ${message}`);
       this.replyHandler?.(`I encountered an issue: ${message}`, text);
+      // M3-10: surface real voice-flow failures through the shared store too
+      // — pages with no replyHandler (Main Dashboard) previously had no way
+      // to know a voice request failed at all.
+      store.setError(message);
     } finally {
       store.setThinking(false);
       store.reset();
