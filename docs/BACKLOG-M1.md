@@ -97,7 +97,7 @@
 
 ## M1-08 — Local n8n + cloudflared dev runbook (documentation only)
 **Priority:** Medium (process risk — tribal knowledge)
-**Status:** Open
+**Status:** Pushed for Review — `docs/runbooks/local-n8n-dev-setup.md` written on `milestone-1-reliability` (2026-08-26) from directly-inspected real infrastructure, not assumption. **Open decision for Amro**: quick tunnel (current, zero-setup, URL changes every restart) vs. named tunnel (stable URL, one-time Cloudflare account setup) — documented as a flagged tradeoff, not decided here.
 
 **Acceptance criteria:**
 - `docs/runbooks/local-n8n-dev-setup.md` written, covering: the Docker command(s) used to run n8n locally, the `cloudflared tunnel --url http://localhost:5678` command and what URL/credential that produces, where that URL gets configured in TEMO's settings (`n8n-proxy` edge function config / `app_settings`), and what to do when the tunnel URL changes (cloudflared quick tunnels are not stable across restarts unless a named tunnel is used — worth deciding now whether to move to a named tunnel to stop the URL changing every restart).
