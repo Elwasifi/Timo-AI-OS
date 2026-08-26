@@ -127,6 +127,6 @@ Timo centered/large, Corporate Office ring, Operating Company ring, worker ring,
 
 ## M3-06 — Timo persona/system-prompt pass
 **Priority:** Medium (previously queued, not yet started)
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-06" section.
 
 Punchier, more natural Egyptian-Arabic TEXT responses (independent of voice), less "generic AI," more decisive tone.

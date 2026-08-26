@@ -13,7 +13,10 @@ export interface ClientProfile {
 
 const LANGUAGE_NAMES: Record<string, string> = {
   en: 'English',
-  ar: 'Arabic',
+  // M3-06: "Arabic" alone reads as formal Modern Standard Arabic to a
+  // model — this client base speaks Egyptian colloquial Arabic day to
+  // day, and MSA responses come across as stiff/"generic AI" to them.
+  ar: 'Egyptian Arabic (colloquial — the everyday dialect spoken in Egypt, not formal Modern Standard Arabic)',
 };
 
 export async function getClientProfile(tenantId: string | null): Promise<ClientProfile | null> {
