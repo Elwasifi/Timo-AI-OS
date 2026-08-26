@@ -31,7 +31,7 @@ import { useOrchestrationStore } from '@/stores/orchestrationStore';
 import { voiceManager } from '@/lib/voice/voice-manager';
 import { getAgentGreeting } from '@/lib/crew/agent-responses';
 import { crewCoordinator } from '@/lib/crew/crew-coordinator';
-import { ConversationService } from '@/lib/ai/conversation-service';
+import { ConversationService, type MessageRecord } from '@/lib/ai/conversation-service';
 import { orchestrate } from '@/lib/swarm';
 import { useAuthStore } from '@/stores/authStore';
 import type { AgentAnimationState, TimelineEvent, ActivityFeedItem } from '@/types';
@@ -52,6 +52,19 @@ interface Message {
   routingFrom?: string;
   routingTo?: string;
   confidence?: number;
+}
+
+// M1-05: chat conversation persistence. crewCoordinator.currentConversationId
+// is an in-memory field with no persistence of its own, and the page always
+// started fresh with just the intro greeting — a refresh silently lost the
+// conversation even though ConversationService already wrote every message
+// to conversations/messages for real (crew-coordinator.ts's persistMessage()).
+// The gap was purely the client-side lifecycle: nothing loaded history on
+// mount, and nothing remembered which conversation was active across a
+// refresh. Scoped to the current tenant so switching tenants in one browser
+// (or a shared machine) doesn't resume a different tenant's conversation.
+function conversationStorageKey(tenantId: string): string {
+  return `temo:activeConversationId:${tenantId}`;
 }
 
 function agentAnimationState(agentId: string): AgentAnimationState {
@@ -114,6 +127,56 @@ export default function ChatPage() {
 
   useEffect(() => {
     crewCoordinator.init(agents);
+  }, [agents]);
+
+  // M1-05: resume the tenant's most recent open conversation on mount
+  // instead of always starting fresh. Runs once agents are loaded (needed
+  // to resolve each stored message's agentName/color/icon for display) and
+  // a tenant is known. hasLoadedConversation guards against re-running when
+  // `agents` reference changes after the initial load.
+  const hasLoadedConversation = useRef(false);
+  useEffect(() => {
+    if (hasLoadedConversation.current || agents.length === 0) return;
+    const tenantId = useAuthStore.getState().currentTenantId;
+    if (!tenantId) return;
+    hasLoadedConversation.current = true;
+
+    const toMessage = (row: MessageRecord): Message => {
+      const agent = row.agent_id ? agents.find((a) => a.id === row.agent_id) : undefined;
+      return {
+        id: row.id,
+        role: row.role === 'system' ? 'assistant' : row.role,
+        content: row.content,
+        agentId: row.agent_id ?? undefined,
+        agentName: agent?.name,
+        agentColor: agent?.color,
+        agentIcon: agent?.icon,
+        time: new Date(row.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        confidence: row.confidence ?? undefined,
+      };
+    };
+
+    (async () => {
+      const storageKey = conversationStorageKey(tenantId);
+      let conversationId = typeof window !== 'undefined' ? window.localStorage.getItem(storageKey) : null;
+
+      if (!conversationId) {
+        // No locally-remembered conversation (fresh browser/device) — fall
+        // back to the tenant's most recently updated one, if any. RLS
+        // (conversations_tenant_select) already scopes this to the caller's
+        // own tenant, so no explicit tenant filter is needed here.
+        const recent = await ConversationService.getConversations(1);
+        conversationId = recent[0]?.id ?? null;
+      }
+      if (!conversationId) return;
+
+      const rows = await ConversationService.getMessages(conversationId);
+      if (rows.length === 0) return; // stale/foreign/deleted id — keep the fresh intro
+
+      crewCoordinator.setConversationId(conversationId);
+      if (typeof window !== 'undefined') window.localStorage.setItem(storageKey, conversationId);
+      setMessages(rows.map(toMessage));
+    })().catch((e) => console.error('[chat] resume conversation failed:', e));
   }, [agents]);
 
   // Wire callbacks once
@@ -215,9 +278,16 @@ export default function ChatPage() {
     setMessages((m) => [...m, userMsg]);
     setInput('');
 
-    // Ensure a conversation is active for persistence
+    // Ensure a conversation is active for persistence. A new conversation's
+    // id is written to localStorage immediately (M1-05) — not just held in
+    // crewCoordinator's in-memory field — so it survives a refresh right
+    // after the very first message, not only on subsequent visits.
     if (!crewCoordinator.getConversationId()) {
-      await crewCoordinator.startConversation(text.slice(0, 40), 'temo');
+      const newId = await crewCoordinator.startConversation(text.slice(0, 40), 'temo');
+      const tenantId = useAuthStore.getState().currentTenantId;
+      if (newId && tenantId && typeof window !== 'undefined') {
+        window.localStorage.setItem(conversationStorageKey(tenantId), newId);
+      }
     }
 
     // Clear previous timeline and start routing

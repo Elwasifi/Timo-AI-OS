@@ -60,7 +60,7 @@
 
 ## M1-05 — Chat conversation persistence
 **Priority:** High (first-impression UX)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-05" section.
 
 **Problem:** `app/chat/page.tsx` has no `conversationId` handling — no `localStorage`, no DB-backed load-on-mount. A refresh loses the conversation.
 
