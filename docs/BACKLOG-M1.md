@@ -22,7 +22,7 @@
 
 ## M1-02 — Budget hard-gate before spend
 **Priority:** Critical (financial risk)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-02" section for the full change/verification trace. Note: the $50/month internal-tenant ceiling seeded by this ticket's migration is a placeholder to satisfy "not unlimited by default" — Amro should review/adjust the actual figure.
 
 **Problem:** `checkBudget()` exists and is queryable but nothing calls it before an AI call. A bug or heavy usage has no ceiling.
 

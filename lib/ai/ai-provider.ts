@@ -3,6 +3,7 @@ import { FALLBACK_ORDER, loadSettings, PROVIDER_KEY_FIELD, PROVIDER_MODEL_FIELD,
 import { logger } from '@/lib/utils/logger';
 import { recordUsage, type UsageContext } from './usageLedger';
 import { recordHealth } from './router/healthTracker';
+import { checkBudget } from '@/lib/governance/entitlements';
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -298,6 +299,43 @@ async function resolveOrderedPairs(
 }
 
 /**
+ * Budget hard-gate (M1-02) — the single choke point every real AI call
+ * passes through, regardless of whether the caller used the Dynamic Model
+ * Router. checkBudget() previously existed but nothing called it before an
+ * actual spend; lib/ai/router/index.ts's own budget filtering only applies
+ * to callers that go through route() first (missions), leaving every other
+ * chatWithFallback/streamWithFallback caller (chat, tool planning, memory
+ * summarization, intent classification) completely unchecked.
+ *
+ * Ollama is self-hosted with zero marginal cost (lib/ai/pricing.ts already
+ * treats it as `cost: 0, isEstimated: false`) — exempt from the gate rather
+ * than blocked, so an over-budget tenant still gets best-effort local
+ * service instead of a hard stop when Ollama is configured.
+ *
+ * A caller with no tenantId in its usageContext (internal system calls that
+ * predate tenant attribution — tool planning, memory summarization, intent
+ * classification) is not gated: there's no tenant to check a budget against,
+ * matching checkBudget()'s own "no budget row configured" = unlimited
+ * posture rather than inventing a new failure mode for those call sites.
+ */
+async function applyBudgetGate(
+  pairs: { providerId: ProviderId; model: string }[],
+  tenantId: string | null | undefined,
+): Promise<{ providerId: ProviderId; model: string }[]> {
+  if (!tenantId) return pairs;
+
+  const budget = await checkBudget(tenantId);
+  if (budget.withinBudget) return pairs;
+
+  const freePairs = pairs.filter((p) => p.providerId === 'ollama');
+  if (freePairs.length > 0) return freePairs;
+
+  throw new Error(
+    `Monthly AI budget exceeded ($${budget.spendUsd.toFixed(2)} / $${(budget.limitUsd ?? 0).toFixed(2)}). Raise the budget in Settings or wait for the next billing period.`,
+  );
+}
+
+/**
  * Chat with automatic provider fallback.
  * Tries the active provider first, then falls through the chain — unless
  * the caller supplies router candidates (see resolveOrderedPairs above).
@@ -307,7 +345,8 @@ export async function chatWithFallback(
   options: ChatOptions = {},
 ): Promise<ChatResult> {
   const settings = await loadSettings();
-  const pairs = await resolveOrderedPairs(options, settings);
+  let pairs = await resolveOrderedPairs(options, settings);
+  pairs = await applyBudgetGate(pairs, options.usageContext?.tenantId);
 
   let lastError: AIProviderError | null = null;
 
@@ -353,7 +392,8 @@ export async function streamWithFallback(
   options: ChatOptions & { onDelta: StreamCallback },
 ): Promise<string> {
   const settings = await loadSettings();
-  const pairs = await resolveOrderedPairs(options, settings);
+  let pairs = await resolveOrderedPairs(options, settings);
+  pairs = await applyBudgetGate(pairs, options.usageContext?.tenantId);
 
   let lastError: AIProviderError | null = null;
 
