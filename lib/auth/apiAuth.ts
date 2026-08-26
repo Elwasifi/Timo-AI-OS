@@ -67,28 +67,44 @@ export async function isTenantMember(userId: string, tenantId: string): Promise<
 /**
  * Resolves which tenant a dashboard/stats-style route (M2-01) should scope
  * its query to. If the caller explicitly names one (`?tenantId=`), it's
- * verified via isTenantMember() and used — 403 if they don't belong to it.
- * Otherwise falls back to the caller's own tenant membership: the common
- * case (exactly one) resolves cleanly; a user who belongs to zero tenants
- * gets null (nothing to scope to — caller should treat this as "no data");
- * a user who belongs to more than one gets null too, since silently
- * picking one for them would be as wrong as showing all of them combined —
- * they must pass `?tenantId=` explicitly in that case.
+ * verified via isTenantMember() and used — `forbidden: true` if they don't
+ * belong to it (caller should respond 403).
+ *
+ * Otherwise falls back to the caller's own tenant membership:
+ * - Exactly one → resolves cleanly, the common case.
+ * - Zero → `tenantId: null`, `ambiguous: false` — nothing to scope to;
+ *   callers should treat this as "no data" (their existing empty-result
+ *   behavior for a null tenantId is correct here, unchanged).
+ * - Two or more → `tenantId: null`, `ambiguous: true` (M2-01-fix,
+ *   2026-08-26). `tenant_members` has no unique constraint preventing
+ *   multi-tenant membership, so this is a real, reachable case (e.g. an
+ *   owner account with access to both the internal tenant and a client
+ *   tenant), not theoretical. Previously this returned the exact same
+ *   shape as the zero-membership case, and every calling route treated a
+ *   null tenantId identically — silently falling back to its fully
+ *   unfiltered/global code path and showing every tenant's data combined
+ *   to a legitimate multi-tenant user. Callers MUST check `ambiguous` and
+ *   respond 400 (never fall through to their unfiltered path) — that is
+ *   the only thing distinguishing this case from the zero-membership one
+ *   at the type level, precisely so it can't be missed silently again.
  */
 export async function getCallerTenantId(
   userId: string,
   requestedTenantId?: string | null,
-): Promise<{ tenantId: string | null; forbidden: boolean }> {
+): Promise<{ tenantId: string | null; forbidden: boolean; ambiguous: boolean }> {
   const { getServiceRoleClient } = await import('@/lib/supabase/serverClient');
   const client = getServiceRoleClient();
 
   if (requestedTenantId) {
     const allowed = await isTenantMember(userId, requestedTenantId);
-    return allowed ? { tenantId: requestedTenantId, forbidden: false } : { tenantId: null, forbidden: true };
+    return allowed
+      ? { tenantId: requestedTenantId, forbidden: false, ambiguous: false }
+      : { tenantId: null, forbidden: true, ambiguous: false };
   }
 
   const { data } = await client.from('tenant_members').select('tenant_id').eq('user_id', userId);
   const tenantIds = (data ?? []).map((r) => r.tenant_id as string);
-  if (tenantIds.length === 1) return { tenantId: tenantIds[0], forbidden: false };
-  return { tenantId: null, forbidden: false };
+  if (tenantIds.length === 1) return { tenantId: tenantIds[0], forbidden: false, ambiguous: false };
+  if (tenantIds.length >= 2) return { tenantId: null, forbidden: false, ambiguous: true };
+  return { tenantId: null, forbidden: false, ambiguous: false };
 }

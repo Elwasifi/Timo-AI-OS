@@ -1670,6 +1670,14 @@ Claude Cowork (Technical Manager) reviewed all 9 Milestone 1 commits on `milesto
 
 **Not touched**: `missions/[id]`, `missions/[id]/timeline`, `missions/[id]/cancel`, `stream/mission`, `tasks/queue` (missionId case), `settings/validate-provider` — already `PROPERLY-SCOPED` per M1-06.
 
+### M2-01-fix — multi-tenant-membership fallback gap closed (2026-08-26, same day)
+
+Claude Cowork's review found a real gap in `getCallerTenantId()`: when a caller belongs to 2+ tenants and doesn't pass `?tenantId=`, it returned the identical `{ tenantId: null, forbidden: false }` shape as the legitimate zero-membership case — and every one of the 8 filtered routes above treated a `null` tenantId as "no filter needed," silently falling back to their fully unfiltered/global code path. A user with genuine access to two tenants (e.g. an owner account with both the internal tenant and a client tenant — `tenant_members` has no unique constraint preventing this, so it's a real reachable case, not theoretical) would have seen every tenant's data combined, not a safe empty result.
+
+Fixed: `getCallerTenantId()` now returns a third, distinct outcome — `ambiguous: true` — for the 2+ membership case, so it can no longer be silently conflated with "zero memberships, correctly empty." All 8 call sites updated to check `ambiguous` and return `400` (`"You belong to multiple tenants — pass ?tenantId= explicitly"`) immediately after the existing `forbidden`/403 check, before ever reaching their data-fetching code.
+
+**Live-verified**: created a real user with genuine membership in two real tenants (the internal tenant plus a fresh throwaway one), hit all 8 routes with no `?tenantId=` — every one returned `400`, none fell through to combined/unfiltered data. Retried the same 8 routes with `?tenantId=<one of their real tenants>` — all returned `200` with correctly scoped results. Test tenant, user, and memberships deleted afterward.
+
 ## M2-02 — RATE LIMITING ON THE PRIMARY CHAT/MISSION PATH (2026-08-26)
 
 **Ticket**: `docs/BACKLOG-M2.md` M2-02. Branch: `milestone-2-beta-readiness`.

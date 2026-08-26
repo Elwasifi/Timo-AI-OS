@@ -17,8 +17,9 @@ export async function GET(req: NextRequest) {
 
     // M2-01: rows tied to a mission the caller doesn't own are filtered out
     // — see runtimeStore.ts's getRuntimeActivityForTenant().
-    const { tenantId, forbidden } = await getCallerTenantId(user.id, url.searchParams.get('tenantId'));
+    const { tenantId, forbidden, ambiguous } = await getCallerTenantId(user.id, url.searchParams.get('tenantId'));
     if (forbidden) return NextResponse.json(fail('FORBIDDEN', 'Not a member of that tenant', start), { status: 403 });
+    if (ambiguous) return NextResponse.json(fail('BAD_REQUEST', 'You belong to multiple tenants — pass ?tenantId= explicitly', start), { status: 400 });
 
     const data = tenantId ? await getRuntimeActivityForTenant(tenantId, limit) : await getRuntimeActivity(limit);
     return NextResponse.json(ok(data, start, { count: data.length, limit }));

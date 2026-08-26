@@ -16,8 +16,9 @@ export async function GET(req: NextRequest) {
     // M2-01: usage counts are tenant-scoped (usage_ledger has tenant_id);
     // provider config (hasKey/model/active) stays global — a single shared
     // app_settings row today, not per-tenant credentials.
-    const { tenantId, forbidden } = await getCallerTenantId(user.id, new URL(req.url).searchParams.get('tenantId'));
+    const { tenantId, forbidden, ambiguous } = await getCallerTenantId(user.id, new URL(req.url).searchParams.get('tenantId'));
     if (forbidden) return NextResponse.json(fail('FORBIDDEN', 'Not a member of that tenant', start), { status: 403 });
+    if (ambiguous) return NextResponse.json(fail('BAD_REQUEST', 'You belong to multiple tenants — pass ?tenantId= explicitly', start), { status: 400 });
 
     const [stats, health] = await Promise.all([
       getProviderStats(tenantId),

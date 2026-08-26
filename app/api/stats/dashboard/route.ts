@@ -14,8 +14,9 @@ export async function GET(req: NextRequest) {
 
     // M2-01: mission/task counts are tenant-scoped; agent counts stay
     // global (shared workforce by design).
-    const { tenantId, forbidden } = await getCallerTenantId(user.id, new URL(req.url).searchParams.get('tenantId'));
+    const { tenantId, forbidden, ambiguous } = await getCallerTenantId(user.id, new URL(req.url).searchParams.get('tenantId'));
     if (forbidden) return NextResponse.json(fail('FORBIDDEN', 'Not a member of that tenant', start), { status: 403 });
+    if (ambiguous) return NextResponse.json(fail('BAD_REQUEST', 'You belong to multiple tenants — pass ?tenantId= explicitly', start), { status: 400 });
 
     const [system, execution] = await Promise.all([
       getSystemStats(tenantId),
