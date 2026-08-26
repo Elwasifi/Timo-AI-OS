@@ -114,6 +114,14 @@ class AIProviderImpl implements AIProvider {
 
         if (!res.ok) {
           const err = await res.json().catch(() => ({ error: `Request failed (${res.status})` }));
+          // M2-02: this specific 429 comes from the edge function's own
+          // IP-level rate limit (checked before any provider is even
+          // selected), not a provider being individually rate-limited —
+          // retrying this provider, or falling back to the next one, would
+          // just hit the identical block. Fail fast instead.
+          if (err.code === 'rate_limited') {
+            throw new AIProviderError(err.error, res.status, this.id, 'rate_limited');
+          }
           if (isRetryable(res.status) && attempt < 2) {
             await sleep(1000 * Math.pow(2, attempt));
             continue;
@@ -169,6 +177,9 @@ class AIProviderImpl implements AIProvider {
 
         if (!res.ok || !res.body) {
           const err = await res.json().catch(() => ({ error: `Stream failed (${res.status})` }));
+          if (err.code === 'rate_limited') {
+            throw new AIProviderError(err.error, res.status, this.id, 'rate_limited');
+          }
           if (isRetryable(res.status) && attempt < 2) {
             await sleep(1000 * Math.pow(2, attempt));
             continue;
@@ -217,7 +228,7 @@ class AIProviderImpl implements AIProvider {
           model: options.model || '',
         };
       } catch (err) {
-        if (err instanceof AIProviderError && !isRetryable(err.status) && err.status !== 0) {
+        if (err instanceof AIProviderError && (err.code === 'rate_limited' || (!isRetryable(err.status) && err.status !== 0))) {
           throw err;
         }
         if (attempt < 2) {
@@ -238,6 +249,8 @@ export class AIProviderError extends Error {
     message: string,
     public status: number,
     public providerId: ProviderId,
+    /** Set to 'rate_limited' for the edge function's own IP-level gate (M2-02) — distinct from a provider's own transient errors. */
+    public code?: string,
   ) {
     super(message);
     this.name = 'AIProviderError';
@@ -375,6 +388,11 @@ export async function chatWithFallback(
       lastError = err instanceof AIProviderError ? err : new AIProviderError(String(err), 0, providerId);
       recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
       logger.providerWarn(`${providerId} failed: ${lastError.message}`);
+      // M2-02: an IP-level rate limit applies identically to every
+      // provider (it's checked before the edge function even looks at
+      // which one was requested) — cycling through the rest of the
+      // fallback chain would just repeat the same block. Fail fast.
+      if (lastError.code === 'rate_limited') break;
       continue;
     }
   }
@@ -424,6 +442,7 @@ export async function streamWithFallback(
       lastError = err instanceof AIProviderError ? err : new AIProviderError(String(err), 0, providerId);
       recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
       logger.providerWarn(`${providerId} stream failed: ${lastError.message}`);
+      if (lastError.code === 'rate_limited') break;
       continue;
     }
   }
@@ -440,6 +459,9 @@ function getModelForProvider(providerId: ProviderId, settings: AppSettings): str
 
 function getFriendlyError(error: AIProviderError | null): string {
   if (!error) return 'AI request failed for an unknown reason.';
+  if (error.code === 'rate_limited') {
+    return error.message; // already the precise "Too many requests. Try again in Ns." from the edge function
+  }
   if (error.status === 429) {
     return 'All AI providers are currently rate-limited. Please wait a moment and try again.';
   }

@@ -275,9 +275,57 @@ function jsonValidation(status: ValidationStatus, message: string, models?: unkn
   });
 }
 
+// M2-02: this edge function is the real, unbypassable choke point every AI
+// provider call passes through — chatWithFallback()/streamWithFallback()
+// are just the app's normal way of reaching it, but nothing stops a caller
+// with the public anon key from POSTing here directly, skipping orchestrate(),
+// the chat UI, and even M1-02's budget gate (which lives in client-side
+// lib/ai/ai-provider.ts, not here). A per-tenant gate would require
+// threading real user/tenant identity through every internal AI call site
+// (tool planning, memory summarization, intent classification — none of
+// which carry tenant context today, a pre-existing gap, not something this
+// ticket introduced) — judged too large a refactor for M2's "short and
+// focused" scope. Per-IP is enforced instead: genuinely unbypassable (this
+// is the only path to a real provider call), requires zero changes to any
+// existing caller, matches the same pattern already used for
+// app/api/tasks/process (M1-03), where a clean per-tenant caller concept
+// didn't exist either. True per-tenant granularity remains a real,
+// separate follow-up if wanted — flagged, not implemented here.
+async function checkIpRateLimit(req: Request): Promise<{ allowed: boolean; resetSeconds: number }> {
+  try {
+    const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+      ?? req.headers.get("x-real-ip")
+      ?? "unknown";
+    const admin = getSupabaseAdmin();
+    const { data, error } = await admin.rpc("check_rate_limit", {
+      p_key: `ai-chat:ip:${ip}`,
+      p_max_tokens: 60,
+      p_refill_per_sec: 1, // 60/min steady state
+    });
+    if (error || !data) return { allowed: true, resetSeconds: 0 };
+    const row = Array.isArray(data) ? data[0] : data;
+    return { allowed: !!row?.allowed, resetSeconds: Number(row?.reset_seconds ?? 0) };
+  } catch {
+    // Fail open — a broken rate limiter must never become an outage for
+    // real AI traffic.
+    return { allowed: true, resetSeconds: 0 };
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
+  }
+
+  const rateLimit = await checkIpRateLimit(req);
+  if (!rateLimit.allowed) {
+    // Distinguishable from a provider's own 429 so the client can fail fast
+    // instead of cycling through every fallback provider against the same
+    // IP-level block (they'd all get the identical result).
+    return new Response(
+      JSON.stringify({ error: `Too many requests. Try again in ${Math.max(1, Math.ceil(rateLimit.resetSeconds))}s.`, code: "rate_limited" }),
+      { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   }
 
   try {

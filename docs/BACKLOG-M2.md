@@ -22,7 +22,7 @@
 
 ## M2-02 — Rate limiting on the primary chat/mission path
 **Priority:** High (abuse/cost risk — this is the actual highest-volume path)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-2-beta-readiness` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M2-02" section for the full architectural decision writeup. **Note for Claude Cowork**: while tracing this, found the `ai-chat` edge function had zero authentication of its own (any caller with the public anon key could call it directly, bypassing rate limiting *and* M1-02's budget gate). Fixed rate limiting via a per-IP gate inside the edge function itself — genuinely unbypassable, no changes needed to any existing caller. **Per-tenant granularity deliberately deferred, left as an open follow-up**: it would require threading real tenant identity through 3 internal AI call sites that don't carry it today (`lib/tools/planner.ts`, `lib/memory/summarizer.ts`, `lib/crew/ai-intent-analyzer.ts`), and would also be the natural moment to move M1-02's budget gate into the edge function too. Not implemented — flagged for an explicit scoping decision.
 
 **Problem:** M1-03 added rate limiting to the 2 `app/api/**` routes that can trigger an AI call or tool execution (`tasks/process`, `settings/validate-provider`). But the primary chat/mission path (`orchestrate()`) is called directly from `app/chat/page.tsx` — **client-side, never through an API route at all** — so it has no rate limiting whatsoever. This is the path a real user actually spams if they're abusing the product, and M1-03's protection doesn't touch it.
 
