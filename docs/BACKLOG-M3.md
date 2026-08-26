@@ -1,10 +1,8 @@
 # Milestone 3 — Speed & Stability + Visual/UX Fixes Backlog
 
-> **M3-01, M3-02, M3-04, and M3-05 reviewed, approved, and merged to `main` 2026-08-26.**
-> **Completion pass (2026-08-26, branch `milestone-3b-voice-fixes`):** real usage testing on the deployed M3-01/02/04/05 changes surfaced 5 new issues (M3-07 through M3-11), fixed first since they're regressions/gaps in what was just shipped. Then M3-03 and M3-06 — queued from the original milestone scope, never started — are done to close out Milestone 3 entirely.
+> **MILESTONE 3 FULLY CLOSED 2026-08-27 — all 12 tickets (M3-01, M3-02, M3-03, M3-04, M3-05, M3-06, M3-07, M3-08, M3-09, M3-10, M3-11) reviewed, approved, and merged to `main`.** No tickets remain open in this milestone.
 > Owner: Claude Cowork (Technical Manager). Implemented by: Claude Code (local). Status values: `Open` → `In Progress` → `Pushed for Review` → `Reviewed — ready to merge` → `Merged`.
-> Branch: `milestone-3-experience` merged to `main` via a clean fast-forward (M3-01/02/04/05). `milestone-3b-voice-fixes` created from `main` for M3-07 through M3-11, M3-03, M3-06 — one commit per ticket, pushed as each completes.
-> Sequencing: M3-07 and M3-08 first (both break the just-shipped voice/mission features outright). M3-09/M3-10/M3-11 next (voice UX consistency and honesty). M3-03 and M3-06 last.
+> Branches: `milestone-3-experience` (M3-01/02/04/05) and `milestone-3b-voice-fixes` (M3-07 through M3-11, M3-03, M3-06) — both merged to `main` via clean fast-forwards, no conflicts.
 
 ---
 
@@ -58,7 +56,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-07 — Fix "No agent selected" voice error on Main Dashboard
 **Priority:** Critical
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-07" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-27. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-07" section.
 
 **Root cause found by direct code inspection**: `VoiceTrigger` (`components/temo/command-deck.tsx`, added in M3-05) calls `voiceManager`, whose `getActiveAgent()` (`lib/voice/voice-manager.ts` ~line 48-51) reads the agent list from the shared `useDashboardStore`. But `command-deck.tsx` loads its own agent list into local component state via `loadAgents()` imported directly from `lib/agents/agentRegistryService` (~line 385) — it never populates `useDashboardStore`. If a user opens Main Dashboard directly (without first visiting a page that populates that store, like `/chat`), `voiceManager` finds no agent for the default `activeAgentId` (`'temo'`) and `crew-coordinator.ts`'s `generateResponse()` throws "No agent selected" (confirmed at 3 call sites, ~lines 402/445/492) — spoken back via TTS, exactly what the user heard.
 
@@ -69,7 +67,7 @@ Also to confirm: `lib/crew/ai-intent-analyzer.ts` calls `chatWithFallback()` —
 
 ## M3-08 — Investigate the mission that stalled at 20%
 **Priority:** Critical
-**Status:** Pushed for review — live-verified against the real stalled mission from the user's own session. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-08" section for the full root-cause trace.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-27. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-08" section for the full root-cause trace.
 
 A voice-triggered mission started, was correctly created and visible in the Missions page, progressed to 20%, then stopped with no further progress and no error surfaced anywhere.
 
@@ -82,7 +80,7 @@ A voice-triggered mission started, was correctly created and visible in the Miss
 
 ## M3-09 — Remove the old floating voice control from all remaining pages
 **Priority:** High
-**Status:** Pushed for review — live-verified across every page. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-09" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-27. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-09" section.
 
 `top-nav.tsx`'s `VoiceHud` suppression only covers `/` and `/dashboard` (~line 19-20's `isDashboard` check). Every other page (`/chat`, `/missions`, `/agents`, `/settings`, etc.) still renders the old floating voice orb with its unlabeled sub-buttons — the exact control M3-05 was supposed to replace everywhere, not just on 2 pages.
 
@@ -93,7 +91,7 @@ A voice-triggered mission started, was correctly created and visible in the Miss
 
 ## M3-10 — Bring Chat page's voice mic to visual parity with Main Dashboard
 **Priority:** High
-**Status:** Pushed for review — live-verified (listening state, waveform, real answer, and error state). See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-10" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-27. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-10" section.
 
 The chat page's mic button (fixed in M3-05 to actually start/stop listening) has no visual feedback at all — no listening indicator, no waveform, no sign it heard anything, and the user reported it sometimes produces no response with no explanation. Main Dashboard's `VoiceTrigger` component already has the right UX (listening animation, waveform, transcript-in-progress, status label) — reuse it, don't rebuild a second version.
 
@@ -104,7 +102,7 @@ The chat page's mic button (fixed in M3-05 to actually start/stop listening) has
 
 ## M3-11 — Fix Settings → Voice page to reflect the real engine
 **Priority:** Medium
-**Status:** Pushed for review — live-verified end-to-end (Settings → real chat voice interaction). See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-11" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-27. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-11" section.
 
 The Voice settings page currently shows "Engine: Gemini Live API" (single fixed option) and "Voice: Microsoft David - English (United States)" — neither reflects the actual implementation, which is the browser's free Web Speech API (`services/voiceService.ts`). This is exactly the kind of fabricated-looking UI this project's own principles explicitly reject (CLAUDE.md rule 7: "never introduce mock/placeholder implementations disguised as real functionality").
 
@@ -119,7 +117,7 @@ The Voice settings page currently shows "Engine: Gemini Live API" (single fixed 
 
 ## M3-03 — G-Brain radial layout redesign
 **Priority:** High (previously queued, not yet started)
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-03" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-27. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-03" section.
 
 Timo centered/large, Corporate Office ring, Operating Company ring, worker ring, size decreasing by depth, hover-card with full agent details.
 
@@ -127,6 +125,6 @@ Timo centered/large, Corporate Office ring, Operating Company ring, worker ring,
 
 ## M3-06 — Timo persona/system-prompt pass
 **Priority:** Medium (previously queued, not yet started)
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-06" section.
+**Status:** Merged — reviewed and approved by Claude Cowork; merged to `main` 2026-08-27. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-06" section.
 
 Punchier, more natural Egyptian-Arabic TEXT responses (independent of voice), less "generic AI," more decisive tone.
