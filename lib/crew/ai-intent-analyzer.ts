@@ -12,10 +12,25 @@ const AGENT_CATEGORY_MAP: Record<string, string> = {
   echo: 'content',
 };
 
+// M3-01: this classification call sits in the synchronous hot path of
+// EVERY chat message (crew-coordinator.ts's routeAndRespond calls
+// engine.route() — which calls this — before the Context Manager or the
+// real response even start), so a slow/hanging provider here doubles the
+// latency exposure of the entire pipeline, not just routing. A full
+// route()+chatWithFallback() round trip has no upper bound on its own
+// (up to 5 providers x 3 retries x exponential backoff), so it's given a
+// short hard timeout and races it against the keyword fallback — intent
+// classification legitimately has to complete before the correct agent's
+// system prompt can be built, so this couldn't simply move off the
+// critical path without restructuring routing itself (larger change than
+// this ticket's scope); a hard timeout bounds the damage instead.
+const INTENT_CLASSIFICATION_TIMEOUT_MS = 4000;
+
 /**
  * AIIntentAnalyzer — uses a real LLM (Gemini) to analyze user intent.
- * Falls back to keyword-based analysis if the LLM call fails, so routing
- * still works even when no API key is configured.
+ * Falls back to keyword-based analysis if the LLM call fails OR takes
+ * longer than INTENT_CLASSIFICATION_TIMEOUT_MS, so routing never stalls
+ * the whole pipeline waiting on a slow/reasoning-heavy model.
  */
 export class AIIntentAnalyzer implements IntentAnalyzer {
   private keywordFallback = new KeywordFallbackAnalyzer();
@@ -41,7 +56,7 @@ export class AIIntentAnalyzer implements IntentAnalyzer {
         classification: classifyTask({ text: input, needsStructuredOutput: true }),
         tenantId: null,
       });
-      const result = await chatWithFallback(
+      const classificationPromise = chatWithFallback(
         [
           {
             role: 'user',
@@ -67,7 +82,12 @@ Rules:
         {
           systemPrompt: 'You are an intent classification engine for an AI crew system. Output only valid JSON.',
           temperature: 0.1,
-          maxTokens: 300,
+          // M3-01: bumped from 300 — too tight a budget for a "thinking"
+          // model (confirmed live: gemini-3.6-flash) whose reasoning
+          // tokens can consume the whole allowance before any visible
+          // JSON is produced, which previously came back as an empty
+          // string here (silently swallowed by the catch below).
+          maxTokens: 500,
           candidates: decision.candidates,
           usageContext: {
             operation: 'intent_classification',
@@ -76,6 +96,10 @@ Rules:
           },
         }
       );
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('Intent classification timed out')), INTENT_CLASSIFICATION_TIMEOUT_MS),
+      );
+      const result = await Promise.race([classificationPromise, timeout]);
 
       const parsed = this.parseResponse(result.content);
       if (parsed) return parsed;

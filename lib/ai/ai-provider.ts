@@ -2,7 +2,7 @@ import type { ProviderId } from '@/lib/settings/settings-service';
 import { FALLBACK_ORDER, loadSettings, PROVIDER_KEY_FIELD, PROVIDER_MODEL_FIELD, type AppSettings } from '@/lib/settings/settings-service';
 import { logger } from '@/lib/utils/logger';
 import { recordUsage, type UsageContext } from './usageLedger';
-import { recordHealth } from './router/healthTracker';
+import { recordHealth, getHealth } from './router/healthTracker';
 import { checkBudget } from '@/lib/governance/entitlements';
 
 export interface ChatMessage {
@@ -348,6 +348,40 @@ async function applyBudgetGate(
   );
 }
 
+// M3-01: a provider/model that has failed repeatedly and recently is
+// skipped outright — no request attempt, no 3x retry/backoff — rather than
+// paying its full retry cost again on every single call within the
+// cooldown window. Thresholds are deliberately conservative (3 consecutive
+// failures, 5 minutes) so a genuinely transient blip doesn't blacklist a
+// provider that would otherwise have recovered on the very next call.
+const UNHEALTHY_CONSECUTIVE_FAILURES = 3;
+const UNHEALTHY_COOLDOWN_MS = 5 * 60 * 1000;
+
+async function isSkippableUnhealthy(providerId: ProviderId, model: string): Promise<boolean> {
+  const health = await getHealth(providerId, model);
+  if (!health || health.consecutiveFailures < UNHEALTHY_CONSECUTIVE_FAILURES) return false;
+  if (!health.lastFailureAt) return false;
+  const sinceFailure = Date.now() - new Date(health.lastFailureAt).getTime();
+  return sinceFailure < UNHEALTHY_COOLDOWN_MS;
+}
+
+/**
+ * M3-01: some models (Gemini's/Groq's/NVIDIA's newer "thinking"/reasoning
+ * variants — confirmed live: gemini-3.6-flash, openai/gpt-oss-120b,
+ * nvidia/nemotron-3-super-120b-a12b) spend part of maxTokens on internal
+ * reasoning before producing visible text. When maxTokens is small enough
+ * that reasoning consumes the whole budget, the provider returns a real
+ * HTTP 200 with a genuinely empty content string — previously treated as a
+ * successful response, which is exactly the "chat sometimes doesn't
+ * respond at all" bug: no error was ever thrown, so the UI just rendered
+ * nothing. An empty completion is treated as a failure here so the caller
+ * falls through to the next provider/model instead of silently succeeding
+ * with nothing to show.
+ */
+function isEmptyResult(content: string): boolean {
+  return content.trim().length === 0;
+}
+
 /**
  * Chat with automatic provider fallback.
  * Tries the active provider first, then falls through the chain — unless
@@ -364,12 +398,23 @@ export async function chatWithFallback(
   let lastError: AIProviderError | null = null;
 
   for (const { providerId, model } of pairs) {
+    if (await isSkippableUnhealthy(providerId, model)) {
+      logger.providerWarn(`Skipping ${providerId}/${model} — ${UNHEALTHY_CONSECUTIVE_FAILURES}+ recent consecutive failures, still in cooldown`);
+      lastError = new AIProviderError(`${providerId} skipped (recent repeated failures)`, 0, providerId);
+      continue;
+    }
     const provider = getProvider(providerId);
     const start = Date.now();
     try {
       logger.provider(`Trying ${providerId}`, { model });
       const result = await provider.chat(messages, { ...options, model });
       const latencyMs = Date.now() - start;
+      if (isEmptyResult(result.content)) {
+        recordHealth({ provider: providerId, modelId: model, success: false, latencyMs, statusCode: 200 });
+        logger.providerWarn(`${providerId}/${model} returned an empty completion (likely reasoning tokens exhausted maxTokens) — treating as failure`);
+        lastError = new AIProviderError(`${providerId} returned an empty response`, 200, providerId, 'empty_response');
+        continue;
+      }
       if (pairs[0].providerId !== providerId) {
         logger.providerSwitch(pairs[0].providerId, providerId, 'fallback');
       }
@@ -416,12 +461,23 @@ export async function streamWithFallback(
   let lastError: AIProviderError | null = null;
 
   for (const { providerId, model } of pairs) {
+    if (await isSkippableUnhealthy(providerId, model)) {
+      logger.providerWarn(`Skipping ${providerId}/${model} — ${UNHEALTHY_CONSECUTIVE_FAILURES}+ recent consecutive failures, still in cooldown`);
+      lastError = new AIProviderError(`${providerId} skipped (recent repeated failures)`, 0, providerId);
+      continue;
+    }
     const provider = getProvider(providerId);
     const start = Date.now();
     try {
       logger.provider(`Streaming via ${providerId}`, { model });
       const result = await provider.chatStream(messages, { ...options, model });
       const latencyMs = Date.now() - start;
+      if (isEmptyResult(result.content)) {
+        recordHealth({ provider: providerId, modelId: model, success: false, latencyMs, statusCode: 200 });
+        logger.providerWarn(`${providerId}/${model} streamed an empty completion (likely reasoning tokens exhausted maxTokens) — treating as failure`);
+        lastError = new AIProviderError(`${providerId} returned an empty response`, 200, providerId, 'empty_response');
+        continue;
+      }
       if (pairs[0].providerId !== providerId) {
         logger.providerSwitch(pairs[0].providerId, providerId, 'fallback');
       }

@@ -9,7 +9,7 @@
 
 ## M3-01 — Diagnose and fix chat latency / silent non-response
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M3-01" section for the full root-cause trace and fix.
 
 **Problem** (found by direct code inspection, not just the user's report): `lib/ai/ai-provider.ts`'s `chatWithFallback()`/`streamWithFallback()` walk up to 5 providers (Gemini→Groq→NVIDIA→OpenRouter→Ollama), and for EACH one that fails, retry 3 times with exponential backoff (1s, 2s, 4s) before moving to the next provider. If one provider near the front of the chain has a stale/dead free-tier model name (already flagged as a known live issue in `docs/GOVERNANCE.md` — "stale model names 404ing"), a single chat message can wait 30+ seconds, or fail entirely if Ollama isn't running locally, before the user sees anything.
 
