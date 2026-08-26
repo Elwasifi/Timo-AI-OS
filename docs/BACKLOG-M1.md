@@ -86,7 +86,7 @@
 
 ## M1-07 — Minimum viable automated test coverage
 **Priority:** High (regression risk as scope grows)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-07" section. `npm test` runs 9 real integration tests (Vitest) against the live Supabase project — tenant isolation, the auth gate, mission lifecycle rollup.
 
 **Acceptance criteria:**
 - A test runner is added (Vitest is the lowest-friction choice for a Next.js/TypeScript project already using this stack — but Claude Code should confirm against current `package.json` before deciding).

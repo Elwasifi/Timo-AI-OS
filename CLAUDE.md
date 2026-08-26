@@ -70,7 +70,7 @@ This is the target/conceptual model. For the actual current runtime implementati
 - Do not create duplicate registries, routers, orchestration engines, or providers.
 - Run `npm run typecheck` after meaningful implementation stages.
 - Run `npm run lint` where applicable.
-- Run available tests. (As of this writing, no automated test framework exists in this project — see docs/TEMO-ARCHITECTURE.md. Don't silently skip this step once one exists.)
+- Run available tests: `npm test` (Vitest, added M1-07 — real integration tests against the live Supabase project in `tests/`, covering tenant isolation, the `requireUser()`/`isTenantMember()` auth gate, and the mission-lifecycle status/progress rollup). Deliberately narrow, not broad coverage — extend it as new regressions are found worth guarding against, don't let it silently go stale.
 - Perform regression checks: confirm existing call sites of anything touched still compile and behave as before.
 - Update [docs/TEMO-ARCHITECTURE.md](docs/TEMO-ARCHITECTURE.md) after every major completed stage — bump the version, add a dated section, update the status table.
 - Record important architectural decisions and the reasoning behind them (not just the change) directly in the architecture doc.
