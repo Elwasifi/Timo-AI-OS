@@ -1,0 +1,421 @@
+// Agent Registry Foundation — Agent Definitions
+// Phase 2: Hierarchical Agent Architecture
+//
+// Static agent definitions that mirror the seed data in the database.
+// These provide a fallback when the database is unavailable and serve as
+// the canonical reference for agent identity in code.
+//
+// IMPORTANT: The `id` field is immutable and matches the IDs already used
+// by the existing routing system (lib/crew/). This ensures that when the
+// system migrates from the in-memory dashboardStore to the database-backed
+// registry, no routing, memory, or workflow references will break.
+
+import type { AgentRecord } from './types';
+
+export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
+  {
+    id: 'temo',
+    roleId: 'chief_executive_ai',
+    displayName: 'Temo',
+    role: 'Chief AI / CEO Coordinator',
+    level: 'chief',
+    departmentId: null,
+    description:
+      'Coordinates every agent. Chooses which specialist should answer. Keeps conversations natural.',
+    capabilities: [
+      'agent_routing',
+      'conversation_orchestration',
+      'multi_agent_synthesis',
+      'voice_coordination',
+      'crew_management',
+    ],
+    permissions: {
+      canRouteTasks: true,
+      canAccessMemory: true,
+      canExecuteWorkflows: true,
+      canManageAgents: true,
+    },
+    avatar: 'Sparkles',
+    avatarUrl: null,
+    themeColor: '#00E5FF',
+    status: 'available',
+    systemPromptTemplate: 'temo_coordinator',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 0,
+    parentId: null,
+    childrenIds: ['nova', 'flow', 'atlas', 'luna', 'echo'],
+    priority: 0,
+    tools: [],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'nova',
+    roleId: 'engineering_manager',
+    displayName: 'Nova',
+    role: 'Engineering Manager',
+    level: 'manager',
+    departmentId: 'engineering',
+    description:
+      'Manages the Engineering Department. Specializes in programming, debugging, architecture, API design, databases, cloud, and automation.',
+    capabilities: [
+      'code_review',
+      'architecture_analysis',
+      'software_planning',
+      'full_stack_development',
+      'api_design',
+      'database_modeling',
+      'cloud_deployment',
+      'devops',
+    ],
+    permissions: {
+      canExecuteWorkflows: true,
+      canAccessMemory: true,
+      canManageWorkers: true,
+    },
+    avatar: 'Code2',
+    avatarUrl: null,
+    themeColor: '#7B61FF',
+    status: 'available',
+    systemPromptTemplate: 'specialist',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 1,
+    parentId: 'temo',
+    childrenIds: ['nova-frontend', 'nova-backend', 'nova-qa'],
+    priority: 1,
+    tools: ['code_review', 'code_search', 'file_read', 'file_write'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'nova-frontend',
+    roleId: 'frontend_engineer',
+    displayName: 'Frontend Engineer',
+    role: 'Frontend Engineer',
+    level: 'worker',
+    departmentId: 'engineering',
+    description:
+      'Frontend specialist focusing on React, Next.js, Tailwind CSS, and UI component development.',
+    capabilities: [
+      'react',
+      'nextjs',
+      'tailwind',
+      'ui_components',
+      'jsx',
+      'frontend',
+    ],
+    permissions: {
+      canExecuteWorkflows: false,
+      canAccessMemory: true,
+      canManageWorkers: false,
+    },
+    avatar: 'Monitor',
+    avatarUrl: null,
+    themeColor: '#7B61FF',
+    status: 'available',
+    systemPromptTemplate: 'nova_worker',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 10,
+    parentId: 'nova',
+    childrenIds: [],
+    priority: 10,
+    tools: ['code_search', 'file_read'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'nova-backend',
+    roleId: 'backend_engineer',
+    displayName: 'Backend Engineer',
+    role: 'Backend Engineer',
+    level: 'worker',
+    departmentId: 'engineering',
+    description:
+      'Backend specialist focusing on APIs, services, databases, and system integration.',
+    capabilities: [
+      'api_design',
+      'database',
+      'services',
+      'integration',
+      'backend',
+      'serverless',
+    ],
+    permissions: {
+      canExecuteWorkflows: false,
+      canAccessMemory: true,
+      canManageWorkers: false,
+    },
+    avatar: 'Server',
+    avatarUrl: null,
+    themeColor: '#7B61FF',
+    status: 'available',
+    systemPromptTemplate: 'nova_worker',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 11,
+    parentId: 'nova',
+    childrenIds: [],
+    priority: 11,
+    tools: ['code_search', 'file_read'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'nova-qa',
+    roleId: 'qa_debug_engineer',
+    displayName: 'QA & Debug Engineer',
+    role: 'QA & Debug Engineer',
+    level: 'worker',
+    departmentId: 'engineering',
+    description:
+      'QA specialist focusing on testing, debugging, validation, and error handling.',
+    capabilities: [
+      'testing',
+      'debugging',
+      'validation',
+      'qa',
+      'bug_fixing',
+      'error_handling',
+    ],
+    permissions: {
+      canExecuteWorkflows: false,
+      canAccessMemory: true,
+      canManageWorkers: false,
+    },
+    avatar: 'Bug',
+    avatarUrl: null,
+    themeColor: '#7B61FF',
+    status: 'available',
+    systemPromptTemplate: 'nova_worker',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 12,
+    parentId: 'nova',
+    childrenIds: [],
+    priority: 12,
+    tools: ['code_search', 'file_read'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'flow',
+    roleId: 'automation_manager',
+    displayName: 'Flow',
+    role: 'Automation Manager',
+    level: 'manager',
+    departmentId: 'automation',
+    description:
+      'Manages the Automation Department. Expert in n8n, Make, Zapier, APIs, webhooks, integrations, and automation.',
+    capabilities: [
+      'workflow_design',
+      'automation',
+      'n8n',
+      'api_integration',
+      'webhook_configuration',
+      'pipeline_architecture',
+      'scheduled_triggers',
+      'data_transformation',
+    ],
+    permissions: {
+      canExecuteWorkflows: true,
+      canAccessMemory: true,
+      canManageWorkers: true,
+    },
+    avatar: 'Workflow',
+    avatarUrl: null,
+    themeColor: '#22C55E',
+    status: 'available',
+    systemPromptTemplate: 'specialist',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 2,
+    parentId: 'temo',
+    childrenIds: [],
+    priority: 2,
+    tools: ['n8n_workflow', 'webhook', 'api_call'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'atlas',
+    roleId: 'research_manager',
+    displayName: 'Atlas',
+    role: 'Research & Intelligence Manager',
+    level: 'manager',
+    departmentId: 'research',
+    description:
+      'Manages the Research Department. Expert in business, marketing, sales, pricing, growth, and analytics.',
+    capabilities: [
+      'market_research',
+      'competitive_intelligence',
+      'business_analysis',
+      'pricing_strategy',
+      'growth_planning',
+      'revenue_optimization',
+      'go_to_market_strategy',
+    ],
+    permissions: {
+      canExecuteWorkflows: true,
+      canAccessMemory: true,
+      canManageWorkers: true,
+    },
+    avatar: 'TrendingUp',
+    avatarUrl: null,
+    themeColor: '#3B82F6',
+    status: 'available',
+    systemPromptTemplate: 'specialist',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 3,
+    parentId: 'temo',
+    childrenIds: [],
+    priority: 3,
+    tools: ['web_search', 'data_analysis'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'luna',
+    roleId: 'design_manager',
+    displayName: 'Luna',
+    role: 'Design Manager',
+    level: 'manager',
+    departmentId: 'design',
+    description:
+      'Manages the Design Department. Expert in UI, UX, branding, graphics, presentation, and motion.',
+    capabilities: [
+      'interface_design',
+      'design_systems',
+      'brand_identity',
+      'visual_direction',
+      'motion_design',
+      'prototyping',
+      'creative_direction',
+    ],
+    permissions: {
+      canExecuteWorkflows: true,
+      canAccessMemory: true,
+      canManageWorkers: true,
+    },
+    avatar: 'Palette',
+    avatarUrl: null,
+    themeColor: '#EC4899',
+    status: 'available',
+    systemPromptTemplate: 'specialist',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 4,
+    parentId: 'temo',
+    childrenIds: [],
+    priority: 4,
+    tools: ['design_review', 'asset_generate'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'echo',
+    roleId: 'marketing_manager',
+    displayName: 'Echo',
+    role: 'Marketing & Content Manager',
+    level: 'manager',
+    departmentId: 'marketing',
+    description:
+      'Manages the Marketing Department. Expert in writing, SEO, YouTube, social media, copywriting, and email.',
+    capabilities: [
+      'content_strategy',
+      'seo_optimization',
+      'copywriting',
+      'social_media_content',
+      'email_campaigns',
+      'script_writing',
+      'headline_crafting',
+    ],
+    permissions: {
+      canExecuteWorkflows: true,
+      canAccessMemory: true,
+      canManageWorkers: true,
+    },
+    avatar: 'PenTool',
+    avatarUrl: null,
+    themeColor: '#F59E0B',
+    status: 'available',
+    systemPromptTemplate: 'specialist',
+    model: 'Gemini 2.0 Flash',
+    isActive: true,
+    sortOrder: 5,
+    parentId: 'temo',
+    childrenIds: [],
+    priority: 5,
+    tools: ['content_write', 'seo_analyze'],
+    createdAt: '',
+    updatedAt: '',
+  },
+  {
+    id: 'orion',
+    roleId: 'trading_manager',
+    displayName: 'Orion',
+    role: 'Trading Manager',
+    level: 'manager',
+    departmentId: 'trading',
+    description:
+      'Manages the Trading Department. Specializes in market analysis, trading strategy, risk management, and portfolio optimization. Currently inactive — will be activated in a future phase.',
+    capabilities: [
+      'market_analysis',
+      'trading_strategy',
+      'risk_management',
+      'portfolio_optimization',
+      'technical_analysis',
+      'quantitative_modeling',
+    ],
+    permissions: {
+      canExecuteWorkflows: false,
+      canAccessMemory: true,
+      canManageWorkers: false,
+    },
+    avatar: 'LineChart',
+    avatarUrl: null,
+    themeColor: '#F97316',
+    status: 'offline',
+    systemPromptTemplate: 'specialist',
+    model: 'Gemini 2.0 Flash',
+    isActive: false,
+    sortOrder: 6,
+    parentId: 'temo',
+    childrenIds: [],
+    priority: 6,
+    tools: [],
+    createdAt: '',
+    updatedAt: '',
+  },
+];
+
+export const AGENT_IDS = AGENT_DEFINITIONS.map((a) => a.id);
+
+export function getAgentDefinitionById(id: string): AgentRecord | undefined {
+  return AGENT_DEFINITIONS.find((a) => a.id === id);
+}
+
+export function getManagers(): AgentRecord[] {
+  return AGENT_DEFINITIONS.filter((a) => a.level === 'manager' && a.isActive);
+}
+
+export function getChief(): AgentRecord | undefined {
+  return AGENT_DEFINITIONS.find((a) => a.level === 'chief');
+}
+
+export function getChildrenOf(parentId: string): AgentRecord[] {
+  return AGENT_DEFINITIONS.filter((a) => a.parentId === parentId);
+}
+
+export function getWorkersOf(managerId: string): AgentRecord[] {
+  return AGENT_DEFINITIONS.filter(
+    (a) => a.parentId === managerId && a.level === 'worker' && a.isActive,
+  );
+}
+
+export function getActiveAgents(): AgentRecord[] {
+  return AGENT_DEFINITIONS.filter((a) => a.isActive);
+}

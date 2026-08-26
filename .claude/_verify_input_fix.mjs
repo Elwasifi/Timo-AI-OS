@@ -1,0 +1,13 @@
+import pwPkg from 'file:///C:/Users/elwas/AppData/Roaming/npm/node_modules/omniroute/node_modules/playwright/index.js';
+const { chromium } = pwPkg;
+const browser = await chromium.launch({ executablePath: 'C:/Users/elwas/AppData/Local/ms-playwright/chromium-1228/chrome-win64/chrome.exe' });
+const page = await (await browser.newContext({ viewport: { width: 900, height: 700 } })).newPage();
+await page.goto('http://localhost:3000/login', { waitUntil: 'domcontentloaded' });
+await page.waitForSelector('text=TEMO AI OS');
+await page.waitForTimeout(1000);
+await page.fill('#email', 'visual.check@example.com');
+await page.fill('#password', 'CheckPassword123');
+const color = await page.locator('#email').evaluate((el) => getComputedStyle(el).color);
+console.log('typed text color:', color);
+await page.screenshot({ path: '.claude/_screenshots/20-input-fix-check.png' });
+await browser.close();

@@ -1,0 +1,37 @@
+{
+  "steps": {
+    "login": {
+      "url": "http://localhost:3000/dashboard"
+    },
+    "gbrain": {
+      "managerNames": [
+        "NOVA",
+        "FLOW",
+        "ATLAS",
+        "LUNA",
+        "ECHO"
+      ],
+      "svgZ": "1",
+      "treeZ": "2"
+    },
+    "commandDeck": {
+      "agentCardCount": 5
+    },
+    "agentManagement": {
+      "created": true,
+      "deleted": false
+    },
+    "workspaceSection": {
+      "rendered": true
+    },
+    "approvalsSection": {
+      "rendered": true,
+      "errors": [
+        "[console] Failed to load resource: the server responded with a status of 404 (Not Found)"
+      ]
+    }
+  },
+  "consoleErrors": [
+    "[console] Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}

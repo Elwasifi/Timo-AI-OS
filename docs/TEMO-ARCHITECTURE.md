@@ -1,0 +1,1447 @@
+# Temo AI OS — Architecture Reference
+
+This document is the architectural source of truth for the Timo-AI-OS repository. It reflects the state of the codebase as verified by a full technical audit, not aspirational design. Every claim below is grounded in the actual code, not assumptions about what "should" exist.
+
+---
+
+## 1. PROJECT OVERVIEW
+
+**Vision.** Temo AI OS began as a personal AI operating system: a single chief agent ("Temo") backed by a small hierarchy of manager and worker agents, capable of chatting, executing missions, remembering context, and calling tools/workflows on the user's behalf.
+
+**Current purpose.** Today the system is a single-user, single-tenant Next.js + Supabase application. A user talks to Temo (via chat or voice), the system decides whether the request is simple (answer directly) or complex (spin up a multi-step "mission"), and either a direct LLM response or a sequence of manager/worker task executions is produced. Results, timelines, and events are persisted to Supabase and surfaced on dashboard pages.
+
+**Target evolution.** The project is evolving into a **Corporate AI Operating System** — Temo as CEO of a private AI business group, presiding over a Corporate Office (Strategy, R&D, Quality/Audit, Finance/Governance, Workforce Management), which in turn oversees multiple independent **companies**, each with its own departments, managers, and a **shared** AI workforce dynamically assigned across missions. Eventually this extends to a client-facing AI Agency with multi-tenant isolation, per-client AI Account Managers, billing, and freemium packages. None of the multi-company, multi-tenant, or client-facing layers exist yet — see Sections 8 and 9.
+
+---
+
+## 2. CURRENT ARCHITECTURE
+
+| Layer | Implementation | Notes |
+|---|---|---|
+| **Frontend** | Next.js 13 (pages router under `app/`), React 18, Tailwind, Zustand stores, Radix UI | Pages: chat, missions, agents, memory, knowledge, tools, workflows, analytics, dashboard, settings, validation, notifications |
+| **Backend** | Next.js API routes (`app/api/**`) — thin, mostly read-only GET wrappers around service modules in `lib/` | No mutation endpoints for missions/tasks; missions are only created indirectly via `orchestrate()` |
+| **Supabase/Postgres** | Tables for agents, departments, missions/objectives/tasks, timeline, runtime state/activity, memories, memory_embeddings (pgvector), structured_facts, memory_links, conversations, app_settings, workflow_registry | RLS enabled but policies grant full CRUD to `anon, authenticated` — explicitly documented in migrations as "single-tenant, no-auth app" |
+| **AI provider layer** | `lib/ai/ai-provider.ts` → Supabase Edge Function `ai-chat` → real HTTP calls to Gemini, Groq, NVIDIA NIM, OpenRouter, Ollama | Client-side fallback/retry logic is real; no OpenAI/Anthropic wiring despite legacy DB columns |
+| **Memory/RAG** | `lib/memory/*` + `lib/knowledge/engine.ts`, pgvector via edge function `embeddings` | Real semantic search; extraction is regex-based, not LLM-based |
+| **Mission Engine** | `lib/swarm/missionEngine.ts`, `missionPlanner.ts`, `missionService.ts`, `swarmManager.ts`, `executionLayer.ts`, `capabilityMatcher.ts`, `workerRouter.ts`, `decisionEngine.ts`, `unifiedOrchestrator.ts` | Real Supabase-backed lifecycle; execution is synchronous/sequential, in-request |
+| **Agent/Department system** | `lib/agents/*` (hardcoded definitions + DB read layer), `lib/crew/*` (parallel in-memory registry/router) | Two parallel registries — see Section 3 and 8 |
+| **Tool Engine** | `lib/tools/registry.ts`, `executor.ts`, `chain.ts`, `planner.ts`, `permissions.ts`, `builtin-tools.ts` | Core engine real; many individual tools (Gmail, Drive, Calendar, GitHub, files, web search) are placeholders |
+| **n8n integration** | `services/n8n/*`, Supabase Edge Function `n8n-proxy` | Real, webhook-based triggering, credential proxying, registry sync |
+| **Runtime/Event system** | `lib/swarm/runtimeStore.ts`, `app/api/stream/mission`, `app/api/stream/runtime` | Real, but polling-based SSE (1.5–2s interval), not push/pubsub |
+| **Voice layer** | `lib/voice/voice-recorder.ts`, `voice-player.ts`, `voice-manager.ts`, `speech-cleaner.ts` | Browser Web Speech API only (no cloud STT/TTS provider); routes transcripts through the same `orchestrate()` pipeline as text chat |
+
+---
+
+## 3. CURRENT AGENT ORGANIZATION
+
+### Hierarchy as implemented
+
+```
+Temo (chief)
+ ├── Nova   (manager, Engineering)   → nova-frontend, nova-backend, nova-qa (workers)
+ ├── Flow   (manager)                → no workers wired
+ ├── Atlas  (manager)                → no workers wired
+ ├── Luna   (manager)                → no workers wired
+ ├── Echo   (manager)                → no workers wired
+ └── Orion  (manager, seeded inactive)
+```
+
+- **Temo / CEO** — the chief agent (`level: 'chief'`), the conceptual top of the hierarchy. Currently there is no distinct "CEO orchestration" logic separate from the `unifiedOrchestrator` decision flow — Temo is a data record and a persona for LLM prompting, not a separate execution layer.
+- **Managers** — 6 defined (`Nova`, `Flow`, `Atlas`, `Luna`, `Echo`, `Orion`). Only **Nova** has real, working delegation logic to workers (`lib/crew/nova-delegation.ts`). The other 5 have empty `childrenIds` in both the static definitions and the DB seed — they execute tasks themselves rather than delegating.
+- **Workers** — 3 defined, all under Nova (`nova-frontend`, `nova-backend`, `nova-qa`). No workers exist for any other department.
+
+### Hardcoded/static vs. dynamic/DB-backed
+
+| Component | Static (compiled-in) | DB-backed |
+|---|---|---|
+| Agent definitions | `lib/agents/definitions.ts` — 9 agents, fixed array | `agent_registry` table exists with matching schema (incl. `parent_id`, `children_ids`, `priority`, `tools`) |
+| Departments | `lib/agents/departments.ts` — 6 fixed departments | `agent_departments` table exists |
+| Registry read path | — | `lib/agents/agentRegistryService.ts` reads DB, falls back silently to the static arrays on any error or empty result |
+| Registry write path | **Added in Sprint 1** | `createAgent`/`updateAgent`/`createDepartment`/`updateDepartment` in `lib/agents/agentRegistryService.ts` — real Supabase inserts/updates against the existing schema (no migration needed) |
+| Second, separate registry | `lib/crew/agent-registry.ts` — in-memory `Map`, populated by whichever `Agent[]` a caller passes to `register()`/`registerAll()` | **No longer authoritative (Sprint 1).** It gained a `mergeFromRegistry()` method that hydrates already-registered agents with hierarchy metadata from the unified registry, but its callers (`crew-coordinator.ts`, `crew-manager.ts`) have not yet been rewired to invoke it — see Sprint 1 status below |
+| API routes (`/api/agents/departments|managers|registry`) | **Migrated in Sprint 1** — now call `lib/agents/agentRegistryService.ts` directly (`loadDepartmentsWithAgents`, `getManagers`, `loadAgents`, `getChief`) | No longer route through `lib/dashboard/dashboardService.ts`'s static data |
+
+**Bottom line:** `lib/agents/agentRegistryService.ts` is now the single canonical registry service, with both read and write paths, and is what the three registry API routes serve. The org chart itself is still the same 9 agents / 6 departments (no new agents/departments were added — out of Sprint 1 scope), and `lib/crew`'s in-memory routing cache still needs to be wired to consume the unified registry in a follow-up sprint (see below).
+
+### Sprint 1 — Unified Registry (Completed)
+
+**Objective:** make `lib/agents/agentRegistryService.ts` the single source of truth for agents/departments, without rebuilding the orchestration system.
+
+**Files changed:**
+- `lib/agents/agentRegistryService.ts` — added `createAgent`, `updateAgent`, `createDepartment`, `updateDepartment` (plus `CreateAgentInput`/`UpdateAgentInput`/`CreateDepartmentInput`/`UpdateDepartmentInput` types); updated header comments to declare this service canonical.
+- `lib/crew/agent-registry.ts` — added `mergeFromRegistry(records: AgentRecord[])`, which reuses the existing `mergeRegistryIntoAgents()` bridge to enrich already-registered runtime agents with hierarchy metadata from the unified registry. Does not fabricate new agents (the runtime `Agent` type carries UI fields — personality, voice, workflow — that `AgentRecord` doesn't have).
+- `app/api/agents/departments/route.ts`, `app/api/agents/managers/route.ts`, `app/api/agents/registry/route.ts` — switched from `lib/dashboard/dashboardService.ts` (static `AGENT_DEFINITIONS`) to `lib/agents/agentRegistryService.ts` (DB-backed with fallback).
+
+**Database changes:** none required. Existing `agent_registry`/`agent_departments` schema (including `parent_id`, `children_ids`, `priority`, `tools` from earlier migrations) already had every column needed, and RLS already granted full CRUD to `anon, authenticated`.
+
+**Verification performed:**
+- Confirmed via repo-wide search that none of the three registry API routes were called by any frontend code, and that the `dashboardService` functions they used to call (`getDepartments`, `getManagersList`, `getAgentRegistry`, `getChiefAgent`) had no other callers — so the swap carries no known regression risk.
+- `npx tsc --noEmit` — passes with zero errors across the whole project.
+- `next lint` — zero new warnings/errors in any changed file (pre-existing warnings remain in unrelated files: `app/chat/page.tsx`, `components/layout/command-palette.tsx`, `components/temo/chat-dock.tsx`, `components/temo/command-deck.tsx`).
+- No test runner exists in this project (`package.json` has no `test` script, no test files found), so no automated tests were run.
+
+**Remaining limitation from this sprint:** `lib/crew/crew-coordinator.ts` and `lib/crew/crew-manager.ts` still populate `lib/crew/agent-registry.ts` from whatever `Agent[]` the UI/dashboard store passes to `init()`/`registerAll()` — they did not yet call the new `mergeFromRegistry()` method. This gap was closed in Sprint 1.5 (see below). Also unchanged: `lib/dashboard/dashboardService.ts`'s `getDepartments`/`getManagersList`/`getAgentRegistry`/`getChiefAgent` are now dead code (no callers remain) and are a cleanup candidate for a later sprint.
+
+### Sprint 1.5 — Unified Registry Runtime Wiring (Completed)
+
+**Objective:** close the remaining Sprint 1 gap by making the live crew routing runtime actually consume the unified registry, not just make it *possible* to.
+
+**Current runtime initialization path (before this sprint):** `app/chat/page.tsx` holds an `agents` array (from the dashboard store's static seed data) and calls `crewCoordinator.init(agents)` in a `useEffect`. `CrewCoordinator.init()` (`lib/crew/crew-coordinator.ts`) synchronously called `this.registry.registerAll(agents)`, populating `lib/crew/agent-registry.ts`'s in-memory `Map` entirely from that static array — the unified registry was never consulted at runtime.
+
+**Wiring change:** `CrewCoordinator.init()` now performs its existing synchronous registration (unchanged, so init remains non-blocking and backward compatible with its fire-and-forget caller in `app/chat/page.tsx`), then asynchronously calls `loadAgents()` from `lib/agents/agentRegistryService.ts` and feeds the result into `this.registry.mergeFromRegistry(records)`. This enriches the already-registered runtime agents with canonical hierarchy metadata (`level`, `parentId`, `childrenIds`, `departmentId`, `priority`, `tools`, `isActive`) from the unified registry, without replacing or blocking the existing initialization flow.
+
+**Files modified:**
+- `lib/crew/crew-coordinator.ts` — added the `loadAgents()` import and the post-init async merge call in `init()`.
+
+No changes were made to `lib/crew/crew-manager.ts`: it was inspected per scope, but its `init()` method is not called anywhere in the codebase (confirmed by repo-wide search — `crewManager` is only referenced for `toggleFavorite()` in `app/agents/page.tsx`, which operates on a registry that is never populated). It is dead/legacy orchestration, not part of the live runtime path, so wiring it would have no runtime effect and was left untouched per "keep the implementation minimal."
+
+**Fallback behavior:** `loadAgents()` already has its own internal try/catch that falls back to the static `AGENT_DEFINITIONS` on any DB error or empty result, so it effectively never rejects. `CrewCoordinator.init()` additionally wraps the merge call in a `.catch()` that logs via the existing `logger.routing()` call and leaves the already-registered (static-seeded) agents untouched — so a database outage degrades silently to the pre-Sprint-1.5 behavior rather than breaking chat/voice routing.
+
+**Current registry architecture (as of Sprint 1.5):** `lib/agents/agentRegistryService.ts` remains the single canonical registry (read + write). `lib/crew/agent-registry.ts` is now actually kept in sync with it at runtime via `CrewCoordinator.init()` → `mergeFromRegistry()`, closing the gap identified in Sprint 1. `lib/crew/crew-manager.ts`'s copy of the same `AgentRegistry` class remains unsynced, but is inert (never initialized).
+
+**Remaining registry-related limitations (as of Sprint 1.5):**
+- The merge happens once, at first `init()` call (guarded by the existing `initialized` flag) — if agents/departments change in the database afterward, a running session will not pick up the change until next reload. No periodic re-sync exists (out of scope — would overlap with future queue/event-driven sprints).
+- `lib/crew/crew-manager.ts` still holds a structurally duplicate `AgentRegistry` instance that is never populated or synced; it is dead code, not a live duplicate source of truth, but is a cleanup candidate.
+- `lib/dashboard/dashboardService.ts`'s orphaned registry functions (noted in Sprint 1) remain unremoved.
+- No UI exists yet to create/edit agents or departments through the Sprint 1 write functions.
+
+### Sprint 2 — Generalized Manager → Worker Delegation (Completed)
+
+**Objective:** generalize manager→worker delegation, which previously worked for Nova only, so any manager with registered active workers can delegate through the same mechanism — without adding a new orchestration layer or a new CEO layer.
+
+**Key finding before implementing:** the **mission pipeline was already fully generic.** `lib/swarm/workerRouter.ts`'s `findWorkerForTask(managerId, capability)` — used by `lib/swarm/executionLayer.ts` — was already registry-driven for any manager (`parentId`/`level`/`isActive`/capability match), with correct null-fallback to direct manager execution when no worker exists. It required no changes. The only hardcoded-to-Nova path was the **simple-chat pipeline**: `lib/crew/crew-coordinator.ts` checked `selectedAgent?.id === 'nova'` and called `lib/crew/nova-delegation.ts`'s `delegateToWorker()`, which matched worker selection against a hardcoded per-worker keyword table for exactly `nova-frontend`/`nova-backend`/`nova-qa`.
+
+**New generic delegation architecture:**
+- **`lib/crew/manager-delegation.ts`** (new) — exports `delegateManagerTask(managerId, input, context, taskId, callbacks)`. Generalizes the Nova pilot's four-step pattern (select worker → execute worker → manager reviews → return) to work for any manager:
+  1. **Identify the manager** via `agentRegistryService.getAgentById(managerId)`.
+  2. **Find worker children** via `agentRegistryService.loadAgents()`, filtered to `level === 'worker' && isActive && parentId === managerId` — the same hierarchy rule `workerRouter.ts` uses for the mission pipeline.
+  3. **Select by capability**: each candidate worker is scored by how many of its own registry `capabilities` (e.g. `react`, `testing`, `api_design`) appear as keywords in the request text. This generalizes Nova's old hardcoded `WORKER_KEYWORDS` table into registry data — no worker or manager name is hardcoded anywhere in this module.
+  4. **Execute and review**: if a worker matches, it executes via `chatWithFallback` with a system prompt built from its registry `role`/`capabilities`; the manager then reviews the worker's output via a second LLM call and returns the polished response. Every step emits the same runtime events, timeline entries, and activity-feed items the Nova pilot did (`emitRuntimeEvent`, `onTimeline`, `onActivity`, `onAgentStatus`, `onWorkerActive`), so dashboard/mission observability is unchanged in shape.
+  5. **Graceful no-worker path**: if the manager has no active workers, or no worker's capabilities match, `selectWorkerForManager` returns `null` and `delegateManagerTask` returns `{ delegated: false }` immediately — no worker is fabricated. The caller (crew-coordinator) falls through to normal direct-manager LLM execution, exactly as before.
+- **`lib/crew/nova-delegation.ts`** — reduced to a thin, name-stable compatibility wrapper. `delegateToWorker(input, context, taskId, callbacks)` now calls `delegateManagerTask('nova', input, context, taskId, callbacks)`. `NOVA_WORKER_IDS`/`NovaWorkerId` are preserved for any external reference. This file is no longer called by `crew-coordinator.ts` (which now calls the generic function directly) but is kept so nothing importing it breaks.
+- **`lib/crew/crew-coordinator.ts`** — the delegation trigger changed from `selectedAgent?.id === 'nova'` to `selectedAgent?.level === 'manager'` (a registry-derived field, present synchronously in the seed `Agent[]` and refreshed by the Sprint 1.5 `mergeFromRegistry` sync — confirmed no startup timing gap), and the call site now invokes `delegateManagerTask(selectedAgent.id, ...)` instead of the Nova-specific `delegateToWorker`. Timeline/activity text was generalized from hardcoded "Nova" strings to `selectedAgent.name`.
+
+**How Nova is preserved:** Nova's behavior is unchanged in practice — `crew-coordinator.ts` still resolves to `delegateManagerTask('nova', ...)` when Nova is selected, worker selection still considers only `nova-frontend`/`nova-backend`/`nova-qa` (the only active workers registered under `parentId: 'nova'`), and the execute→review flow is identical. The only behavioral difference: worker selection now scores against each worker's registry `capabilities` array directly (e.g. `react`, `frontend`, `testing`) rather than the old hand-curated `WORKER_KEYWORDS` synonym lists (e.g. `usestate`, `stack trace`, `design system`) — a close but not byte-identical approximation, since the registry capability strings are a subset of the old keyword lists' breadth.
+
+**How other managers are supported:** Flow, Atlas, Luna, Echo (and Orion, inactive) now go through the identical `delegateManagerTask(managerId, ...)` path when selected — the mechanism is manager-agnostic. Today they have **zero registered workers** in `agent_registry` (unchanged — Sprint 2 explicitly does not create workers for testing), so `selectWorkerForManager` returns `null` for all of them and they continue to execute directly via the existing LLM path, identical to their pre-Sprint-2 behavior. The mechanism will activate automatically the moment worker rows with matching `parent_id` are added to the registry — no code change will be required.
+
+**Behavior when no worker exists:** `delegateManagerTask` returns `{ response: '', delegated: false }` without emitting any worker-specific runtime events (only the "Delegation skipped" timeline entry from the caller). `crew-coordinator.ts` falls through to its normal direct-manager LLM path, unchanged from pre-Sprint-2 behavior for every manager without workers.
+
+**Files modified:**
+- `lib/crew/manager-delegation.ts` (new) — generic delegation mechanism.
+- `lib/crew/nova-delegation.ts` (rewritten) — thin compatibility wrapper over the generic mechanism.
+- `lib/crew/crew-coordinator.ts` — trigger condition and call site generalized.
+
+**Database changes:** None. Reuses the existing `agent_registry` columns (`parent_id`, `level`, `is_active`, `capabilities`) already populated by Sprint 1/1.5 migrations.
+
+**Verification performed:**
+- `npx tsc --noEmit` — passes with zero errors, project-wide.
+- `next lint` — zero new issues in any changed file (same pre-existing unrelated warnings as prior sprints).
+- Confirmed via repo-wide search that `delegateToWorker`/`nova-delegation` had exactly one external caller (`crew-coordinator.ts`), now updated; no other file referenced the removed internal Nova-specific helpers (`selectWorker`, `WORKER_DEFS`, `WORKER_KEYWORDS`), so nothing else could break.
+- Confirmed the mission pipeline (`executionLayer.ts` → `workerRouter.ts`) required zero changes, since it was already generic — this sprint only touched the simple-chat pipeline.
+
+**Limitations:**
+- Worker selection in the chat path is still simple keyword-in-text scoring against registry capability strings — the same class of heuristic as before, not an LLM-based capability match. Good enough for V1, per the sprint's explicit scope.
+- No workers exist yet for Flow/Atlas/Luna/Echo, so generalized delegation is currently unobservable beyond Nova in practice — the mechanism is ready but inert until worker rows are added (a future sprint's decision, not this one's).
+- The mission-pipeline's `workerRouter.ts` `CAPABILITY_BRIDGE` (manager-level capability → worker skill) still only covers dev/technical capabilities — unchanged, out of this sprint's scope; would need extension before non-engineering managers could delegate through the *mission* path too.
+- `lib/crew/nova-delegation.ts`'s `delegateToWorker` wrapper is now unused dead code from `crew-coordinator.ts`'s perspective (kept only for external backward compatibility) — a cleanup candidate once confirmed no other consumer needs it.
+
+### Sprint 3 — Usage & Cost Governance Foundation (Completed)
+
+**Objective:** create an append-only Usage Ledger recording AI token consumption at the execution level — the accounting foundation for future cost monitoring, mission/agent cost attribution, and (later) client billing/quotas. Explicitly not a billing system: no Stripe, no subscriptions, no multi-tenancy, no quotas.
+
+**Where usage originates:** every AI completion in this app already flows through one function — `chatWithFallback()` in `lib/ai/ai-provider.ts` — which proxies to the `ai-chat` Supabase Edge Function and returns a `ChatResult` containing `usage: { inputTokens, outputTokens }` and `provider`. This was confirmed to be the single real choke point: 9 call sites across `lib/crew/crew-coordinator.ts`, `lib/crew/manager-delegation.ts`, `lib/swarm/executionLayer.ts`, `lib/memory/summarizer.ts`, `lib/crew/ai-intent-analyzer.ts`, and `lib/tools/planner.ts` all call it, and none call a provider directly.
+
+**How usage is recorded:** `chatWithFallback()` itself now calls `recordUsage()` (new — `lib/ai/usageLedger.ts`) immediately after a successful provider response, before returning to the caller. This means usage recording required **zero changes** to any of the 9 call sites to start working — instrumenting the one choke point covers all of them automatically. `recordUsage()` inserts one row into the new `usage_ledger` table and **never throws**: any Supabase error is caught, logged via the existing `logger.providerWarn`, and swallowed, so a ledger failure can never fail an otherwise-successful AI call (verified: `chatWithFallback`'s existing retry/fallback/timeout logic is untouched — the recording call sits after a provider has already succeeded, outside any retry loop).
+
+`ChatResult` gained a `model: string` field (the resolved model actually used) so the ledger can do model-level accounting even when a caller didn't request a specific model. The `ai-chat` edge function's `handleChat` now echoes back `ctx.model` (the server-resolved effective model) alongside the existing `content`/`usage`, so model attribution is accurate even when the client left `model` unset and a provider default was applied server-side — a small, additive change to the edge function response, not a new abstraction.
+
+**Cost calculation:** `lib/ai/pricing.ts` — a static, manually maintained table of `{ inputPerMillion, outputPerMillion }` USD pricing per provider/model pair, covering every model currently selectable in `lib/settings/settings-service.ts`'s `PROVIDER_MODELS`. No network calls are made to fetch live pricing (as required). `estimateCost(provider, model, inputTokens, outputTokens)` returns `{ cost, isEstimated }`: known pricing → a computed cost, `isEstimated: true` (the table is static, so every cost is inherently an estimate, not a bill reconciliation); Ollama → `cost: 0, isEstimated: false` (self-hosted, zero marginal API cost is a known fact); unknown provider/model pair (e.g. an arbitrary OpenRouter-routed model, NVIDIA NIM, or a future provider) → `cost: null, isEstimated: true` — the row is still recorded with full token data, just without a dollar figure, per the sprint's explicit "nullable when unknown" requirement.
+
+**Retry/attempt accounting:** decided **one ledger row per successful logical operation**, not one row per provider attempt. Reasoning: `AIProviderImpl.chat()`'s internal retry loop (up to 3 attempts) and `chatWithFallback`'s provider-fallback loop both only return a `ChatResult` on success — a failed attempt (429/500/network error) never produces token usage to log, since the provider never returned a billable completion. `chatWithFallback` returns immediately on the first success, so there is structurally exactly one successful attempt per call. This means "one row per attempt" and "one row per logical operation" coincide in this codebase today, and retries never produce duplicate rows. A `correlation_id` column (UUID, defaults to a fresh value per row) is reserved on the table for future work that might want to log failed attempts too and tie them to their eventual successful row — not used for that purpose yet, since there's no usage data to attach to a failed attempt today.
+
+**Attribution model:** `ChatOptions` gained an optional `usageContext` field (`operation`, `missionId`, `taskId`, `agentId`, `managerId`, `metadata`) — purely additive, no function signatures were redesigned. Wired at the 4 call sites where attribution context was already in scope, with the operation type distinguishing them:
+- `lib/swarm/executionLayer.ts` (mission pipeline) → `operation: 'mission_task'`, full `missionId`/`taskId`/`agentId` (worker if delegated, else manager)/`managerId`.
+- `lib/crew/crew-coordinator.ts` `generateResponse` → `operation: 'chat'`, `agentId`.
+- `lib/crew/crew-coordinator.ts` `generateToolResponse` → `operation: 'tool_response'`, `agentId`.
+- `lib/crew/manager-delegation.ts` `executeWorker` → `operation: 'worker_execution'`, `agentId` (worker), `managerId`.
+- `lib/crew/manager-delegation.ts` `managerReview` → `operation: 'manager_review'`, `agentId` (manager).
+
+The other 5 call sites (`summarizer.ts` ×3, `ai-intent-analyzer.ts`, `tools/planner.ts`) were left unmodified — they still get a ledger row (recording happens regardless, at the choke point), just with `operation: 'chat'` (the default) and null mission/task/agent attribution, which is correct: they are system-level operations with no natural mission/agent owner.
+
+**Failure behavior:** ledger recording is fully non-blocking with respect to correctness — `recordUsage()` catches and logs every error internally and always resolves. The AI call's success/failure is determined entirely before `recordUsage()` is invoked, so a database outage degrades to "usage silently not recorded, chat/mission still works," never the reverse. **Streaming responses are not currently recorded** (see limitations below) — `streamWithFallback()`/`chatStream()` return only accumulated text, no usage data, since the edge function's SSE protocol never emits a final usage frame; recording there would require a cross-cutting protocol change and was out of this sprint's minimal-change scope.
+
+**Reporting (read-only, no UI):** `lib/ai/usageLedger.ts` exports `getTotalUsage()`, `getUsageByProvider(provider)`, `getUsageByModel(model)`, `getUsageByMission(missionId)`, `getUsageByAgent(agentId)`, `getUsageByManager(managerId)`, each returning a `UsageTotals` (`totalCalls`, `totalInputTokens`, `totalOutputTokens`, `totalTokens`, `totalEstimatedCost`, `unpricedCalls`). No dashboard page or UI was built, per scope.
+
+**Database changes:** one additive migration, `supabase/migrations/20260819120000_create_usage_ledger.sql` — creates `usage_ledger` only; no existing table/column is modified. RLS is enabled with **only SELECT and INSERT policies** (no UPDATE/DELETE policies at all), which makes Postgres RLS deny modification/deletion by default — enforcing the "append-only, never modify or delete historical records" requirement at the database layer, not just by application convention. `mission_id`/`task_id` are nullable UUID FKs to `missions`/`mission_tasks`; `agent_id`/`manager_id` are nullable text FKs to `agent_registry.id`; `provider`/`operation` are plain `text` (not enums) so new providers/operation types never require a schema migration to be logged — a deliberate, documented departure from this project's usual enum convention for closed sets, justified by Sprint 3's explicit "must support future providers" principle. A `tenant_id`/`client_id`/`company_id` column was intentionally **not** added — multi-tenancy is out of scope — but the nullable, text/uuid-heavy design leaves room for one later without breaking existing rows.
+
+**Files modified:**
+- `supabase/migrations/20260819120000_create_usage_ledger.sql` (new)
+- `lib/ai/pricing.ts` (new)
+- `lib/ai/usageLedger.ts` (new)
+- `lib/ai/ai-provider.ts` — `ChatResult.model`, `ChatOptions.usageContext`, `recordUsage()` call in `chatWithFallback`
+- `supabase/functions/ai-chat/index.ts` — `handleChat` now echoes `model`
+- `lib/swarm/executionLayer.ts` — `usageContext` on its `chatWithFallback` call
+- `lib/crew/crew-coordinator.ts` — `usageContext` on its two `chatWithFallback` calls
+- `lib/crew/manager-delegation.ts` — `usageContext` on its two `chatWithFallback` calls
+
+**Verification performed:**
+- `npx tsc --noEmit` — passes, zero errors, project-wide.
+- `next lint` — zero new issues; same pre-existing unrelated warnings as prior sprints.
+- Confirmed all 9 `chatWithFallback`/`streamWithFallback` call sites still compile unchanged in signature (usageContext is optional).
+- Confirmed no second AI-provider abstraction was introduced — `pricing.ts`/`usageLedger.ts` only consume the existing `ChatResult`/`ProviderId` types.
+- Confirmed the migration contains no `ALTER`/`DROP` against any existing table — additive only.
+- Confirmed (by reading `AIProviderImpl.chat()` and `chatWithFallback`) that retry/fallback/timeout logic is structurally unchanged; `recordUsage()` is only ever called after a successful result, outside any retry loop.
+
+**Remaining limitations:**
+- Streaming chat responses (`streamWithFallback`) are not recorded — no usage data is available from the streaming protocol today. Fixing this would require the edge function's SSE stream to emit a final usage frame and each provider adapter's stream parser to capture it — a larger, cross-cutting change deferred to a future sprint.
+- Pricing data is static and manually maintained; it will drift from live provider pricing over time and must be updated by hand in `lib/ai/pricing.ts`.
+- NVIDIA NIM and non-preset OpenRouter models have no pricing entries — their usage is recorded with `estimated_cost: null`.
+- No quotas, budgets, spend caps, or alerts exist yet — this sprint only records usage; enforcement is future work.
+- No UI/dashboard surfaces this data yet — only the service-layer reporting functions exist.
+- The 5 non-attributed call sites (summarizer, intent analyzer, tool planner) record usage but with null mission/agent attribution — acceptable per scope, but means total-cost-by-agent queries will undercount system-level LLM usage.
+
+---
+
+## 4. CURRENT MISSION LIFECYCLE
+
+```
+User (chat or voice)
+  │
+  ▼
+unifiedOrchestrator.orchestrate()          [lib/swarm/unifiedOrchestrator.ts]  — the single real entry point
+  │
+  ▼
+decisionEngine.makeDecision()              [keyword/heuristic scoring — deterministic, not ML]
+  │
+  ├── SIMPLE ─────────────────────────────────────────────────┐
+  │                                                            ▼
+  │                                            crewCoordinator.routeAndRespond()  [lib/crew/crew-coordinator.ts]
+  │                                              → aiIntentAnalyzer (real LLM call)
+  │                                              → routingEngine → taskClassifier/taskRouter
+  │                                              → optional novaDelegation or n8nActionHandler
+  │                                              → chatWithFallback() → ai-chat edge function → provider API
+  │                                              → response persisted, memory.remember() called
+  │
+  └── MISSION ────────────────────────────────────────────────┐
+                                                                ▼
+                                          missionEngine.launchMission()
+                                            → missionPlanner.planMission()      [regex/keyword capability extraction — no LLM]
+                                            → missionService.createMission/Objectives/Tasks   [Supabase, real CRUD]
+                                            → swarmManager.dispatchTasks()      [sequential for-loop]
+                                                → capabilityMatcher.matchCapability()   [assigns one manager per task]
+                                          executionLayer.executeMissionTasks() [sequential for-loop — comment: "parallel execution is Phase 4"]
+                                            → workerRouter.findWorkerForTask() [hardcoded capability bridge; ~10 dev-centric capabilities covered, others fall back to the manager itself]
+                                            → managerContext.buildManagerContext()  [pulls memory, knowledge, tools, prior task outputs]
+                                            → chatWithFallback() → ai-chat edge function → provider API [with retry/backoff + 30s timeout]
+                                            → result + timeline entry + runtime_activity event written to Supabase
+                                          unifiedOrchestrator.buildMissionResponse()  [synthesizes final chat reply from last completed task]
+```
+
+**Implemented vs. planned:**
+- Implemented: decision routing, mission planning (keyword-based), full DB persistence of missions/objectives/tasks, manager assignment, per-task LLM execution with retries/timeouts, timeline + runtime event logging, SSE polling for UI updates.
+- Planned but not implemented (per in-code comments): parallel task execution ("Phase 4"), LLM-based mission planning (planner currently pure keyword matching), worker assignment across non-technical capabilities, a background queue/scheduler independent of the live request.
+- **Not implemented at all:** review/approval gates before task execution, cost/budget checks, multi-tenant scoping of missions.
+
+---
+
+## 5. CURRENT MEMORY / KNOWLEDGE ARCHITECTURE
+
+- **Short/episodic/long-term memory** (`lib/memory/shortTermMemory.ts`, `episodicMemory.ts`, `longTermMemory.ts`) — all three write to the **same** `memories` table, differentiated by a `type` column and `importance`/`expires_at` fields, rather than being architecturally distinct stores. Short-term has real TTL/trim logic (capped at 20 items by default). Episodic additionally writes to a separate `memory_events` table for a timeline, duplicating content across two tables. Long-term is functionally a default `store()` call plus optional LLM-generated importance/summary.
+- **pgvector** — `memory_embeddings` table, `vector(3072)`, HNSW index. Real, populated via the `embeddings` Supabase Edge Function which calls real embedding APIs (Gemini/OpenRouter/NVIDIA/Ollama/OpenAI) using keys stored in `app_settings`.
+- **Semantic search** — `lib/memory/semanticSearch.ts` queries the `match_memories` Postgres RPC. Real, but failures in the hybrid path are silently swallowed (`.catch(() => [])`), degrading to keyword-only search with no user-visible signal.
+- **Knowledge extraction** — `lib/knowledge/factExtractor.ts` is purely regex-based, matching ~15 hardcoded sentence patterns (e.g. "my favorite IDE is X", "I work at X"). It never calls an LLM. Anything not matching an exact pattern produces no structured facts.
+- **Knowledge graph** — `lib/memory/knowledgeGraph.ts` stores generic `memory_links` edges (source/target/type/weight) with a BFS neighbor walker. Nothing in the fact-extraction pipeline automatically populates this graph — it is only populated if some other caller manually links records. The "gbrain" visualization (`lib/gbrain/graph-builder.ts`) is cosmetic UI built from live agent/mission/provider state plus hardcoded placeholder labels ("Facts"/"Entities"/"Relations") that are not bound to real graph data.
+- **Context builder** — `lib/context/context-manager.ts` / `context-builder.ts` implement a real, complete pipeline: Intent detection (regex-based, `intent-detector.ts`) → Memory retrieval → Tool selection → RAG injection (capped at top 5 results, 200 chars each) → LLM call assembly. This is one of the most complete subsystems in the codebase.
+- **Known scaling risks:** `memory.summarizeAll()` loads up to 200 records and LLM-summarizes any missing summary sequentially, with no batching; `memory.stats()` fetches up to 10,000 full rows just to produce a count; a `clean_expired_memories()` SQL function exists but nothing ever calls it, so soft-deleted/superseded rows accumulate indefinitely.
+
+---
+
+## 6. CURRENT TOOL / AUTOMATION ARCHITECTURE
+
+- **Tool registry** (`lib/tools/registry.ts`) — dynamic Map-based registration of tool definitions. Real.
+- **Tool executor** (`lib/tools/executor.ts`) — parameter validation, permission check, `AbortController`-based timeout, exponential-backoff retry, event emission. Real and functioning.
+- **Permissions** (`lib/tools/permissions.ts`) — a flat, hardcoded map of agent → allowed permission categories (`AGENT_PERMISSIONS` in `types.ts`). No per-tenant/per-user scoping, no DB-backed ACL. Enforcement is coarse: a mismatch is only logged as a warning, not blocked.
+- **Chaining** (`lib/tools/chain.ts`) — sequential multi-step tool execution with shared context. Real.
+- **Planner** (`lib/tools/planner.ts`) — LLM selects tool(s) from the permission-filtered catalog via `chatWithFallback`, parses JSON response. Real.
+- **n8n integration** — frontend (`services/n8n/n8nClient.ts`) posts to the `n8n-proxy` edge function, which holds credentials server-side (from `app_settings`) and makes real REST calls to an n8n instance. Execution is webhook-based only (the n8n REST API doesn't support direct `/executions` POST); `triggerDetector.ts` classifies trigger type and `convertToWebhook` synthesizes a webhook trigger where needed. Registry sync persists trigger metadata to `workflow_registry`. This integration is fully real, not a stub.
+- **Implemented vs. placeholder tools:**
+  - Implemented: 11 n8n tools, 8 memory tools — all wired to working backends.
+  - Placeholder: Gmail, Google Drive, Calendar, GitHub PR/commit, file read/write, web search — all resolve to a `placeholderHandler` that logs a warning and returns `"{service} adapter not yet configured"`.
+  - `voice.speak`/`voice.listen` are listed as `status: 'active'` tools but also route through the placeholder handler as *tools* (the underlying voice subsystem works, but not as an invokable tool).
+  - The Tools UI page (`app/tools/page.tsx`) renders a fully static, hardcoded array disconnected from the real tool registry — it does not reflect actual tool status.
+- **Approval gates for tool actions:** none found. Destructive actions (delete n8n workflow, permanent memory delete) execute immediately with no confirmation step.
+
+---
+
+## 7. AI PROVIDER ARCHITECTURE
+
+**Supported providers:** Gemini, Groq, NVIDIA NIM, OpenRouter, Ollama (`lib/settings/settings-service.ts`). OpenAI/Anthropic have legacy DB columns but are explicitly unused.
+
+**Flow:** `lib/ai/ai-provider.ts` does not call provider SDKs directly from the client app — it POSTs to the Supabase Edge Function `ai-chat`, which loads provider keys from `app_settings` and dispatches to real per-provider HTTP adapters (confirmed in `supabase/functions/ai-chat/index.ts`), supporting both streaming and non-streaming responses. The `embeddings` edge function mirrors this pattern for embedding calls.
+
+**Fallback/retry architecture:** `chatWithFallback()` / `streamWithFallback()` try the active provider first, then walk a defined `FALLBACK_ORDER`, retrying transient errors (HTTP 429/500–504) with exponential backoff, and skipping immediately to the next provider on 401 (auth failure). This client-side logic is real and functioning, not a stub.
+
+**Cost tracking:** as of Sprint 3, `ChatResult.usage` (`inputTokens`/`outputTokens`) is persisted to the append-only `usage_ledger` table on every successful call via `lib/ai/usageLedger.ts`, with cost estimated from the static pricing table in `lib/ai/pricing.ts` and attributed to mission/task/agent/manager where that context is available. There is still no budget cap or spend enforcement — only recording (see Sprint 3 section below).
+
+---
+
+## 8. CURRENT RUNTIME LIMITATIONS
+
+- **Static agent registry (partially resolved in Sprint 1).** The org chart is still the same compiled-in set of 9 agents / 6 departments — Sprint 1 did not add new agents/departments (out of scope). What changed: the DB schema now has a real write path (`createAgent`/`updateAgent`/`createDepartment`/`updateDepartment`) and the live API routes read from the DB-backed registry instead of the static one. No UI yet exists to actually create/edit agents or departments through these new functions.
+- **Duplicate registries/orchestration paths (resolved for the live path in Sprint 1.5).** `lib/agents/agentRegistryService.ts` is the canonical registry. `lib/crew/agent-registry.ts` is now synced from it at runtime — `CrewCoordinator.init()` calls `mergeFromRegistry()` after registering the initial `Agent[]`, so live chat/voice routing reflects the unified registry's hierarchy metadata. `lib/crew/crew-manager.ts` still holds its own unsynced `AgentRegistry` instance, but it is dead code (never initialized in the current app). Routing/scoring logic is still separately duplicated between `lib/crew/task-router.ts` and `lib/swarm/capabilityMatcher.ts`/`workerRouter.ts` — unchanged, out of scope for this sprint.
+- **Nova-only delegation (mechanism generalized in Sprint 2; still Nova-only in practice).** The delegation *mechanism* (`lib/crew/manager-delegation.ts`, plus the pre-existing `lib/swarm/workerRouter.ts` on the mission path) is now registry-driven and works for any manager. But only Nova has active worker rows registered in `agent_registry` (`nova-frontend/backend/qa`); Flow/Atlas/Luna/Echo have zero registered workers, so they still execute tasks directly — not because of hardcoded logic, but because no worker data exists for them yet. Adding worker rows for other departments (a future decision) would activate delegation for them with no further code change.
+- **Synchronous task execution (V1: background queue foundation added, not yet scheduled).** The primary path is still one mission executed synchronously within its triggering HTTP/chat request. A real atomic-claim queue (`claim_ready_tasks()` + `/api/tasks/process`) now exists and reuses `executeTask()` directly, but no `pg_cron` schedule was created (needs a deployed URL) — see the V1 section above for exact activation steps.
+- **No multi-tenancy → RESOLVED (V1).** `tenants`/`tenant_members` + `tenant_id` on every core data table, `is_tenant_member()`-scoped RLS, auto-provisioning on signup. See the V1 section above for the full model.
+- **No authentication/security → RESOLVED (V1).** Real Supabase Auth is now required (`AuthGate`, `/login`); `lib/api/security.ts`'s no-op stubs are superseded by `lib/auth/apiAuth.ts`'s `requireUser()` for API routes. RLS is authenticated-only project-wide.
+- **No cost/budget governance (accounting foundation added in Sprint 3; V1 adds tenant attribution + a budgets table; hard enforcement still missing).** `usage_ledger.tenant_id` and `checkBudget()` exist and are queryable; nothing yet blocks a spend before it happens — see the V1 section's "Known limitations."
+- **No approval gates → RESOLVED (V1) for tool-executor-routed actions.** `requiresApproval` + `lib/governance/approvals.ts`, wired into `lib/tools/executor.ts`. Actions outside the tool executor (none currently exist) aren't covered — mechanism is ready for them.
+- **No client billing/freemium → Foundation added (V1).** `packages`/`tenant_entitlements` + `checkEntitlement()`, wired into mission creation. Billing integration itself (Stripe or similar) is explicitly deferred, by design (Section 14 of the V1 mission).
+- **Other significant limitations:**
+  - Regex-only knowledge extraction — will not scale to arbitrary organizational knowledge capture.
+  - Runtime events are polling-based (1.5–2s interval), not push/pubsub — will not scale with many concurrent missions.
+  - Broken stat reporting: `dashboardService.getKnowledgeStats()` queries a nonexistent column, so knowledge stats silently return zero.
+  - No decision/audit log distinct from operational mission timeline — no structured capture of "why" a decision was made.
+  - Worker "lifecycle" is a DB row + prompt, not an isolated execution context — acceptable for a single-tenant system but insufficient for tenant-isolated multi-tenant work later.
+
+---
+
+## 9. CORPORATE AI OS TARGET ARCHITECTURE (High Level — Not Implemented)
+
+```
+Human Owner
+    │
+    ▼
+Temo — Corporate CEO / Orchestrator
+    │
+    ▼
+Corporate Office
+    ├── Strategy
+    ├── R&D / Innovation
+    ├── Quality / Audit
+    ├── Finance / Governance
+    └── Workforce / Resource Management
+    │
+    ▼
+Companies  (multiple, independently dynamically created)
+    │
+    ▼
+Departments
+    │
+    ▼
+Managers
+    │
+    ▼
+Shared AI Workforce (Workers — reusable specialists, not one-per-customer)
+    │
+    ▼
+Missions → Tasks → Queue/Execution → Review
+    │
+    ▼
+Memory / Knowledge  (feeds and is fed by Missions)
+    │
+    ▼
+R&D / Organizational Learning  (sandbox, lessons learned, self-improving SOPs)
+    │
+    ▼
+Client Organizations  (isolated tenants, each with a dedicated AI Account Manager identity, isolated dashboard, billing/credits)
+```
+
+This is a target description only. No multi-company, multi-tenant, queue-based, or client-facing components exist in the current codebase (see Section 8). Implementation is intentionally deferred to the phased roadmap below.
+
+---
+
+## 10. IMPLEMENTATION ROADMAP
+
+**Phase 1 — Core Corporate OS**
+- Unified Agent Registry (single writable source of truth, retiring the duplicate `lib/crew` registry)
+- Generalized Manager → Worker delegation (extend `nova-delegation.ts`'s pattern to all managers, driven by DB hierarchy)
+- Usage/Cost Ledger (persist the `ChatResult.usage` data already computed but currently discarded)
+- Security/Auth foundation (replace no-op stubs in `lib/api/security.ts` with real Supabase Auth)
+- Approval gates (a `requires_approval` flag + pending-approval state for destructive/costly actions)
+- Audit/Decision logs (a dedicated table distinct from the operational mission timeline)
+
+**Phase 2 — Real Business Operations**
+- Task Queue (decouple mission execution from the triggering HTTP request)
+- Background execution (a worker process/poller consuming the queue)
+- Parallel execution (multiple tasks/missions concurrently, per existing "Phase 4" comments in the code)
+- LLM knowledge extraction (replace the regex-based `factExtractor.ts`)
+- Capacity/resource management (forecasting and growth gates, built on the usage ledger + mission history)
+- R&D/Simulation sandbox (isolated flag on missions/agents for testing new models/tools/agents without affecting production workforce)
+
+**Phase 3 — Client-Facing AI Agency**
+- Multi-tenancy (`tenants`/`clients` table + tenant-scoped RLS across all data tables)
+- Client dashboards (isolated route/auth scope, separate from the internal corporate UI)
+- Client AI Account Manager (a registry entry pattern reusing the Phase 1 dynamic registry — not a new agent architecture)
+- Freemium/credits
+- Packages/billing
+- Multilingual client-facing layer (i18n layered on the existing context builder)
+
+---
+
+## 11. ARCHITECTURAL PRINCIPLES
+
+- Reuse existing working components; do not rebuild unnecessarily.
+- One source of truth for agents/departments.
+- Temo is the CEO/orchestrator, not a separate unnecessary CEO layer.
+- Managers delegate to workers.
+- Agents are logical identities/capabilities, not necessarily separate processes.
+- Keep infrastructure scalable without premature complexity.
+- Cost awareness must be built into the architecture.
+- Human approval remains required for important financial/destructive decisions.
+- Prefer modular evolution over rewriting the existing system.
+
+---
+
+## 12. CURRENT STATUS
+
+| Component | Status | Notes | Priority |
+|---|---|---|---|
+| Agent/department static definitions | WORKING | Fixed 9 agents / 6 departments, compiled-in | — |
+| Agent registry DB read layer | WORKING | Canonical as of Sprint 1; reads DB, falls back to static seed data | — |
+| Agent registry DB write path | WORKING | Added in Sprint 1 — `createAgent`/`updateAgent`/`createDepartment`/`updateDepartment`; no UI yet calls them | Medium |
+| Registry API routes (`/api/agents/*`) | WORKING | Migrated in Sprint 1 to read from the unified registry | — |
+| Duplicate crew registry (`lib/crew/agent-registry.ts`) | WORKING | No longer authoritative; kept in sync with the unified registry at runtime via `CrewCoordinator.init()` → `mergeFromRegistry()` as of Sprint 1.5 | Low |
+| Nova → worker delegation | WORKING | Preserved via `manager-delegation.ts` (Sprint 2), routed through the generic mechanism with `managerId: 'nova'` | — |
+| Generalized manager → worker delegation mechanism | WORKING | `lib/crew/manager-delegation.ts` (chat path) + `lib/swarm/workerRouter.ts` (mission path, already generic pre-Sprint-2); registry-driven, no hardcoded manager/worker names | Low |
+| Other 5 managers' delegation | MISSING (mechanism ready) | Mechanism works for any manager, but Flow/Atlas/Luna/Echo have zero registered workers in `agent_registry` — no worker data exists yet, not a code limitation | Medium |
+| Decision engine (simple vs. mission) | WORKING | Deterministic keyword/heuristic scoring | Low |
+| Mission planner | WORKING | Regex/keyword capability extraction, no LLM | Medium |
+| Mission/task DB persistence | WORKING | Full Supabase CRUD | — |
+| Capability matcher / worker router | PARTIAL | Real, but bridge covers ~10 dev-centric capabilities only | Medium |
+| Task execution (retry/timeout) | WORKING | Real, but sequential/in-request | — |
+| Unified orchestrator | WORKING | Confirmed single live entry point | — |
+| Runtime event/state store | WORKING | Polling-based SSE, not pubsub | Medium |
+| Short/episodic/long-term memory | PARTIAL | Mostly flags on one table, not architecturally distinct | Medium |
+| Semantic search / pgvector | WORKING | Real embeddings + RPC-based retrieval | — |
+| Knowledge extraction | PARTIAL | Regex-only, ~15 hardcoded patterns | Medium |
+| Knowledge graph | PLACEHOLDER | Generic edges, not auto-populated; gbrain UI cosmetic | Low |
+| Context builder | WORKING | Complete intent → memory → tools → RAG → LLM pipeline | — |
+| Tool executor core | WORKING | Validation, permissions, retries, chaining all real | — |
+| Tool permissions | PARTIAL | Flat hardcoded map, warn-only enforcement | Medium |
+| Built-in tools (n8n, memory) | WORKING | Real backends | — |
+| Built-in tools (Gmail/Drive/Calendar/GitHub/files/web search) | PLACEHOLDER | Explicitly unconfigured adapters | Medium |
+| Tools UI page | PLACEHOLDER | Fully static, disconnected from real registry | Low |
+| n8n integration | WORKING | Real webhook-based bridge | — |
+| Multi-provider AI chat | WORKING | 5 real providers, fallback/retry | — |
+| Voice (browser STT/TTS) | WORKING | No cloud provider integrated | Low |
+| Authentication/security | WORKING (V1) | Real Supabase Auth + `requireUser()` on mutating API routes; not every route audited yet | Medium |
+| Multi-tenancy | WORKING (V1) | `tenants`/`tenant_members`/RLS/auto-provisioning; shared workforce, isolated data | — |
+| Usage ledger (token/cost accounting) | WORKING | Sprint 3 + V1 tenant attribution — `usage_ledger` table + `lib/ai/usageLedger.ts` | — |
+| Cost/budget governance (enforcement) | PARTIAL (V1) | `budgets` table + `checkBudget()` queryable; not yet a hard pre-spend gate | Medium |
+| Approval gates | WORKING (V1) | `approval_requests` + `lib/governance/approvals.ts`, wired into the tool executor | — |
+| Audit/decision logs | MISSING | Only operational timeline exists, no rationale capture | Medium |
+| Task queue/background workers | PARTIAL (V1) | `claim_ready_tasks()` + `/api/tasks/process` exist and reuse `executeTask()`; no `pg_cron` schedule created yet (needs deployment) | Medium |
+| Parallel task execution | MISSING | Explicitly flagged in code as future phase | Medium |
+| Client billing/freemium | PARTIAL (V1) | `packages`/`tenant_entitlements`/`checkEntitlement()` wired into mission creation; no payment integration (by design) | Low |
+| Client AI Account Manager | WORKING (V1) | `client_profiles` + prompt identity injection (Sections 15–16); config-based, not a new agent | — |
+| Simulation / R&D mode | WORKING (V1) | `missions.is_simulation` gates tool executor side effects + entitlement consumption | — |
+| Organizational learning (lessons learned) | PARTIAL (V1) | `lessons_learned` table + RLS exist; nothing writes to it yet | Medium |
+| Multi-company support | WORKING (V1) | `tenants` table itself is the multi-company mechanism (any tenant can represent a company) | — |
+
+---
+
+## PGVECTOR INDEX DIMENSION FIX (Hotfix — Fresh Project Initialization)
+
+Discovered while initializing a fresh Supabase project (`lqwgprudmhqsqjqoeqjt`) for the UI reconciliation mission: running the full migration set produced `ERROR: 54000: column cannot have more than 2000 dimensions for ivfflat index`.
+
+**Root cause.** `memory_embeddings.embedding` is `vector(3072)` (set in `supabase/migrations/20260727112722_update_vector_dimension_3072.sql`, sized for Gemini's `gemini-embedding-001` default output). pgvector caps **both** `ivfflat` and `hnsw` index types at 2000 dimensions on the plain `vector` type — 3072 exceeds that for either method. The migration already wrapped the `CREATE INDEX ... USING hnsw` attempt in a `DO $$ BEGIN ... EXCEPTION WHEN others THEN RAISE NOTICE ... END $$;` block specifically anticipating this. That worked as designed: verified via direct REST probes against the live project that **every table from all 21 migrations exists**, and the `match_memories` RPC executes successfully against a live 3072-dimension query vector. The exception was caught and turned into a non-fatal `NOTICE` — the Supabase SQL Editor's UI surfaces that raised notice prominently enough to read as a failure, but no migration was actually aborted and the database initialized completely. (Confusingly, pgvector's error text says "ivfflat index" even when the failing statement creates an `hnsw` index — a known message quirk in the extension, not a sign the wrong index type was attempted.)
+
+**Chosen solution.** Replaced the try/catch-and-notice approach with an explicit no-index decision, documented inline in the migration rather than discovered via a scary-looking runtime notice. Evaluated per the requested options:
+- **(A) Reduce embedding dimensions/model** — rejected: would mean picking one fixed low-dimension model and abandoning the multi-provider embedding support already built into `embeddingService.ts`/the `embeddings` edge function (Gemini, OpenRouter, NVIDIA, Ollama, OpenAI — see compatibility note below).
+- **(B) No ANN index — exact/sequential search** — **chosen**. `match_memories()`'s `ORDER BY e.embedding <=> query_embedding LIMIT match_count` works correctly and fast enough at this project's current single-tenant, early-stage data volume without any index. Critically, this is not a correctness compromise: ivfflat/hnsw are *approximate* nearest-neighbor methods; removing the index makes search **exact**, strictly more correct, with a speed tradeoff that doesn't matter yet.
+- **(C) `halfvec` + hnsw** — pgvector's half-precision `halfvec` type supports HNSW indexing up to 4,000 dimensions, which would cover this column and enable real ANN search. Documented as the future upgrade path, **not implemented now**: it depends on a pgvector extension version (0.7.0+) not confirmed available on this project, and would require also updating `match_memories()` to cast both sides of the comparison to `halfvec` for the index to be used. Revisit once memory volume actually justifies an ANN index.
+- **(D) Other** — none identified; pgvector has no third indexed-vector type today.
+
+**Files changed:**
+- `supabase/migrations/20260727112722_update_vector_dimension_3072.sql` — removed the `DO $$ ... CREATE INDEX ... hnsw ... EXCEPTION ...` block; replaced with a comment explaining why no index is created on this column and what would need to be true to revisit it (Option C above).
+- `.claude/_apply_all_migrations.sql` (regenerated, gitignored scratch artifact) — combined migration file used to initialize the fresh project, updated to match.
+
+**Was the database partially initialized?** No. Verified via read-only REST probes (`GET /rest/v1/<table>?limit=1`) against all 21 migrations' tables, from the first (`app_settings`) through the last (`usage_ledger`): all returned HTTP 200. The `match_memories` RPC was also called directly with a 3072-dimension test vector and returned successfully (empty result set, since no memories exist yet — not an error). The live project's schema is fully initialized and already matches what the fixed migration produces (no index either way) — **no manual re-run against this specific project is required**; the fix matters for future fresh installs so the confusing notice doesn't reappear.
+
+**Embedding dimension consistency (compatibility considerations — found, not fixed, out of this hotfix's scope):** the `vector(3072)` column size only matches embedding models that output *exactly* 3072 dimensions — pgvector's `vector(n)` enforces an exact match, not a maximum. Cross-checking `embeddingService.ts`'s provider list against known model output sizes:
+
+| Provider/model | Typical dimensions | Fits `vector(3072)`? |
+|---|---|---|
+| Gemini `gemini-embedding-001` (default) | 3072 | Yes |
+| OpenAI `text-embedding-3-large` (incl. via OpenRouter) | 3072 | Yes |
+| OpenAI `text-embedding-3-small` (incl. via OpenRouter) | 1536 | **No — insert would fail** |
+| NVIDIA `nv-embed-v1` | 4096 | **No — insert would fail** |
+| Ollama `nomic-embed-text` / `all-minilm` / `mxbai-embed-large` | 768 / 384 / 1024 | **No — insert would fail** |
+
+Selecting any provider/model other than the 3072-dimension default in Memory settings would currently fail at `embeddingService.storeEmbedding()`'s insert with a dimension-mismatch error, not a graceful degradation. This is a pre-existing gap in the multi-provider embedding architecture, not something this hotfix introduced or was asked to fix — flagged here for a future sprint (likely: pin one canonical embedding model for V1 and hide the others from the provider list until per-model dimension columns or a padding/truncation scheme exists).
+
+**Risk to existing Memory/RAG functionality:** none. No behavior changed for any embedding that was already working (3072-dim Gemini path) — `match_memories()`'s query/logic is untouched, only the (already-nonexistent, already-caught-as-a-notice) index attempt was removed.
+
+## V1 — CORPORATE AI OS / AI AGENCY FOUNDATION
+
+This is the Master V1 Build Mission's architecture. It builds directly on every prior sprint (registry, delegation, usage ledger, workspace tooling) — nothing described here replaces that work; it adds multi-tenancy, real authentication, approval gates, package entitlements, a simulation mode, and a background task queue on top of it.
+
+### Runtime flow (updated)
+
+```
+User (signed in, browser session)
+  → AuthGate (stores/authStore.ts) — redirects to /login if no session
+  → orchestrate(userRequest, { tenantId, isSimulation? })   [tenantId now REQUIRED]
+      → decisionEngine → simple (CrewCoordinator) or mission (missionEngine) branch, unchanged
+      → missionEngine.launchMission() now:
+          1. checkEntitlement(tenantId)  — Section 14, blocks if package/credit limit reached
+          2. creates the mission with tenant_id + is_simulation
+          3. consumeProjectSlot(tenantId) on success
+      → executionLayer.executeTask() — unchanged, now also tags usage_ledger rows with tenant_id
+      → tool calls through lib/tools/executor.ts now:
+          - check `requiresApproval` → create a pending approval_requests row and STOP if gated
+          - check `isSimulation` → skip the real handler, return a labeled simulated result
+  → Response, exactly as before
+```
+
+### Data model — tenants
+
+- **`tenants`** — one row per company. A single well-known row (`00000000-0000-0000-0000-000000000001`, kind `'internal'`) represents Temo's own corporate operation (Section 13: Temo running its own real projects — market research, content, R&D). Every other row is a client company (kind `'client'`).
+- **`tenant_members`** — links `auth.users` to tenants with a role (`owner`/`admin`/`member`). A user can belong to multiple tenants (staff case); a normal client user belongs to exactly one.
+- **Auto-provisioning** (`provision_tenant_for_new_user()` trigger on `auth.users`): the very first person ever to sign up becomes the internal tenant's owner. Every signup after that gets their own new client tenant, a `client_profiles` row, and a `free` package entitlement — automatically, no manual step.
+- **Shared workforce, isolated data** (Section 15, explicit): `agent_registry`/`agent_departments` remain global, un-tenant-scoped — the same Nova/Flow/Atlas/Luna/Echo/Orion hierarchy serves every tenant. Only DATA is isolated: missions, mission_objectives, mission_tasks, mission_timeline (via mission_id join), conversations, messages, memories, memory_embeddings (via memory_id join), and usage_ledger all carry or join to `tenant_id`.
+- **Legacy data migration**: every row that existed before this migration was backfilled to the internal tenant (not deleted, not orphaned) — see `supabase/migrations/20260819140000_create_v1_corporate_os_foundation.sql`'s UPDATE statements.
+
+### Security model (Section 7) — what actually changed
+
+- **Real Supabase Auth** is now required. `lib/supabase/client.ts` persists sessions (`persistSession: true`); a global `AuthGate` (`components/auth/auth-gate.tsx`, wired into `Providers`) redirects to `/login` (`app/login/page.tsx`) whenever there's no session. There is no more anonymous/no-auth mode.
+- **RLS was tightened everywhere.** Every table that previously granted `anon, authenticated` full access now grants `authenticated` only, and tenant-scoped tables additionally require `is_tenant_member(tenant_id)` (a `SECURITY DEFINER` SQL function). This was a genuine breaking change to existing policies — justified explicitly by Section 7 ("remove the assumption of a single anonymous tenant... never weaken security").
+- **New, important nuance discovered during implementation**: `lib/supabase/client.ts`'s shared client is now context-aware — in the browser it carries the signed-in user's session (RLS applies normally); in any server context (Next.js API routes, the task queue processor) it automatically uses `SUPABASE_SERVICE_ROLE_KEY` instead, matching how Edge Functions already worked. This was necessary because the existing service layer (`missionService.ts`, `agentRegistryService.ts`, `executionLayer.ts`, etc.) all import one shared client singleton with no per-call injection — making it context-aware avoided a broad, invasive refactor of every DB-calling function. **The tradeoff**: RLS is no longer a backstop for server-side code, so **every API route touching tenant-scoped or sensitive data now performs its own authorization check** via `requireUser()` (`lib/auth/apiAuth.ts`), which verifies the caller's bearer token (attached by `lib/api/authFetch.ts` on the frontend). This was applied to the agent registry's mutating routes (POST/PATCH/DELETE); the pre-existing read-only GET routes were left as-is (already anonymously-readable before this migration, so not a regression) — **hardening the remaining GET routes is a known V1.1 follow-up**, not done here for scope reasons.
+- **Secrets discipline unchanged and reinforced**: `SUPABASE_SERVICE_ROLE_KEY` has no `NEXT_PUBLIC_` prefix, so Next.js never inlines it into the browser bundle — verified by the `isServer` guard in `lib/supabase/client.ts` being genuinely unreachable client-side.
+
+### Approval gates (Section 8)
+
+`lib/governance/approvals.ts` — `requestApproval()` / `resolveApproval()` / `listPendingApprovals()`, backed by the new `approval_requests` table (append/update-only, no DELETE policy — same audit-friendly pattern as `usage_ledger`). Wired directly into `lib/tools/executor.ts`: any `ToolDefinition` with `requiresApproval: true` stops before running and creates a pending request instead of executing; the caller sees `pendingApprovalId` in the result rather than a success or a hard failure. Marked so far: `n8n.deleteWorkflow`, `memory.forget` (both destructive per Section 8's own examples). A Settings → **Approvals** page lists pending requests with Approve/Reject actions. **Not yet wired**: spend-threshold or publish-content gates for actions that aren't routed through the tool executor (e.g. a future direct-publish integration) — the mechanism is generic and ready for that, but no such integration exists yet to gate.
+
+### Package entitlements (Section 14)
+
+`packages` (free/package1/package2/package3/custom, seeded) + `tenant_entitlements` (package_id, credits_remaining, projects_used) + `lib/governance/entitlements.ts`'s `checkEntitlement()`/`consumeProjectSlot()`, called from `missionEngine.launchMission()` before any mission is created. Simulation missions are explicitly exempt (they don't consume a client's allowance — Section 12). Billing itself is explicitly NOT built (Section 14: "do not build a complex payment system unless necessary for V1") — entitlements can be adjusted by hand or by a future Stripe webhook writing into `tenant_entitlements` without this check changing at all.
+
+### Budget governance (Section 9)
+
+`budgets` (tenant_id, monthly_limit_usd, alert_threshold_pct) + `usage_ledger.tenant_id` (added) + `lib/governance/entitlements.ts`'s `checkBudget()`, which sums `usage_ledger.estimated_cost` for the tenant's current billing period against its limit. **Not yet wired to actually block spend** — it's queryable but nothing calls it as a hard gate before an AI call yet (that would mean threading a budget check into `chatWithFallback`, the single highest-fan-in function in the codebase — deferred as a V1.1 item to avoid touching that function under this mission's time budget; the read path is fully functional today).
+
+### Simulation / R&D (Section 12)
+
+`missions.is_simulation` (boolean). A simulation mission runs through the exact same pipeline as a real one — same planning, same delegation, same LLM calls — but `lib/tools/executor.ts` short-circuits any tool call with `simulated: true` and a labeled mock result instead of touching a real external system (n8n, memory deletion, etc.), and it's exempt from entitlement consumption. **Promotion concept** (simulation → evaluation → review → approved → production) is represented structurally (a simulation mission's `lessons_learned` rows can be reviewed and a human can then launch the same request as a real mission) but there is no automated promotion pipeline — that remains a human decision, deliberately, per Section 12's explicit "must NOT allow uncontrolled autonomous modification."
+
+### Organizational learning (Section 11)
+
+`lessons_learned` (tenant_id, mission_id, category, summary, outcome) — append-only, same pattern as `usage_ledger`/`approval_requests`. **Not yet auto-populated** — no code currently writes a lesson at mission completion. The table and RLS exist; wiring `missionEngine`'s completion path to write a summary via an LLM call is the natural next step, deferred (V1.1) to keep this mission's LLM-call surface area from growing further without live verification capacity to test it (see Known Limitations).
+
+### Client AI Account Manager + multilingual (Sections 15–16)
+
+`client_profiles` (tenant_id, assistant_name, preferred_language) — pure configuration, not a new agent implementation. `lib/governance/clientProfile.ts`'s `buildIdentityDirective()` appends a short instruction to every agent's system prompt in `lib/crew/crew-coordinator.ts` (`generateResponse`/`generateToolResponse`/`generateStreamResponse`) when a tenant has customized their assistant's name or language — the underlying role/capabilities are untouched, only the persona presentation changes. Settings → **Workspace & Language** lets a signed-in user edit both. Two languages seeded (English, Arabic per Section 16); adding more is a matter of extending the `LANGUAGE_NAMES` map and the Settings dropdown — no business logic duplication per language, as required.
+
+### Background task queue (Section 5)
+
+The synchronous path (one mission, one HTTP/chat request, in-process execution) remains the PRIMARY path and is unchanged — it already works and is tenant-correct under RLS via the browser's session. Added on top: `claim_ready_tasks(limit, claimer)` — a `SECURITY DEFINER` Postgres function using `FOR UPDATE SKIP LOCKED` to atomically claim a batch of `'ready'` tasks (new `mission_tasks.locked_at`/`locked_by` columns prevent double-processing under concurrent callers) — plus `POST /api/tasks/process`, which claims a batch and runs each through the exact same `executeTask()` the synchronous path uses (zero duplicated execution logic). **This is a genuine architectural upgrade path, not fully activated**: `pg_cron`/`pg_net` are enabled defensively in the migration (wrapped so the migration still succeeds if the project's plan doesn't expose them), but no cron schedule was created, because doing so would need to target a stable deployed HTTPS URL — unreachable from a local dev server. **To activate it after deployment**: schedule `select cron.schedule('process-task-queue', '*/1 * * * *', $$ select net.http_post('https://<deployed-url>/api/tasks/process', headers := '{"x-queue-secret":"<TASK_QUEUE_SECRET>"}'::jsonb) $$);` — documented here rather than embedded in a migration so no deployment URL or secret ever lands in version control.
+
+### Live verification results (confirmed against the real Supabase project)
+
+- **Signup → auto-provisioning, both branches**: verified via Playwright + the Supabase Admin API. First signup correctly became the internal tenant's owner (`tenant_members` row, role `owner`, tenant `00000000-...0001`); a second signup correctly received its own new client tenant, a `free`-package `tenant_entitlements` row with 20 credits, and a `client_profiles` row — all exactly as designed, with zero manual steps.
+- **A real bug was found and fixed during this verification**: the provisioning trigger initially failed every signup with "Database error saving new user" — an unqualified-`search_path` issue when a `SECURITY DEFINER` trigger fires from `auth.users`' context (a known Supabase gotcha). Fixed via `supabase/migrations/20260819150000_fix_tenant_provisioning_search_path.sql`, which also added exception-safety (a provisioning failure must never block signup) and an idempotent client-side repair path (`ensure_tenant_for_current_user()`, called by `authStore.refreshTenants()` if a signed-in user has zero tenant memberships).
+- **Login, session, and the auth gate**: confirmed working — a confirmed user signs in and lands on `/dashboard`.
+- **G-Brain**: confirmed rendering with real tenant-visible data (5 active managers: NOVA/FLOW/ATLAS/LUNA/ECHO — Orion correctly excluded as inactive) and correct neural-line depth ordering (`org-lines` z-index 1, `org-tree` z-index 2, verified via computed styles, not just source reading).
+- **Command Deck**: confirmed rendering 5 real agent cards, consistent with G-Brain.
+- **Agent Management (Settings)**: confirmed a full real create → verify-visible → delete cycle against the live database via the UI, including cleanup of the manager's `children_ids` — not a mock.
+- **Workspace & Language and Approvals settings sections**: confirmed rendering and reachable.
+- **RLS tenant isolation**: confirmed via direct REST calls with the anon key — `agent_registry`, `missions`, `conversations`, `memories`, `usage_ledger`, and `packages` all now return an empty result to an unauthenticated caller (previously fully open). This is the concrete, verified proof that Section 7's "remove the single-anonymous-tenant assumption" was actually achieved, not just written into a migration file.
+- Test data (2 auth users, 1 test tenant, 1 test worker agent) created during verification was fully cleaned up afterward — the internal tenant's ownership slot was deliberately released so the real owner's first signup claims it correctly.
+
+### Known limitations (V1, honestly stated)
+
+- **No AI provider API key was configured in the live project during this mission**, so no real LLM-backed mission response was generated end-to-end — mission *creation*, entitlement checks, tenant scoping, and delegation routing are all code-verified and (where reachable without an LLM call) live-verified, but the final "AI writes the actual answer" step was not exercised live.
+- Budget checks (`checkBudget`) are not yet a hard gate before spend.
+- `lessons_learned` is not yet auto-populated from completed missions.
+- The background queue is schema/code-complete but not scheduled (needs a deployed URL).
+- Only the 4 agent-registry mutating routes got explicit `requireUser()` hardening; other server routes reading tenant-adjacent data should be audited next (V1.1).
+- No OAuth-based tool integrations (Gmail/Drive/GitHub/Calendar) were added — judged, per Section 17's own "only add if it materially improves V1" instruction, that partially-built OAuth flows without live testing capacity would be a worse outcome than clearly documenting them as not done. n8n (already real) remains the primary external-action integration.
+- Multilingual coverage is the persona/response layer only — the UI's own strings (buttons, labels) are still English-only; no RTL layout support was added for Arabic.
+
+## V1.1 — CORPORATE OFFICE / OPERATING COMPANIES STRUCTURE + UI/UX ENHANCEMENT PASS
+
+Two related pieces of work, done back-to-back: (1) a genuine data-model addition — an internal Corporate Office / Operating Companies grouping layer above the existing shared agent registry — and (2) a visual enhancement pass across G-Brain and Command Deck to make that structure (and the rest of the interface) read as a premium, cohesive Corporate AI OS rather than a flat agent list. Both are additive; nothing described in Section "V1 — CORPORATE AI OS / AI AGENCY FOUNDATION" above was changed or removed.
+
+### 1. Data model: `business_units` (new table)
+
+A new internal grouping concept, deliberately **not** named `companies` — `tenants` (Section "V1", above) already means "external client company" in this codebase, and reusing that word for an internal concept would create exactly the kind of ambiguity this document exists to prevent.
+
+- **`business_units`** (`id`, `name`, `kind: 'corporate' | 'operating'`, `description`, `icon`, `theme_color`, `sort_order`) — same RLS pattern as `agent_registry`/`agent_departments` (`authenticated`-only SELECT/INSERT/UPDATE, no DELETE policy — deletes go through a service-role server route if ever needed, matching the existing agent-delete pattern).
+- **`agent_departments.business_unit_id`** (new nullable FK) — links every existing department to its business unit. Purely additive column.
+- Migration: `supabase/migrations/20260819160000_create_business_units.sql`. Idempotent (`ON CONFLICT ... DO UPDATE`), applied and live-verified against the real Supabase project (service-role REST queries confirmed the table, the FK backfill, and the new agent rows before any UI work began).
+
+**Seed structure — one business unit per existing manager, plus a new Corporate Office:**
+
+| Business unit | `kind` | Manager(s) |
+|---|---|---|
+| Corporate Office | `corporate` | 5 new agents (below) |
+| AI Engineering & Technology | `operating` | Nova (existing, unchanged) |
+| AI Automation | `operating` | Flow (existing, unchanged) |
+| AI Research & Intelligence | `operating` | Atlas (existing, unchanged) |
+| AI Design & Creative | `operating` | Luna (existing, unchanged) |
+| AI Marketing & Content | `operating` | Echo (existing, unchanged) |
+| Trading Company | `operating` | Orion (existing, unchanged — still `is_active=false`, not reactivated by this work) |
+
+**5 new Corporate Office agents** (new identities, not replacements — every existing manager keeps its original `id`, `role`, capabilities, and workers exactly as before): **Vertex** (Chief Strategy Officer), **Forge** (Chief Innovation Officer), **Sentinel** (Chief Governance & Risk Officer), **Cortex** (Chief Corporate Intelligence Officer — deliberately distinct from Atlas, who remains the Research operating company's day-to-day manager), **Ledger** (Chief Financial Officer). All are ordinary `agent_registry` rows (`level='manager'`, `parent_id='temo'`) — no new `agent_level` enum value was added; the corporate/operating visual and semantic distinction comes entirely from `business_units.kind`, keeping the existing hierarchy model (Section 3) unchanged. A new `gold` tone (`#facc15`) was added to `TONE_COLORS` in `lib/agents/frontendBridge.ts`, reserved for the Corporate Office tier so it reads as visually distinct from the operating-company rainbow.
+
+**Service layer**: `lib/agents/agentRegistryService.ts` gained `loadBusinessUnits()` / `loadBusinessUnitsWithDepartments()`, mirroring the existing `loadDepartmentsWithAgents()` pattern exactly. `lib/agents/types.ts` gained `BusinessUnitRecord` / `BusinessUnitWithDepartments`; `DepartmentRecord` gained `businessUnitId`. Both G-Brain and Command Deck fall back to today's flat, ungrouped rendering if `business_units` is ever unreachable — verified live (pre-migration screenshots showed the identical flat layout with zero console errors) before the migration was applied.
+
+### 2. G-Brain visual redesign (`components/temo/org-chart.tsx`)
+
+- **Temo is now visually dominant**: a new `hero` Holo size (198px, up from the existing `xl` 134px), 32px name (up from 26px), and — new — a short description line pulled from `TEMO_UI.activity`. No other agent uses the `hero` size.
+- **Corporate Office / Operating Company grouping bands**: managers now render inside labeled clusters (`business-unit-row` → `business-unit-cluster`, one per business unit) with a pill-shaped header (icon + name, tinted with the unit's real `theme_color`) above each cluster's manager(s), instead of one flat, unlabeled row of 10 managers. This is the direct visual expression of the data model in §1. The Corporate Office cluster gets a subtle extra background wash (`.cluster-corporate`) to reinforce its distinct executive status, on top of the gold tone already carried by its agents.
+- **Every manager/executive node now shows**: avatar (unchanged, existing `Holo` component), name, fixed job title, **company/business-unit tag** (new — `agent.company`, sourced from the same business-unit data, not fabricated), status dot, and a **short description snippet** (new — the agent's real `description` column, 2-line clamp with ellipsis). Worker/sub-agent nodes deliberately keep their existing compact treatment (avatar + name + status only) — adding a full description to every worker as well was judged to reintroduce the "crowded" look the brief explicitly warned against; this is a scoping decision, not an oversight, and is easy to extend later if wanted.
+- **Decrowding**: `.subagent-stack` changed from a strict single-column vertical stack to a CSS `flex-flow: column wrap` layout (`max-height: 280px`) — companies with more than ~2 workers now wrap into a second column automatically instead of growing arbitrarily tall, with zero JS changes (the SVG edge-drawing code already measures actual DOM positions via `getBoundingClientRect`, so it required no changes to support the new layout).
+- **Depth/paint order, neural-line behavior, and the starfield/background** are unchanged from the prior pass — still verified (lines render behind nodes/text at every viewport tested).
+- **Responsive/scrolling**: `.business-unit-row` is a single non-wrapping flex row (`flex-wrap: nowrap`) inside the pre-existing `.org-stage` horizontal scroll container — verified by scrolling the container to `scrollWidth` and confirming Corporate Office's 5 executives render correctly off the right edge of a 1920px viewport, and by a 900px-viewport screenshot confirming the layout degrades to a legible horizontally-scrollable strip rather than breaking.
+- **Agent detail modal** (`DepartmentModal`) — unrelated to this pass but confirmed still fully functional: capabilities/tools chips and real recent-task activity (added in the prior business-units turn) render correctly for both an original agent (Nova) and a new Corporate Office agent (Vertex).
+
+### 3. Command Deck panel reorder + declutter (`components/temo/command-deck.tsx`)
+
+Right-rail panels were reordered to match the brief's explicit priority (system status → corporate overview/companies → approvals → AI usage/resources), and each now shows real data instead of decoration:
+
+- **"Corporate Overview"** (renamed from "Global Operations") — leads with real counts (companies, managers, active missions) from `loadBusinessUnitsWithDepartments()` / mission data; the previous purely-decorative large network icon was removed as clutter now that the real numbers carry the panel.
+- **"Approvals"** (renamed from "System Alerts") — real pending rows from `listPendingApprovals()`; gets a visible amber `panel-attention` treatment (border/glow + pulsing signal dot) only when there is at least one pending approval, otherwise reads as calm/normal. Empty state is an honest "No pending approvals." — never a fabricated alert.
+- **"AI Usage & Resources"** (renamed from "Resource Distribution") — real per-provider token/cost breakdown (`getUsageBreakdownByProvider()`, new function in `lib/ai/usageLedger.ts`) driving both the donut chart and its legend; empty state is an honest "No AI usage recorded yet." rather than the old hardcoded 48/24/18/10% split.
+- Each agent card in the hero-bridge row now carries its business-unit name as a small tag underneath the role, for the same "which company is this agent part of" context G-Brain now shows.
+- Global polish: a consistent `:focus-visible` ring across nodes/cards/nav buttons/links (keyboard-navigation parity, previously inconsistent), a subtle hover glow on `.hologram-panel`, and `.agent-card` transition smoothing.
+
+### 4. Explicitly preserved (verified, not just assumed)
+
+- Every existing agent's `id`, `role`, capabilities, tools, and worker list — byte-for-byte unchanged (confirmed via direct service-role REST query before and after).
+- The cinematic background, starfield, particle/scan animations, neural-link SVG rendering and its depth ordering, and the `Holo`/`VoiceAura` shared avatar components — all reused as-is, not rebuilt.
+- Multi-tenancy, RLS, auth, mission engine, tool executor, approval-gate mechanics — untouched; this was a presentation-layer and one-table-additive-schema pass only.
+- No hardcoded organizational data was introduced into the UI layer — every number/label shown (company counts, agent counts, mission counts, usage figures, approval counts) is read live from the database, with an honest empty state where real data doesn't exist yet (no AI usage recorded, no pending approvals, no missions), consistent with the brief's "no fake metrics" constraint.
+
+### 5. Known remaining UI limitations (honestly stated)
+
+- Agent-card title/company text can wrap to an uneven number of lines across a row when names differ significantly in length (e.g. "Research & Intelligence Manager" vs. "Nova"), producing slightly uneven card heights in the Command Deck hero row. Cosmetic, not functional — a fixed-height card with truncation would resolve it, not done here for scope.
+- Worker-grid wrapping (`flex-flow: column wrap`) is a CSS-only solution tuned for the current worker counts (2–5 per manager); if a manager is ever given a much larger number of workers, the fixed `max-height: 280px` heuristic may need to become responsive rather than a constant.
+- Corporate Office's band, at 5 managers, is visibly wider than each single-manager Operating Company band — intentional (reflects real headcount) but worth a design pass later if Operating Companies grow multiple departments each, per the target model in Section 9 above ("each company can have its own departments, managers and workers").
+- No dedicated Level-2 "Company" drill-down route was built (e.g. `/company/[id]`) — clicking a business-unit band does not currently scope/filter the view. The band grouping on the existing G-Brain page was judged sufficient for the current company count (7); a dedicated route remains a natural next step if the number of companies grows enough that a single-page view becomes unwieldy.
+- The rest of the app (Settings, Agents, Missions, Analytics, etc. — the `AppShell`-wrapped utility pages, a deliberately separate visual system from G-Brain/Command Deck per Section 2's table) was **not** touched by this pass; the brief's "global UI/UX" instructions were applied to the cinematic G-Brain/Command Deck surface specifically, since that's where the Corporate/Company narrative lives. Extending the same design-system polish (focus rings, hover states, spacing) to the utility pages is a reasonable follow-up.
+
+## V1.2 — UI/UX POLISH & STRUCTURAL ALIGNMENT PASS (2026-08-20)
+
+A "Lead UI/UX Engineer" pass across G-Brain, Command Deck, and global
+styling, on top of the V1.1 Corporate Office / Operating Companies
+structure. Purely presentation-layer plus one naming-only migration — no
+backend, schema (beyond a `name` column update), auth, or agent-hierarchy
+changes.
+
+### 1. G-Brain layout — Corporate Office now flanks Temo directly
+
+Previously Corporate Office was just another band at the end of the
+scrollable Operating-Company row. It now renders as two flanking columns
+(`.executive-flank.flank-left` / `.flank-right`) directly beside Temo at
+the top tier — alternating agents left/right so headcount stays balanced
+as it grows — with the 6 Operating Companies remaining in their own row
+below. Both flanks use CSS `flex-wrap`, so additional future Corporate
+Office hires stack within their column instead of pushing off-screen. At
+today's headcount (10 managers, 7 companies) the entire chart now fits in
+one 1920px viewport with no horizontal scroll at all (it still scrolls
+gracefully at narrower widths, verified). The `Node`/edge-measurement code
+was not touched — only where in the DOM the same nodes render, since edge
+positions are computed from live `getBoundingClientRect()` calls regardless
+of layout position.
+
+### 2. Subsidiary naming convention
+
+New migration `20260820090000_business_unit_naming_convention.sql` appends
+"Company" to every `kind='operating'` business unit's name (e.g. "AI
+Automation" → "AI Automation Company"). Corporate Office is deliberately
+excluded — it is the parent/governing body, not a subsidiary. `id` values,
+`kind`, colors, and icons are untouched; this is a pure `name` UPDATE.
+
+### 3. Color harmony fixed at its actual source
+
+Root cause found: `TONE_COLORS` (`lib/agents/frontendBridge.ts`) held
+decorative shades (e.g. violet `#a78bfa`) that were close to but NOT the
+same hex as the corresponding `business_units.theme_color`/agent
+`theme_color` (e.g. `#7B61FF`) — so a company's band header, its manager's
+node border/glow, and the connecting neural line were three visibly
+different purples instead of one. Fixed by making `TONE_COLORS` exactly
+equal each company's real stored hex (not a nearby approximation), and
+adding a missing `orange` tone — `TONE_MAP` had been silently collapsing
+Trading Company's `#F97316` onto the same `amber` bucket as Marketing's
+`#F59E0B`. Because band headers, node borders, edges, and Command Deck
+cards all already read from this one `TONE_COLORS` map, the fix cascades
+correctly everywhere with no other code changes — exactly the "single
+source of truth" pattern this document keeps enforcing.
+
+### 4. Distinctive avatars for Corporate Office
+
+The 5 new corporate agents (Vertex/Forge/Sentinel/Cortex/Ledger) had no
+portrait assets and rendered as a bare fallback letter. `agentImage()` now
+assigns each one a distinct image from the same real specialist-portrait
+pool workers already use (`/agents/sub-01.png`...) — reusing true existing
+assets, not fabricating new ones.
+
+### 5. Command Deck — dead widgets purged, real hub added
+
+Audited every widget in the old `widget-grid`: `ChatWidget` (canned string
+response, not connected to the real chat pipeline — `/chat` already does
+this for real), `NetworkWidget` (hardcoded 5-slot radial layout, silently
+dropped half of today's 10 managers, duplicated the hero-bridge row above
+it), `WorkflowWidget`/`AnalyticsWidget`/`SettingsWidget` (100% local state,
+zero backend connection, each duplicating a real page that already exists
+at `/workflows`/`/analytics`/`/settings`) — all removed. `MissionWidget`
+kept (its mission list is real, from `listMissions()`) but its static
+always-"3-done" progress timeline (never reflected any real mission) was
+removed. A fabricated `"Knowledge Size: 2.4TB"` sidebar stat was replaced
+with the real live company count. The right-rail's "System Overview" panel
+(a hardcoded, never-changing fake sine-wave "Real-time Performance 100%"
+chart) was removed outright — no real time-series metric exists to back
+it, so per this document's own "no fake metrics" rule it was deleted
+rather than left in place or backed by an invented number.
+
+In place of the removed widgets: a new **Quick Access** panel renders
+every real page in the app as a clickable tile, reusing `LeftNav`'s own
+`NAV_ITEMS` array (now exported) as the single source of truth — Command
+Deck's hub and the AppShell sidebar can never drift out of sync because
+they're now the same list. `LeftNav.NAV_ITEMS` itself was corrected in the
+process: `/` was mislabeled "Dashboard" (it's actually G-Brain) and
+Command Deck (`/dashboard`) was missing from the menu entirely — both
+fixed.
+
+### 6. Live Command Bridge mirrors G-Brain's real structure
+
+The hero-bridge agent row was a flat list with no company grouping. It now
+groups agents into the same Corporate Office / Operating Company clusters
+as G-Brain, computed from the exact same live queries
+(`loadBusinessUnitsWithDepartments()`), each cluster carrying the same
+company-color label. This is a *genuine* mirror, not a hand-synced
+lookalike: both surfaces read the identical database tables, so a real
+structural change (a new company, a reassigned manager) appears in both
+places automatically with no additional code path to keep in sync. A real
+layout bug was found and fixed during verification: the taller
+label-bearing cluster rows initially collided with Temo's own name/subtitle
+text at the container's default height — fixed by increasing
+`.hero-bridge`'s height and Temo's vertical position (verified via
+`getBoundingClientRect()` measurements before/after, not just visually).
+
+### 7. "Tap to Speak" brought to the primary surfaces
+
+`VoiceHud` (`components/layout/voice-hud.tsx`) was already a fully real,
+wired voice control (`voiceManager`/`useVoiceStore`) — but it only existed
+inside `TopNav`, part of the separate `AppShell` page family (`/chat`,
+`/settings`, etc.). G-Brain and Command Deck, the two primary cinematic
+surfaces, had no voice trigger at all. The exact same component (not a
+re-styled duplicate) is now rendered in Command Deck's topbar, next to the
+G-Brain link — real, prominent, and it does not overlap or obstruct any
+other topbar control.
+
+### 8. Root-cause contrast fix (not another per-component patch)
+
+The dark-text bug patched per-component in the previous UI pass
+(`components/ui/input.tsx`, `app/settings/page.tsx`) had a systemic root
+cause never fixed at the source: `app/globals.css` defines `--foreground`
+twice — once correctly as an HSL triplet inside `@layer base` (line 11),
+and again, unlayered, as a raw hex string (`#e7f6ff`, near line 960).
+Unlayered rules always win over `@layer` rules regardless of source order
+in CSS's cascade-layer model, so the hex value was winning everywhere,
+making Tailwind's `text-foreground` utility compile to the invalid
+`hsl(#e7f6ff)` app-wide — not just on the two pages previously patched.
+Fixed at the source: the unlayered `:root` now sets `--foreground` to a
+valid HSL triplet (`203 100% 95%`, matching the same visual color). A
+scripted Playwright sweep across all 13 real pages (leaf DOM nodes with
+near-black computed `color`) came back clean afterward, with the sole flag
+being a correctly-designed dark-text-on-bright-gradient avatar chip (a
+false positive, verified by design, not a bug).
+
+### Known remaining limitations (honestly stated)
+
+- The naming migration (item 2) must still be applied by the project owner
+  via the Supabase SQL editor — `.claude/_apply_business_unit_naming.sql`
+  — the same manual-apply pattern every migration in this project has used
+  (no `psql`/Supabase CLI is available in this environment). Until then,
+  operating-company labels read without "Company" appended.
+- A meaningful amount of now-genuinely-dead CSS (`.chat-log`, `.network-map`,
+  `.workflow-map`, `.tabs`, `.bars`, `.theme-swatches`, `.slider-row`, etc.)
+  supporting the removed Command Deck widgets was left in place rather than
+  hand-edited out of a very long pre-existing minified CSS line — it matches
+  no current DOM, so it's inert, but a future pass could remove it for
+  file-size hygiene.
+- Item 7's "unify... site-wide" was addressed at its most impactful point
+  (the shared `--foreground` root cause, verified across all 13 pages) and
+  via the reused `NAV_ITEMS`/`VoiceHud` components; a full line-by-line
+  visual redesign of the separate `AppShell` page family (spacing, card
+  proportions, icon consistency beyond what's shared) was not attempted in
+  this pass — those pages were already internally consistent with each
+  other, just a distinct (and, per the brief, deliberately-preserved)
+  visual system from G-Brain/Command Deck.
+- Settings → Profile shows placeholder account data ("Alex Rivera",
+  Pro plan) unrelated to the real signed-in user — pre-existing, unrelated
+  to this pass's scope, noted for awareness.
+
+## V1.3 — MASTER COMPLETION & PRODUCTION-READINESS PASS (2026-08-20)
+
+A backend-reliability, security, and correctness pass across the full
+runtime — task queue, budget governance, organizational learning, the
+memory/RAG tenant-isolation layer, and simulation mode — following the
+17-section Master Completion Mission brief. No UI redesign; the one UI
+change is a small, functional simulation-mode toggle (item 6 below). All
+changes are additive; no existing agent, worker, department, or company was
+renamed, removed, or reassigned.
+
+### 1. Task queue reliability (double execution, abandoned locks, silent loss)
+
+- `claimTask()` (`lib/swarm/missionService.ts`) does an atomic conditional
+  `UPDATE ... WHERE status IN ('ready','waiting')`, returning `null` if
+  another caller already claimed the row. `executeTask()`
+  (`lib/swarm/executionLayer.ts`) now calls this as its first step instead
+  of an unconditional `updateTask(..., {status:'running'})` — this closes a
+  real double-execution race between the synchronous mission pipeline and
+  the background `/api/tasks/process` queue processor picking up the same
+  task. A losing caller returns a new `status: 'cancelled'` `ExecutionResult`
+  (the `'cancelled'` value existed in the type but was previously unused
+  anywhere in the codebase).
+- `app/api/tasks/process/route.ts`: a task whose parent mission no longer
+  exists was previously left `status:'ready'` with a stale lock forever,
+  silently re-claimed and silently skipped on every future run (infinite,
+  invisible retry loop). It's now marked `'failed'` with an explicit error
+  message on first encounter.
+- `recalculateProgress()` (exported from `missionEngine.ts`, previously
+  private) is now called from the queue route after every `executeTask()`
+  call. Previously only the synchronous pipeline rolled task-status changes
+  up into the mission's `status`/`progress` columns — a mission worked
+  exclusively through the background queue could finish every task and stay
+  stuck at `status:'executing'` forever. Both execution paths now converge
+  on the same rollup logic.
+- New migration `supabase/migrations/20260820100000_reclaim_stale_running_tasks.sql`
+  extends `claim_ready_tasks()` to sweep tasks stuck in `status:'running'`
+  for more than 10 minutes (a crashed executor scenario `claim_ready_tasks()`
+  never handled — it only reclaimed stale `'ready'` locks): retried if
+  under `max_retries`, otherwise marked `'failed'` with an explanatory
+  message. **Not yet applied** — see "Deployment requirements" below.
+- `app/api/tasks/process/route.ts`'s `x-queue-secret` check was fail-open:
+  if `TASK_QUEUE_SECRET` was ever unset, the entire check was skipped and
+  the route ran fully unauthenticated with service-role privileges. Changed
+  to fail-closed (missing secret now always 401s).
+
+### 2. Budget hard-gate (Section 3C)
+
+`checkBudget()` (`lib/governance/entitlements.ts`) existed but was never
+called anywhere. It's now a real pre-spend gate in `launchMission()`
+(`lib/swarm/missionEngine.ts`), checked alongside the existing entitlement
+check, before any objectives/tasks are created. Applies even to simulation
+missions — `isSimulation` only blocks *tool* side effects
+(`lib/tools/executor.ts`); it still makes real, billable AI provider calls.
+Tenants with no `budgets` row configured are unaffected (`checkBudget`
+returns `withinBudget: true` when no limit is set) — this cannot newly
+block anyone who hasn't opted into a budget. No pricing was invented;
+`checkBudget` sums real `usage_ledger.estimated_cost` rows for the current
+period against the tenant's configured `monthly_limit_usd`.
+
+### 3. Organizational learning — `lessons_learned` wired (Section 3E)
+
+The `lessons_learned` table existed with zero application code referencing
+it. `recordLesson()` (`lib/swarm/missionService.ts`) is now called from
+`recalculateProgress()` at exactly two points: a mission that fully fails
+(`outcome: 'failure'`), and a mission that completes with at least one
+failed task (`outcome: 'partial'`) — never on a fully clean success, per the
+brief's explicit "do not generate meaningless automatic memories for every
+operation." Each entry captures up to 5 real task error messages, not a
+generic summary.
+
+### 4. Memory/RAG tenant isolation — a confirmed data-integrity bug and a confirmed security leak, both fixed
+
+Two independent, verified findings, both rooted in the same gap: the entire
+`lib/memory/*` + `lib/knowledge/*` subsystem was 100% tenant-unaware end to
+end (zero references to `tenantId`/`tenant_id` anywhere in either
+directory), even though the V1 migration (`20260819140000`) made
+`memories.tenant_id` and `conversations.tenant_id` `NOT NULL` months ago.
+
+- **Correctness bug**: `memoryStore.store()` and `ConversationService.createConversation()`
+  inserted into `memories`/`conversations` without `tenant_id` at all —
+  every real memory-store call and every new conversation creation would
+  violate the `NOT NULL` constraint in production. Fixed by threading a
+  `tenantId` field through the full call chain: `StoreMemoryInput`,
+  `SearchParams` (both `lib/memory/types.ts` and `lib/knowledge/types.ts`),
+  and every intermediate wrapper (`memoryService`, `shortTermMemory`,
+  `longTermMemory`, `episodicMemory`, `retrievalService`, `semanticSearch`,
+  the Knowledge Engine, `supabaseProviders`) down to the two physical
+  insert sites, plus `ConversationService.createConversation` /
+  `CrewCoordinator.startConversation`. Real entry points (the tool executor,
+  which already carries `mission.tenantId` end-to-end; `crew-coordinator.ts`,
+  which already reads `useAuthStore.getState().currentTenantId`) now pass
+  the real tenant. Paths with no tenant in scope fall back to the internal
+  tenant constant (`00000000-0000-0000-0000-000000000001`, the same
+  fail-open constant already used elsewhere in this codebase) rather than
+  throwing — this guarantees no regression while real attribution is used
+  wherever it's available.
+- **Security leak**: `match_memories()` (`supabase/migrations/20260727112722`)
+  is `SECURITY DEFINER` — it bypasses RLS by definition — with no tenant
+  filter at all. Any authenticated user's semantic memory search returned
+  every tenant's matching memories, not just their own; RLS on the
+  underlying tables was correctly configured but this function routed
+  around it entirely. New migration
+  `supabase/migrations/20260820110000_fix_match_memories_tenant_leak.sql`
+  adds a required `filter_tenant_id` parameter (no default — no caller can
+  silently omit it) and filters on it. The client-side call
+  (`memoryStore.semanticSearch()`) was updated in the same change to always
+  pass it. **This migration and the client code change are coupled and
+  must be deployed together** — see "Deployment requirements" below;
+  deploying the code without the migration (or vice versa) will error on
+  every semantic search call until both land (semantic search fails
+  gracefully into keyword-only results in `hybrid` mode; a direct
+  `mode:'semantic'` caller would see the RPC error).
+- **Not yet applied**: both migrations above are DDL — this repository has
+  no `supabase login`/`SUPABASE_ACCESS_TOKEN` configured in this
+  environment, so `CREATE OR REPLACE FUNCTION` cannot be applied via the
+  PostgREST DML trick used for the V1.2 naming migration. The project owner
+  must run them via the Supabase SQL editor (or `supabase db push` after
+  `supabase login`).
+
+### 5. Embedding dimension safety (Section 4)
+
+`memory_embeddings.embedding` is a fixed `vector(3072)` column (sized for
+Gemini's `gemini-embedding-001`). Switching `embedding_provider`/
+`embedding_model` in Settings to a provider with a different native
+dimension (OpenRouter's `text-embedding-3-small` at 1536, Ollama's
+`nomic-embed-text` at 768, etc.) previously surfaced as a raw, unexplained
+Postgres dimension-mismatch error on the next memory store — pgvector
+already prevents silent corruption (it hard-errors on any width mismatch),
+but the failure was uninterpretable. `embeddingService.storeEmbedding()`
+(`lib/memory/embeddingService.ts`) now checks the embedding provider's own
+reported dimension count (from the real API response, not a hardcoded
+guess — the edge function derives it from `embeddings[0].length`) against
+the expected `3072` before attempting the insert, and throws a clear,
+actionable error naming the actual model/dimension involved. A proactive
+UI warning in Settings (before the user even tries) was considered but not
+built — it would require hardcoding each model's native dimension from
+memory rather than a verified source, which risks being wrong in a way
+that misleads rather than helps; the runtime check (grounded in the real
+API response) is the correct authority here.
+
+### 6. Simulation/R&D mode — verified, found completely unreachable, fixed end to end (Section 3F)
+
+Verification (not assumption) found `isSimulation` had real backend
+plumbing (`missionEngine` → `executionLayer` → `lib/tools/executor.ts`'s
+real-side-effect gate) but was **never set from anywhere reachable by a
+user** — `crew-coordinator.ts`'s `routeAndRespond()` didn't accept it,
+`runSimplePipeline()` (`unifiedOrchestrator.ts`) didn't pass it, and no UI
+anywhere exposed a control for it (confirmed via a full grep of `app/` — zero
+matches). This meant simulation mode's core promise, "no real external side
+effects," never actually applied to the chat/tool-calling pipeline that
+handles most everyday interaction — only the mission pipeline's
+entitlement/budget checks respected it. Fixed by threading `isSimulation`
+through the same chain already used for `tenantId` in this pass
+(`runSimplePipeline` → `routeAndRespond` → `runContextManager` →
+`decideTools` → `ToolRequest`), and adding a real, small UI control: a
+`FlaskConical` icon toggle in the shared `InputBar` component
+(`components/temo/input-bar.tsx`), wired into both `/chat`
+(`app/chat/page.tsx`) and Command Deck's chat dock
+(`components/temo/chat-dock.tsx`) — one component, so both surfaces stay in
+sync automatically. No new color was introduced; the toggle reuses the
+existing `temo-purple` token.
+
+### Real E2E verification performed (not typecheck-only)
+
+Per the brief's explicit instruction not to claim E2E success from
+typechecking alone: the dev server was started, `/chat` was driven with
+real Playwright (headless Chromium) — page load confirmed clean (zero
+console/page errors beyond one benign 404 and pre-existing WebGL/CSS
+warnings unrelated to this pass), the simulation-mode toggle confirmed
+rendering and clickable, and a real chat message was sent. This surfaced a
+genuine, pre-existing, project-wide blocker unrelated to any code in this
+pass: **none of the three Supabase Edge Functions (`ai-chat`, `embeddings`,
+`n8n-proxy`) are currently deployed to the live project** — confirmed via
+direct `curl -X OPTIONS` against each function's URL, all three returning
+`404 {"code":"NOT_FOUND","message":"Requested function was not found"}`.
+This means no real AI provider call, embedding call, or n8n trigger can
+currently succeed in this environment regardless of any application code —
+it is a deployment gap, not a code gap. Blocked on the same missing
+`SUPABASE_ACCESS_TOKEN` credential noted below.
+
+### Deployment requirements (owner action needed — none of these can be applied from this environment)
+
+1. `supabase login` (interactive; needs a human), then:
+2. `supabase functions deploy ai-chat --project-ref lqwgprudmhqsqjqoeqjt` —
+   deploys both the pre-existing (never-deployed) function and this pass's
+   streaming-usage-recording fix (item 7 below).
+3. `supabase functions deploy embeddings --project-ref lqwgprudmhqsqjqoeqjt`
+   — never deployed; pre-existing gap, not caused by this pass.
+4. `supabase functions deploy n8n-proxy --project-ref lqwgprudmhqsqjqoeqjt`
+   — same.
+5. Apply `supabase/migrations/20260820100000_reclaim_stale_running_tasks.sql`
+   and `supabase/migrations/20260820110000_fix_match_memories_tenant_leak.sql`
+   via the SQL editor (both are DDL; deploy together with the code in this
+   pass, not independently — see item 4's migration/code coupling note
+   above).
+
+### 7. `streamWithFallback` usage recording gap
+
+Only the non-streaming `chatWithFallback` recorded usage to the Usage
+Ledger — every streamed chat/voice response was invisible to cost
+governance. Streaming provider APIs don't return exact token counts
+per-chunk, so the `ai-chat` edge function now computes a char/4 estimate at
+stream completion (explicitly marked `estimated: true`), emitted in the
+final SSE `done` message; `streamWithFallback` (`lib/ai/ai-provider.ts`)
+now records it the same way the non-streaming path always has. Requires
+the `ai-chat` edge function redeploy (item 2 above) to take effect.
+
+### Known remaining gaps (honestly stated, not fixed in this pass)
+
+- **Tool execution inside missions**: `executionLayer.ts`'s `executeTask()`
+  only ever calls the LLM directly — it never invokes the tool executor.
+  Autonomous mission tasks cannot use tools today; only the synchronous
+  chat/tool-calling pipeline (`decideTools()`) can. This is a real
+  architectural gap, not a bug fix candidate — building it properly means
+  task→tool-selection logic, approval-gate interaction, and retry semantics
+  that don't yet exist, and was judged too large/risky to build
+  speculatively inside this pass per the brief's "do not invent unnecessary
+  workflows the runtime cannot support reliably."
+- **`memory-decision.ts`'s "remember" auto-summary merge path**
+  (`summarizer.mergeMemories()`) still defaults to the internal tenant —
+  `MemoryRecord` doesn't currently expose `tenantId` on read, so a merge
+  can't recover the original memories' real tenant without widening that
+  type; a low-traffic consolidation path, left as a known minor limitation
+  rather than expanded speculatively.
+- Everything under "Deployment requirements" above is written and
+  typechecked but not live until the owner applies it.
+
+### V1.3 addendum — live deployment + real E2E verification (2026-08-20, same day)
+
+All three edge functions and both pending migrations from the section above
+were deployed/applied by the project owner and independently re-verified
+live (not trusted from CLI output alone — each claim was re-checked with a
+direct probe: `curl -X OPTIONS` against each function, and a differential
+RPC test against `match_memories`' old vs. new signature). Full detail,
+including the real E2E chat/mission trace, lives in the standalone **"TEMO
+AI OS — LIVE E2E VERIFICATION REPORT"** delivered to the owner. Summary of
+what changed in this addendum pass:
+
+- **`match_memories` migration bug caught before the owner ran it**: the
+  original migration used `CREATE OR REPLACE FUNCTION` with a changed
+  argument list — Postgres treats that as a *new, additional* overload, not
+  a replacement, which would have left the vulnerable unscoped 5-argument
+  version still callable side by side with the fix. Corrected to `DROP
+  FUNCTION IF EXISTS` the old signature first, in both the migration file
+  and a consolidated `.claude/_apply_pending_migrations_20260820.sql`
+  convenience copy. Verified live afterward: the old signature now 404s,
+  the new one works, and a differential test (same real embedding, two
+  different `filter_tenant_id` values) proved isolation — the owning
+  tenant's memory is returned, a different tenant_id returns zero rows.
+- **Stale AI provider models** (found live, not in code): every configured
+  model across Gemini/Groq/NVIDIA/OpenRouter had drifted to a
+  provider-deprecated name, so *every* real chat call 404'd before this
+  addendum, regardless of any code in this repo. Gemini's own live API
+  response named its exact replacement (`gemini-3.6-flash`); that one was
+  corrected in `app_settings` since it was a directly-provider-sourced fix,
+  not a guess. The embedding model (`app_settings`'s sibling table,
+  `memory_settings.embedding_model`) had drifted from the codebase's own
+  documented default (`gemini-embedding-001`, in
+  `DEFAULT_MEMORY_SETTINGS`) to a deprecated `text-embedding-004` — restored
+  to the documented default rather than guessed. Groq/NVIDIA/OpenRouter
+  remain on stale models; not corrected, since no equivalently-verified
+  replacement name was available (see the E2E report's remaining blockers).
+- **Real code bug found via live testing, not typecheck**: `knowledge`
+  provider's `store()` (`lib/knowledge/supabaseProviders.ts`) — the primary
+  path for "remember X" requests — created a real memory row but never
+  generated an embedding, unlike `lib/memory/longTermMemory.ts`'s separate
+  store path. Fixed by adding the same settings-gated, non-fatal embedding
+  call `longTermMemory.store()` already used. Verified live: embedding
+  generated and stored, and a follow-up "what is X" question correctly
+  recalled it via real semantic search.
+- **Real code bug found via live testing**: `lib/swarm/managerContext.ts`'s
+  `listAvailableWorkflows()` queried `workflow_registry.name` and
+  `.eq('is_active', true)` — neither column exists (the real schema has
+  `workflow_name`/`active`, confirmed against the migration that created
+  the table). Fixed to match the real schema.
+- **Real mission E2E trace confirmed live**, not inferred: a genuine user
+  message ("List my n8n workflows") produced a real `missions` row →
+  dispatched to the real `flow` (Automation) manager → two real
+  `mission_tasks` rows, each showing `Context Building: Success` /
+  `LLM Execution: Success` → mission rolled up to `status:'completed',
+  progress:100` via the `recalculateProgress()` fix from the section above
+  → `usage_ledger` rows correctly attributed to the real `mission_id` and
+  `manager_id`. The simulation-mode toggle's `is_simulation` flag was
+  confirmed persisted correctly (`true`) on these mission records.
+- **No fake tenant data was created** to test the `match_memories` fix —
+  the isolation proof reused the one real stored memory/embedding and
+  varied only the query's `filter_tenant_id` parameter, which is the
+  safest verification method available in a database with exactly one
+  real tenant.
+
+### AI provider error-handling fix (2026-08-20, same day) — Settings/validation performance
+
+Root cause of "Settings validation feels slow" traced to `supabase/functions/ai-chat/index.ts`,
+not the Settings UI itself: the edge function collapsed every upstream
+provider failure — permanent (404 model-not-found, 401 bad key) and
+transient (429 rate-limited, 5xx) alike — into a generic HTTP 500. The
+client's `isRetryable()` classification in `lib/ai/ai-provider.ts` (already
+correct: retries only 429/500/502/503/504) had no way to tell them apart,
+so a dead/deprecated model got 3 retries with 1s/2s exponential backoff
+just like a genuinely transient error would — wasted per provider, per
+fallback attempt. Fixed by making both `handleChat` and `handleStream`
+preserve the real upstream HTTP status (a new `UpstreamError` class carries
+it through the outer catch), and by restructuring `handleStream` so the
+initial connection is checked *before* the streaming `Response` commits to
+HTTP 200 — previously a streaming failure was always reported as "200 OK"
+with an `{error}` payload buried in the body, which the client could only
+ever treat as a hardcoded, unconditional retry. Also added an explicit
+30-second upstream fetch timeout (`fetchWithTimeout`, matching the existing
+`n8n_timeout`/task-execution timeout convention already used elsewhere in
+this codebase, not a new arbitrary value) — previously neither upstream
+fetch had any timeout at all. No client-side retry logic needed to change;
+it was already correct, just fed the wrong status code. Live-verified: a
+provider with a dead model now fails in one request instead of three; a
+provider actually rate-limited (429) still correctly retries. Separately,
+Settings' `loadSettings()` effect was firing twice on tab-open — confirmed
+as React 18 Strict Mode's dev-only double-invoke of an idempotent GET (not
+a production issue), given a defensive ignore-flag anyway per React's own
+documented pattern. Full detail in the standalone "TEMO AI OS — API
+SETTINGS PERFORMANCE FIX REPORT."
+
+---
+
+## DYNAMIC MODEL ROUTER (2026-08-20)
+
+A new `lib/ai/router/` module sits between every real AI call site and
+`lib/ai/ai-provider.ts`'s `chatWithFallback`/`streamWithFallback` — it
+decides *which* provider+model should handle a request instead of every
+call always using whichever single model is configured as the global
+`active_provider`. It does not replace the provider adapter registry, the
+fallback/retry mechanics, the Usage Ledger, or the budget hard-gate — it
+extends all four.
+
+### Why this was needed (confirmed by inspection, not assumed)
+
+Before this pass, `chatWithFallback`/`streamWithFallback` accepted a
+`model` option on `ChatOptions` but silently ignored it — `getModelForProvider()`
+always overwrote it with whatever `app_settings` had configured for that
+provider (`lib/ai/ai-provider.ts`, `getModelForProvider`). `AgentRecord.model`
+("Default AI model for this agent") existed on every agent but was only
+ever used inside a log-message string in `executionLayer.ts` — never
+actually passed to a chat call. Every one of the 11 real AI call sites in
+this codebase (mission tasks, chat responses — streaming and non-streaming,
+tool-response formatting, manager→worker delegation, manager review, tool
+selection, memory summarization/importance/should-remember, intent
+classification) used the exact same single globally-configured model
+regardless of task type, cost, or which agent was "using" it.
+
+### Architecture
+
+```
+Caller (executionLayer.ts, crew-coordinator.ts, manager-delegation.ts,
+        planner.ts, summarizer.ts, ai-intent-analyzer.ts)
+        │
+        ├─ classifyTask()  — deterministic, reuses missionPlanner.ts's
+        │                    classifyComplexity/resolveCapabilities/
+        │                    estimatePriority rather than duplicating them
+        │
+        ├─ route()         — lib/ai/router/index.ts
+        │     ├─ getCandidateModels()   — reads provider_model_catalog
+        │     │                           (server-side persisted real
+        │     │                           discovery, see below)
+        │     ├─ getAllHealth()         — reads provider_model_health
+        │     ├─ checkBudget()          — REUSED from
+        │     │                           lib/governance/entitlements.ts,
+        │     │                           the same hard-gate
+        │     │                           launchMission() already uses
+        │     └─ scoreCandidate()       — lib/ai/router/scoring.ts,
+        │                                 weighted sum, not an if/else tree
+        │
+        └─ chatWithFallback(messages, { ..., candidates: decision.candidates })
+              — candidates REPLACES the default activeProvider+FALLBACK_ORDER
+                walk when supplied; omitting it (any caller not yet
+                updated) preserves today's exact behavior unchanged.
+                isRetryable() (429/500/502/503/504) is untouched — the
+                router only changes candidate ORDER, not retry policy.
+```
+
+### Model catalog now persisted server-side (a real gap closed)
+
+The Provider Validation & Model Discovery pass (previous session) already
+called each adapter's real `listModels()` — but only ever returned the
+result to the browser, which cached it in `localStorage`
+(`lib/settings/providerModelCache.ts`). That data was completely
+unreachable from any server-side context (mission execution, a Next.js API
+route). `supabase/functions/ai-chat/index.ts`'s `action:'validate'` handler
+now also persists successful discovery results to a new
+`provider_model_catalog` table (upsert, keyed on provider+model_id; an
+empty discovery result is treated as "nothing to update," never as "clear
+the catalog," so a transient failure can't wipe out a working
+configuration). This is the single source of truth `lib/ai/router/modelCatalog.ts`
+reads from — no second model registry, no duplicated discovery logic.
+
+### Task classification (deterministic, no LLM call to pick a model)
+
+`lib/ai/router/taskClassifier.ts`'s `classifyTask()` produces one of 13
+task types (VOICE, FAST_CHAT, NORMAL_CHAT, AGENT_TO_AGENT, SMALL_TASK,
+CODING, RESEARCH, PLANNING, COMPLEX_REASONING, LARGE_MISSION,
+TOOL_EXECUTION, VISION, STRUCTURED_OUTPUT) from word count, keyword/capability
+matching (reusing `resolveCapabilities`), and caller-supplied flags
+(`isVoice`, `isAgentToAgent`, `needsTools`, `needsStructuredOutput`,
+`hasVisionInput`). `isVoice` is threaded from `voice-manager.ts` through
+`orchestrate()` exactly the way `isSimulation` already was in an earlier
+pass (`OrchestrateOptions.isVoice` → `runSimplePipeline` →
+`crewCoordinator.routeAndRespond()`).
+
+### Model capability profile — real data only, "unknown" is a real value
+
+`ModelCapabilityProfile` (`lib/ai/router/types.ts`) carries provider-reported
+fields (free/pricing/context-length/streaming/tools — from the real catalog,
+`null`/`'unknown'` when the provider's own API doesn't expose them, never
+guessed) structurally separate from a small set of *inferred* fields
+(`inferredReasoningStrength`/`inferredCodingStrength`/`inferredSpeedTier`,
+`lib/ai/router/modelCapabilities.ts`) derived from real, common naming
+conventions ("flash"/"instant"/"8b" → fast; "pro"/"70b"+/"opus" → stronger
+reasoning) — never presented as a provider-confirmed fact. Vision/audio/
+structured-output/multilingual capability fields stay `'unknown'` for every
+current provider, honestly, since none of the discovery endpoints this app
+calls report them and this app has no real audio/vision-model integration
+today (see Voice, below).
+
+### Scoring (configurable weighted sum — `lib/ai/router/scoring.ts`)
+
+`capabilityMatch + taskMatch + reliability + latency + contextFit +
+providerHealth + validationRecency + structuredToolFit − costPenalty −
+rateLimitPenalty − failurePenalty`, each term normalized to roughly [0,1]
+before its weight is applied. Five strategy presets (`balanced` default,
+`speed`, `quality`, `cost`, `free_only`) multiply specific weights rather
+than replacing the formula — `free_only` also hard-filters to
+provider-confirmed `free === true` candidates before scoring, not merely a
+weight nudge. Weights are one exported `const` object, not scattered
+magic numbers.
+
+### Provider/model health (a real, narrow gap closed)
+
+`usage_ledger` only ever recorded successful calls, by explicit original
+design (its own migration header) — zero failure/latency signal existed
+anywhere before this pass. A new `provider_model_health` table (one row
+per provider+model, incrementally updated via the `record_provider_model_health()`
+Postgres function — atomic upsert, not a full event log, per the mission's
+explicit "do not build an unnecessarily complicated observability
+platform" instruction) now tracks success/failure counts, consecutive
+failures, a running-average latency, and the last status code.
+`chatWithFallback`/`streamWithFallback` call `recordHealth()` after every
+single provider attempt (success or failure) — fire-and-forget, matching
+the existing non-blocking `recordUsage()` pattern. `usage_ledger` itself
+also gained one additive `latency_ms` column, since successful-call latency
+is genuinely usage-adjacent data.
+
+**Live bug found and fixed during verification**: `record_provider_model_health()`
+initially had only a SELECT RLS policy — a direct RPC probe confirmed
+`"new row violates row-level security policy"` when called from a
+browser/`authenticated` context (which is where `crew-coordinator.ts`
+actually runs). Fixed by making the function `SECURITY DEFINER`
+(`20260820130000_fix_provider_model_health_rls.sql`) — narrower and safer
+than opening the underlying table to broad authenticated writes, since the
+function only ever increments counters for a given provider/model pair.
+
+### Cost/budget integration
+
+Real, provider-reported pricing from `provider_model_catalog` (e.g.
+OpenRouter's actual per-model `$/token` figures) is preferred over the
+static `lib/ai/pricing.ts` table, which remains the fallback for providers/
+models the catalog hasn't priced. A candidate whose estimated cost would
+exceed the tenant's *remaining* budget headroom (`checkBudget()`'s
+`limitUsd - spendUsd`, the same function `launchMission()` already
+hard-gates on) is removed outright, not merely deprioritized. No pricing is
+ever invented — an unpriced model gets a mild cost-uncertainty penalty in
+scoring, not a fabricated number.
+
+### Fallback safety
+
+`route()` never throws — any internal failure degrades to an empty
+candidate list, which `chatWithFallback`/`streamWithFallback` already treat
+identically to "no router candidates supplied" (today's original
+behavior). If every candidate gets filtered out (e.g. a strict `free_only`
+strategy with no free models configured), the router falls back to the
+full unfiltered scored list rather than returning zero candidates — an
+imperfect answer beats silently blocking execution.
+
+### Mission-level routing
+
+`executionLayer.ts`'s `executeTask()` classifies and routes independently
+per task (using that task's own title/description/`requiredCapability`,
+not the whole mission's), so a single mission genuinely can — and, live-verified,
+does — use different providers/models for different tasks. The
+`provider_selected` mission-timeline event now shows the real routing
+decision and its `reason`, replacing what was previously always
+`settings.active_provider` regardless of which provider actually executed.
+
+### Agent-to-agent routing
+
+`manager-delegation.ts`'s `executeWorker()`/`managerReview()` (manager→worker
+task delegation and the manager's review-and-synthesize step) both classify
+with `isAgentToAgent: true`, which biases the scorer toward latency and
+reliability over raw capability — internal coordination doesn't
+automatically reach for the strongest (slowest, priciest) configured model.
+
+### Voice routing
+
+Voice transcription and synthesis remain entirely client-side (Web Speech
+API — confirmed unchanged, `lib/voice/voice-recorder.ts`/`voice-player.ts`).
+The router's VOICE task type only ever applies to the LLM call that
+processes the *transcribed text* (via `orchestrate()` → the same pipeline
+text chat uses) — it biases toward low latency and fast-tier models. No
+model in the current provider pool is claimed to have genuine audio/vision
+capability; those `ModelCapabilityProfile` fields stay `'unknown'`
+everywhere, honestly, rather than fabricated to make "voice routing" sound
+more capable than the app's real STT/TTS architecture is.
+
+### OpenRouter as a dynamic pool
+
+OpenRouter's real catalog (hundreds of models, live-verified) is not
+exposed as-is — `route()`'s scoring/filtering (capability match, cost,
+context fit, budget, `free_only`) narrows it exactly the same way it
+narrows every other provider's candidate list. OpenRouter simply tends to
+win more often for `free_only`/cost-sensitive routing because it's the
+richest source of real, provider-confirmed `$0` pricing.
+
+### Ollama
+
+Unchanged local-vs-cloud handling: local (`localhost`/`127.0.0.1`) gets
+`free: true` as a structural fact (self-hosted, zero marginal API cost,
+not a guess), and a cloud-hosted Ollama endpoint is treated like any other
+remote provider for cost purposes. The router does not attempt to route a
+server-side request to a `localhost` URL the server itself can't reach — a
+known, already-documented limitation of this app's edge-function
+architecture generally (Supabase's cloud runtime has its own loopback, not
+the admin's machine), not something this pass changed or could fix.
+
+### Settings UI
+
+Added, not a redesign: an "AI Routing" block (Automatic/Manual mode toggle,
+Balanced/Speed/Quality/Cost/Free Only strategy selector) in the existing
+Settings → AI Providers card, immediately below "Active Provider." Backed
+by three new additive `app_settings` columns (`routing_mode`,
+`routing_strategy`, `routing_preferences` jsonb). The advanced per-task-type
+manual override editor (voice/fast-chat/reasoning/coding/agent-to-agent
+pickers) described as "optional" in the brief was not built as a UI in this
+pass — `routing_preferences` and the router's consumption of it are fully
+implemented and functional, just not yet exposed through an editor.
+
+### Real E2E verification performed (not typecheck-only)
+
+Live, not inferred: a real chat message was classified `FAST_CHAT` and
+routed to `openrouter/cohere/north-mini-code:free` — genuinely different
+from the globally-configured Gemini model, because Gemini was actually
+rate-limited (429) from the day's extensive testing; `provider_model_health`
+correctly recorded that real failure (`consecutive_failures: 1`) alongside
+Groq's real success (949ms latency). A real multi-task mission ("Research
+competitor pricing strategies and create a go-to-market plan") produced 7
+real tasks; the first, classified `LARGE_MISSION`, routed to
+`openrouter/meta-llama/llama-3.3-70b-instruct` with the decision correctly
+recorded in both `usage_ledger.metadata` and the mission timeline. The
+Settings UI's Free Only strategy was selected and saved live, then
+confirmed to route to a real, provider-confirmed-free model on the next
+request. Full trace in the standalone "TEMO AI OS — DYNAMIC MODEL ROUTER
+IMPLEMENTATION REPORT."
+
+### Known limitations (honestly stated)
+
+- Per-task-type manual override UI not built (see Settings UI above) —
+  the underlying mechanism works, there's no editor for it yet.
+- `inferredReasoningStrength`/`inferredCodingStrength`/`inferredSpeedTier`
+  are name-pattern heuristics, not provider-confirmed facts — kept
+  structurally separate from real catalog data specifically so this
+  distinction can never be lost downstream.
+- Vision/audio routing has no real target to route to — this app has no
+  audio-native or vision-native provider integration, so `VISION`
+  classification exists in the type system but has never been exercised
+  against a real capability.
+- A learning loop beyond "recent success/failure counts feed future
+  scoring" (e.g. actively re-weighting scoring dimensions from outcomes
+  over time) was explicitly out of scope for this pass, per the mission's
+  own "V1 should remain deterministic and explainable... rules + scoring +
+  telemetry, not opaque autonomous ML routing" instruction.
+
+---
+
+## CLAUDE CODE DEVELOPMENT ORGANIZATION
+
+This section documents the Claude Code development workspace prepared for long-running autonomous development on Temo AI OS. It is workspace/tooling configuration, not application architecture — nothing in this section changes runtime behavior. Permanent development rules live in [CLAUDE.md](../CLAUDE.md) at the repo root; this section documents *what was built* to support those rules.
+
+### Verified project state at time of preparation
+
+- **Not a git repository.** `git status` fails with "not a git repository" — there is currently no version-control safety net for this codebase. This is the single biggest development-safety gap found (see Safety Rules below).
+- No `CLAUDE.md` existed prior to this task; one now does (repo root).
+- `.claude/` existed with only a `scheduled_tasks.lock` file — a clean slate for agents/skills/hooks.
+- A pre-existing document, `TEMO_TECHNICAL_PROJECT_SUMMARY.md` (repo root), contains the original master specification and roadmap. It predates the Sprint 1–3 work in this document and is **partially stale** on implementation status (e.g. it says worker agents are "not yet implemented" — they exist for Nova as of the original audit) and reflects a different next-step roadmap (cinematic v0 dashboard → auth → worker agents) than the one actually pursued (registry unification → delegation generalization → usage/cost governance). Both documents are kept; this one is authoritative for current implementation state, but the roadmap divergence is a real, undecided question — see the `temo-product` agent below.
+
+### Development Agents (`.claude/agents/`)
+
+Six subagents, deliberately kept small — "a small, efficient engineering organization," not maximum coverage:
+
+| Agent | Responsibility | Model | Mode |
+|---|---|---|---|
+| `temo-architecture` | Guards against duplicate orchestration paths; keeps this document in sync after sprints | opus | Implementation-capable, conservative |
+| `temo-orchestration` | Agent registry, crew routing, mission engine, delegation, AI provider/usage-ledger layer | sonnet | Implementation-capable |
+| `temo-data` | Supabase migrations/RLS, memory/knowledge persistence, tools/n8n integration, API routes | sonnet | Implementation-capable |
+| `temo-qa` | Typecheck/lint/regression/duplicate-abstraction verification after implementation stages | sonnet | Read-only/verification |
+| `temo-security` | Auth, RLS, secrets, tenant-isolation groundwork, approval gates | opus | Advisory/read-only today; implementation-capable once auth work is explicitly scoped |
+| `temo-product` | Sanity-checks features against the stated business vision; surfaces the roadmap conflict noted above | sonnet | Read-only/advisory |
+
+**Intentionally not created:** a separate Backend or Frontend agent (their scope is fully covered by `temo-orchestration`/`temo-data`, and the UI layer hasn't needed dedicated specialist attention); a separate R&D/Innovation agent (no R&D sandbox subsystem exists yet — its eventual responsibilities are covered by `temo-architecture` and `temo-orchestration` until there's enough distinct R&D work, e.g. real model-evaluation sprints, to justify one).
+
+### Skills (`.claude/skills/`)
+
+Four project-specific skills, chosen because they encode a procedure this project has already proven valuable — not a speculative one:
+
+- **`sprint-close`** — the exact verify-then-document-then-report protocol used successfully across Sprints 1, 1.5, 2, and 3 (typecheck → lint → regression grep → duplicate-abstraction check → update this document → structured report). Encodes a proven, repeated workflow.
+- **`architecture-governance`** — the "search first, extend before creating, prefer registry-driven over hardcoded" checklist that prevented Sprint 2 from re-creating the `lib/crew` vs `lib/agents` duplication mistake.
+- **`db-migration-review`** — this project's specific migration conventions (additive-only, RLS pattern selection by table semantics, ID-type matching, enum-vs-text judgment) empirically established across the Sprint 1 and Sprint 3 migrations.
+- **`temo-security-review`** — a Temo-specific supplement (not a replacement) to the general-purpose `security-review` skill already available in this environment; covers this project's particular patterns (edge-function-only key access, single-tenant RLS posture, tenant-isolation readiness).
+
+**Intentionally not created:** a generic "Testing & Verification" skill (folded into `sprint-close` — there's no test framework yet, so a dedicated skill would be thin); a "Business/Product Validation" skill (business judgment calls benefit more from the `temo-product` agent's discussion than a fixed checklist); a "Research & Innovation" skill (no R&D subsystem exists yet to write a procedure for).
+
+### Hooks (`.claude/settings.json`)
+
+Two lightweight, deterministic `PreToolUse` hooks — chosen specifically to avoid the "excessive repeated execution" trap (no hook fires on every edit or every turn; both are narrow pattern-matches on specific tool calls):
+
+1. **Destructive-command guard** (matcher: `Bash`) — pattern-matches the command against `rm -rf`, `git push --force`/`-f`, `git reset --hard`, `DROP TABLE`/`DROP DATABASE`, `TRUNCATE`, `git clean -f` (case-insensitive). On match, returns a `permissionDecision: "ask"` so a human confirms before it runs, rather than a hard block (a false positive here should cost one confirmation, not a blocked legitimate operation). Implemented as a single-line Node.js script (no `jq` dependency — verified absent from this environment's PATH) reading the tool-call JSON from stdin.
+2. **Secret/.env guard** (matcher: `Write|Edit`) — pattern-matches the target file's basename against `.env`/`.env.*`, and the content being written against key-shaped patterns (`sk-...`, `AIza...`, a JWT shape `eyJ...`). On match, asks for confirmation rather than blocking. Handles both `/`- and `\`-style path separators (verified against a Windows-style path).
+
+Both hooks were pipe-tested against synthetic tool-call payloads (trigger and non-trigger cases) before being written into `settings.json`, and the exact strings extracted back out of the written file were re-tested to confirm the JSON escaping round-trips correctly.
+
+**Intentionally not created:** an auto-typecheck-on-every-edit hook (this project's full `tsc --noEmit` run takes real time; running it after every single edit would be exactly the "excessive repeated execution" the task warned against — `sprint-close` covers this at natural completion points instead); a docs-reminder Stop hook (redundant with `sprint-close`, and would fire noisily on trivial turns).
+
+### MCP / Connectors — recommendation, not installation
+
+No MCP connector was installed. For each candidate considered:
+
+| Candidate | Verdict | Reasoning |
+|---|---|---|
+| GitHub | Not required now | The repository isn't a git repository yet — a GitHub connector is premature until version control exists and a remote is chosen. Revisit after that. |
+| Supabase (live DB introspection) | Not required now, worth it later | This project's migrations are file-based (`supabase/migrations/*.sql`), and every sprint so far only needed to *read* those files to reason about schema — already fully covered by the built-in Read/Grep tools. A live connector would add value for verifying a migration actually applies cleanly or inspecting live data (e.g. sanity-checking `usage_ledger` rows), but that's a "when we want it" capability, not a blocking gap, and should be credential-scoped deliberately (ideally read-only/staging) rather than added reflexively. |
+| Browser/Chrome (for UI verification) | Already available, not a new install | This environment already exposes a `chrome` config toggle and a `run` skill ("launch and drive this project's app to see a change working") — both cover this need without a separate MCP connector. Worth flagging honestly: **none of Sprints 1–3 in this project actually used either** — verification was typecheck/lint/grep only, never a real click-through of the chat UI. That's a real, existing gap, but the fix is "use what's already available," not "install something new." |
+| Documentation/research tools | Already available, not a new install | `WebFetch`/`WebSearch` are already available in this environment. |
+| Filesystem | Already available, not a new install | Read/Write/Edit/Glob/Grep/Bash already fully cover this. |
+
+**Net result: no new MCP connector is currently justified.** The strongest latent candidate (Supabase) is explicitly deferred pending an actual need and deliberate credential scoping, not configured speculatively.
+
+### Model-Selection Strategy
+
+Per CLAUDE.md: cost-efficient models for simple/mechanical work, stronger reasoning for architecture/security/large refactors. Applied concretely: `temo-architecture` and `temo-security` (the two agents whose mistakes are hardest to undo — a bad structural decision or a security regression) default to **opus**; `temo-orchestration`, `temo-data`, and `temo-product` default to **sonnet**; `temo-qa` defaults to **sonnet** (mechanical checks, but correctly diagnosing *why* a typecheck/lint failure happened benefits from more than the cheapest tier). None default to haiku today — nothing in this workspace's current task set is purely mechanical enough to warrant it, but that's a call any agent invocation can override per-task.
+
+### Development Workflow
+
+1. Read [CLAUDE.md](../CLAUDE.md) and this document before starting.
+2. For structural questions, consult (or think like) `temo-architecture` first — search before creating.
+3. Implement via `temo-orchestration`/`temo-data` as appropriate to the subsystem.
+4. Verify via `temo-qa`'s protocol (equivalently, the `sprint-close` skill) before calling anything done.
+5. For anything security- or auth-adjacent, consult `temo-security` before implementing, not after.
+6. For anything of unclear business priority, consult `temo-product` rather than assuming.
+7. Update this document (version bump, dated section, status table) as the final step of any completed stage — not as an afterthought.
+
+### Safety Rules (Section 7 findings)
+
+- **No git repository exists.** This is the top development-safety risk in the project today — there is no commit history, no diff review, no revert path for any change. This was *not* fixed as part of this workspace-preparation task (initializing version control is a real project decision the owner should make deliberately, not something to do silently as a side effect of "prepare the workspace"), but it is the single strongest recommendation coming out of this task.
+- **No `.env`/secret leakage path found.** `.gitignore` already excludes `.env*`; provider keys live server-side in Supabase (`app_settings`, read only by Edge Functions with the service-role key) — confirmed consistent with the Sprint 3 audit. The new secret/.env hook adds a second layer of protection against accidentally writing a live secret into a tracked file.
+- **Destructive-command protection** now exists via the Bash hook (above) — previously nothing stood between an accidental `rm -rf`/force-push/`DROP TABLE` and execution.
+- **Duplicate-architecture protection** is now encoded in both `CLAUDE.md` (rule: "do not create duplicate registries, routers, orchestration engines, or providers") and the `architecture-governance` skill — directly addressing the one architectural mistake this project has actually made (the `lib/crew`/`lib/agents` duplication unwound in Sprints 1–1.5).
+- **Uncontrolled dependency growth**: no tooling was added for this (no automated dependency-audit hook), but it's now a named principle in CLAUDE.md ("search before creating new abstractions") extending naturally to "check whether an existing dependency already covers this before adding a new package."
+- **Bypassing tests**: not currently enforceable by tooling since no test framework exists — flagged explicitly in `CLAUDE.md` and `sprint-close` so its absence is never silently assumed away once a framework exists.
+
+---
+
+## ARCHITECTURE DOCUMENT VERSION
+Version: 2.6
+Date: 2026-08-20
+Status: Dynamic Model Router implemented — a new lib/ai/router/ module now sits between every real AI call site (11 total, all found and wired: mission tasks, chat responses streaming/non-streaming, tool-response formatting, manager→worker delegation, manager review, tool selection, memory summarization/importance/should-remember, intent classification) and chatWithFallback/streamWithFallback, deciding provider+model per request from task classification, real provider-reported capability/pricing data, live health tracking, and the existing budget hard-gate — instead of every call using one globally-configured model regardless of context. Two real, previously-unreachable gaps closed as part of this: the model catalog discovered by Provider Validation now persists server-side (provider_model_catalog), and provider/model health (success/failure/latency) is tracked for the first time (provider_model_health) since usage_ledger only ever recorded successes by design. A live RLS bug was found and fixed during verification (health writes from browser context were rejected — fixed via SECURITY DEFINER on the narrow update function, not by opening the table). Live-verified, not inferred: a real chat request was classified and routed to a different provider than the globally-configured one when that provider was genuinely rate-limited, with the failure correctly recorded in health tracking; a real 7-task mission showed per-task routing decisions; the Settings UI's Free Only strategy was selected, saved, and confirmed to route to a real zero-cost model. See the "DYNAMIC MODEL ROUTER" section above for full architecture detail and honestly-stated limitations (no per-task-type override UI yet, no real audio/vision provider to route VISION to, name-pattern capability inference kept structurally separate from real provider data), and the standalone "TEMO AI OS — DYNAMIC MODEL ROUTER IMPLEMENTATION REPORT" for the complete verification trace. Full prior-version history (V1 through the API Settings performance fix) remains in the dated sections above this footer, in order — this footer itself now only summarizes the current version rather than re-appending every prior status string, which had become unwieldy.

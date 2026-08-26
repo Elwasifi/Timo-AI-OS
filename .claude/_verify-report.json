@@ -1,0 +1,42 @@
+{
+  "pages": {
+    "gbrain": {
+      "url": "http://localhost:3007/",
+      "managerCount": 5,
+      "managerNames": [
+        "NOVA",
+        "FLOW",
+        "ATLAS",
+        "LUNA",
+        "ECHO"
+      ],
+      "novaSubCount": 3,
+      "svgZ": "1",
+      "treeZ": "2",
+      "edgeCount": 16
+    },
+    "commandDeck": {
+      "url": "http://localhost:3007/dashboard",
+      "agentCardCount": 5,
+      "temoLabel": "TEMO"
+    },
+    "settings": {
+      "error": "TimeoutError: page.waitForSelector: Timeout 10000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('text=Add Agent') to be visible\u001b[22m\n"
+    }
+  },
+  "consoleErrors": [
+    "[console] Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "[http 404] https://lqwgprudmhqsqjqoeqjt.supabase.co/rest/v1/agent_registry?select=*&is_active=eq.true&order=sort_order.asc",
+    "[console] Failed to load resource: the server responded with a status of 404 ()",
+    "[http 404] https://lqwgprudmhqsqjqoeqjt.supabase.co/rest/v1/agent_registry?select=*&is_active=eq.true&order=sort_order.asc",
+    "[console] Failed to load resource: the server responded with a status of 404 ()",
+    "[http 404] https://lqwgprudmhqsqjqoeqjt.supabase.co/rest/v1/agent_registry?select=*&is_active=eq.true&order=sort_order.asc",
+    "[console] Failed to load resource: the server responded with a status of 404 ()",
+    "[http 404] https://lqwgprudmhqsqjqoeqjt.supabase.co/rest/v1/agent_registry?select=*&is_active=eq.true&order=sort_order.asc",
+    "[console] Failed to load resource: the server responded with a status of 404 ()",
+    "[http 404] https://lqwgprudmhqsqjqoeqjt.supabase.co/rest/v1/missions?select=*&order=created_at.desc&limit=10",
+    "[console] Failed to load resource: the server responded with a status of 404 ()",
+    "[http 404] https://lqwgprudmhqsqjqoeqjt.supabase.co/rest/v1/missions?select=*&order=created_at.desc&limit=10",
+    "[console] Failed to load resource: the server responded with a status of 404 ()"
+  ]
+}

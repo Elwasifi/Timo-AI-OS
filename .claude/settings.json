@@ -1,0 +1,58 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 20 npx --no-install supabase projects list)",
+      "Bash(timeout 25 npx --no-install supabase projects list)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(timeout 30 npx --no-install supabase db push --project-ref lqwgprudmhqsqjqoeqjt)",
+      "Bash(timeout 15 npx --no-install supabase db --help)",
+      "Bash(timeout 25 npx --no-install supabase db --help)",
+      "Bash(cp \"d:/Timo OS/Timo-AI-OS-main/Timo-AI-OS-main/supabase/migrations/20260820120000_create_model_router_foundation.sql\" \"d:/Timo OS/Timo-AI-OS-main/Timo-AI-OS-main/.claude/_apply_model_router_foundation_20260820.sql\")",
+      "Bash(timeout 30 npx --no-install supabase migration list --project-ref lqwgprudmhqsqjqoeqjt)",
+      "Bash(timeout 20 npx --no-install supabase migration repair --help)",
+      "Bash(timeout 20 npx --no-install supabase migration --help)",
+      "Bash(timeout 25 npx --no-install supabase migration repair --status applied 20260727111732 --project-ref lqwgprudmhqsqjqoeqjt)",
+      "Bash(powershell -NoProfile -Command \"Get-CimInstance Win32_Process -Filter 'ProcessId=6312' | Select-Object ProcessId,ParentProcessId,CommandLine,CreationDate\")",
+      "Bash(powershell -NoProfile -Command \"Stop-Process -Id 6312 -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue\")",
+      "Bash(PORT=3000 npm run dev)",
+      "Bash(node \"C:/Users/elwas/AppData/Local/Temp/claude/d--Timo-OS-Timo-AI-OS-main-Timo-AI-OS-main/53f2ec68-4df2-4b08-af09-c28e51874eb0/scratchpad/router-e2e-test.js\")",
+      "Bash(curl -s -o /dev/null -w \"HTTP_CODE:%{http_code} TIME:%{time_total}\\\\n\" http://localhost:3000/chat --max-time 60)",
+      "Bash(timeout 40 npx --no-install supabase db push --project-ref lqwgprudmhqsqjqoeqjt --yes)",
+      "Bash(node \"C:/Users/elwas/AppData/Local/Temp/claude/d--Timo-OS-Timo-AI-OS-main-Timo-AI-OS-main/53f2ec68-4df2-4b08-af09-c28e51874eb0/scratchpad/routing-ui-test.js\")",
+      "Bash(node -e ' *)",
+      "Bash(powershell -Command \"Stop-Process -Id 17492 -Force\")",
+      "Bash(curl -s -o /dev/null -w \"HTTP_CODE:%{http_code}\\\\n\" --max-time 20 http://localhost:3000/dashboard)",
+      "Bash(python \"C:/Users/elwas/AppData/Local/Temp/claude/d--Timo-OS-Timo-AI-OS-main-Timo-AI-OS-main/53f2ec68-4df2-4b08-af09-c28e51874eb0/scratchpad/screenshot_dashboard.py\")",
+      "Bash(python \"C:/Users/elwas/AppData/Local/Temp/claude/d--Timo-OS-Timo-AI-OS-main-Timo-AI-OS-main/53f2ec68-4df2-4b08-af09-c28e51874eb0/scratchpad/screenshot_dashboard2.py\")"
+    ],
+    "additionalDirectories": [
+      "d:\\Timo OS\\Timo-AI-OS-main\\Timo-AI-OS-main\\.claude"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e 'let d=\"\";process.stdin.on(\"data\",c=>d+=c);process.stdin.on(\"end\",()=>{let cmd=\"\";try{cmd=(JSON.parse(d).tool_input||{}).command||\"\";}catch(e){}const pat=/rm\\s+-rf|git\\s+push\\s+(--force|-f)\\b|git\\s+reset\\s+--hard|drop\\s+table|drop\\s+database|truncate\\s+table|git\\s+clean\\s+-f/i;if(pat.test(cmd)){process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"ask\",permissionDecisionReason:\"Destructive command pattern detected (rm -rf / force-push / hard reset / DROP or TRUNCATE / git clean -f). Confirm this is intentional.\"}}));}else{process.stdout.write(\"{}\");}});'",
+            "timeout": 10,
+            "statusMessage": "Checking for destructive command patterns..."
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e 'let d=\"\";process.stdin.on(\"data\",c=>d+=c);process.stdin.on(\"end\",()=>{let inp={};try{inp=JSON.parse(d).tool_input||{};}catch(e){}const fpath=String(inp.file_path||\"\");const content=String(inp.content||inp.new_string||\"\");const base=fpath.split(\"/\").pop().split(\"\\\\\").pop();const isEnv=/^\\.env(\\..*)?$/.test(base);const secretPat=/sk-[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+/;if(isEnv||secretPat.test(content)){process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"ask\",permissionDecisionReason:\"This write targets a .env-style file or its content looks like it may contain a live API key, token, or JWT. Confirm this is intentional and the file stays gitignored.\"}}));}else{process.stdout.write(\"{}\");}});'",
+            "timeout": 10,
+            "statusMessage": "Checking for secrets / .env writes..."
+          }
+        ]
+      }
+    ]
+  }
+}

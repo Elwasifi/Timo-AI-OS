@@ -1,0 +1,12 @@
+{
+  "steps": {
+    "signup": {
+      "email": "owner.test.1787150770643@gmail.com",
+      "confirmationRequiredNoticeShown": true,
+      "errorShown": null
+    }
+  },
+  "consoleErrors": [
+    "[console] Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}
