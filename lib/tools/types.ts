@@ -9,7 +9,11 @@ export type ToolCategory =
   | 'web'
   | 'memory'
   | 'voice'
-  | 'system';
+  | 'system'
+  // Internal Operator Mode tools (M1-09) — capabilities TEMO uses on its
+  // own operator's behalf, never a client tenant's. See
+  // lib/tools/operator-tools.ts and lib/governance/internalTenant.ts.
+  | 'operator';
 
 export type ToolStatus = 'active' | 'disabled' | 'error' | 'beta';
 

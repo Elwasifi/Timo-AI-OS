@@ -10,6 +10,7 @@ import { toolRegistry } from './registry';
 import { n8n } from '@/services/n8n';
 import { logger } from '@/lib/utils/logger';
 import { memory } from '@/lib/memory/memoryService';
+import { registerOperatorTools } from './operator-tools';
 
 // ---- n8n Tools ----
 
@@ -352,6 +353,11 @@ export function registerBuiltinTools(): void {
 
   // Memory Engine tools
   registerMemoryTools();
+
+  // Internal Operator Mode tools (M1-09) — always registered (the registry
+  // itself is not the security boundary), gated by assertInternalTenant()
+  // inside each handler instead.
+  registerOperatorTools((def, handler) => toolRegistry.register(def, handler));
 
   for (const { def } of placeholderTools) {
     toolRegistry.register(def, placeholderHandler(def.id));

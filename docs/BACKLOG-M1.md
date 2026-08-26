@@ -107,7 +107,7 @@
 
 ## M1-09 — Internal Operator Mode design + first capability
 **Priority:** Medium (needed before Amro starts delegating his own infra to TEMO)
-**Status:** Open
+**Status:** Pushed for Review — implemented and live-verified on `milestone-1-reliability` (2026-08-26). See `docs/TEMO-ARCHITECTURE.md`'s dated "M1-09" section. First capability (`operator.n8n.createWorkflowFromDescription`) proven structurally impossible for a client tenant even after a mistaken approval — not just policy. This is the final ticket of Milestone 1.
 
 **Acceptance criteria:**
 - Confirm/document that operator-mode capabilities are scoped to the internal tenant (`00000000-0000-0000-0000-000000000001`) only, per `docs/GOVERNANCE.md` Section 4.
