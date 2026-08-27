@@ -41,7 +41,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-04 — Timeout guard on VoicePlayer.speak()
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-04" section.
 
 `lib/voice/voice-player.ts`'s `speak()` promise only resolves via the browser's `onend`/`onerror` callback on `SpeechSynthesisUtterance`, with no timeout anywhere in the chain — a well-documented real Web Speech API flakiness. If neither callback ever fires, `voice-manager.ts`'s `isProcessingVoice` flag stays `true` forever, silently swallowing every future voice attempt with zero error shown.
 

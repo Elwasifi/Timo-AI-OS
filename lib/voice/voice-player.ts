@@ -21,9 +21,26 @@ export interface SpeakOptions {
   onBoundary?: BoundaryCallback;
 }
 
+// M4-04: the Web Speech API's SpeechSynthesisUtterance is well-documented
+// as occasionally never firing either onend or onerror (browser/OS/voice-
+// engine dependent) — with nothing to bound that wait, the caller's
+// promise (voice-manager.ts's speak()) hangs forever, isProcessingVoice
+// never resets, and every subsequent voice attempt is silently ignored
+// with zero error shown. Scaled to expected speech length (roughly a
+// generous 2x a typical ~12 chars/sec TTS rate) with a floor for very
+// short replies and a ceiling so a runaway text can't wedge the app for
+// minutes.
+const MIN_SPEAK_TIMEOUT_MS = 8_000;
+const MAX_SPEAK_TIMEOUT_MS = 45_000;
+function speakTimeoutFor(text: string): number {
+  const estimated = (text.length / 12) * 1000 * 2;
+  return Math.max(MIN_SPEAK_TIMEOUT_MS, Math.min(MAX_SPEAK_TIMEOUT_MS, estimated));
+}
+
 export class VoicePlayer {
   private synth: SpeechSynthesis | null = null;
   private utterance: SpeechSynthesisUtterance | null = null;
+  private watchdog: ReturnType<typeof setTimeout> | null = null;
   private supported: boolean;
 
   constructor() {
@@ -76,9 +93,20 @@ export class VoicePlayer {
     u.pitch = opts.pitch;
     u.volume = opts.volume;
 
+    const clearWatchdog = () => {
+      if (this.watchdog) {
+        clearTimeout(this.watchdog);
+        this.watchdog = null;
+      }
+    };
+
     u.onstart = () => opts.onStart?.();
-    u.onend = () => opts.onEnd?.();
+    u.onend = () => {
+      clearWatchdog();
+      opts.onEnd?.();
+    };
     u.onerror = () => {
+      clearWatchdog();
       opts.onError?.();
       opts.onEnd?.();
     };
@@ -86,9 +114,24 @@ export class VoicePlayer {
 
     this.utterance = u;
     this.synth.speak(u);
+
+    // M4-04: neither onend nor onerror is guaranteed to fire — this
+    // watchdog is the fallback that guarantees the caller's promise
+    // always settles.
+    this.watchdog = setTimeout(() => {
+      this.watchdog = null;
+      if (this.utterance !== u) return; // a newer utterance already took over
+      this.stop();
+      opts.onError?.();
+      opts.onEnd?.();
+    }, speakTimeoutFor(opts.text));
   }
 
   stop(): void {
+    if (this.watchdog) {
+      clearTimeout(this.watchdog);
+      this.watchdog = null;
+    }
     if (this.synth && this.synth.speaking) {
       this.synth.cancel();
     }

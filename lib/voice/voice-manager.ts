@@ -332,9 +332,15 @@ export class VoiceManager {
           store.reset();
           resolve();
         },
+        // M4-04: previously a silent resolve() — indistinguishable from a
+        // normal completed reply. Speech synthesis failing (including the
+        // new watchdog timeout in voice-player.ts) is a real, user-visible
+        // event now, via the same error surface M3-10 built for the rest
+        // of the voice flow.
         onError: () => {
           store.stopSpeaking();
           store.reset();
+          store.setError("Voice playback didn't complete — try again.");
           resolve();
         },
       });
