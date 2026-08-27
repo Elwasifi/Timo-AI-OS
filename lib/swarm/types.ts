@@ -149,6 +149,19 @@ export interface TimelineEntry {
   createdAt: string;
 }
 
+// ---- Organizational Learning (Section 3E) ----
+
+export interface Lesson {
+  id: string;
+  tenantId: string | null;
+  missionId: string;
+  category: string;
+  summary: string;
+  detail: string;
+  outcome: 'success' | 'failure' | 'partial';
+  createdAt: string;
+}
+
 // ---- Planner Output ----
 
 export interface PlannedObjective {

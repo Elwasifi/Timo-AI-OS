@@ -17,6 +17,7 @@ import type {
   TaskQueueStatus,
   ExecutionLogEntry,
   TimelineEventType,
+  Lesson,
 } from './types';
 
 // ---- Row Types (snake_case from DB) ----
@@ -534,6 +535,31 @@ export async function recordLesson(input: {
   });
 }
 
+// M4-03: recordLesson() above writes the one honest "this mission didn't
+// fully succeed" signal in the system, but nothing ever read it back —
+// confirmed by the Operational Integrity Audit (2026-08-27), a real
+// mission with 3 of 6 tasks failed showed only "COMPLETED 100%" anywhere
+// in the UI. This is the read side, mirroring getTimeline()'s pattern.
+export async function getLessonsForMission(missionId: string): Promise<Lesson[]> {
+  const { data, error } = await supabase
+    .from('lessons_learned')
+    .select('*')
+    .eq('mission_id', missionId)
+    .order('created_at', { ascending: false });
+
+  if (error || !data) return [];
+  return (data as Array<Record<string, unknown>>).map((row) => ({
+    id: row.id as string,
+    tenantId: row.tenant_id as string | null,
+    missionId: row.mission_id as string,
+    category: row.category as string,
+    summary: row.summary as string,
+    detail: row.detail as string,
+    outcome: row.outcome as Lesson['outcome'],
+    createdAt: row.created_at as string,
+  }));
+}
+
 // ---- Timeline CRUD ----
 
 export async function addTimelineEntry(input: {
@@ -585,13 +611,15 @@ export async function getFullMission(missionId: string): Promise<{
   objectives: MissionObjective[];
   tasks: MissionTask[];
   timeline: TimelineEntry[];
+  lessons: Lesson[];
 }> {
-  const [mission, objectives, tasks, timeline] = await Promise.all([
+  const [mission, objectives, tasks, timeline, lessons] = await Promise.all([
     getMission(missionId),
     getObjectives(missionId),
     getTasks(missionId),
     getTimeline(missionId),
+    getLessonsForMission(missionId),
   ]);
 
-  return { mission, objectives, tasks, timeline };
+  return { mission, objectives, tasks, timeline, lessons };
 }

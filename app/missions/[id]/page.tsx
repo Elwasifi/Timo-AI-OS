@@ -9,7 +9,7 @@ import { GlassPanel, ProgressBar, LoadingSpinner, EmptyState, SectionHeader } fr
 import { authFetch } from '@/lib/api/authFetch';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
-import type { Mission, MissionObjective, MissionTask, TimelineEntry } from '@/lib/swarm/types';
+import type { Mission, MissionObjective, MissionTask, TimelineEntry, Lesson } from '@/lib/swarm/types';
 
 const NON_TERMINAL_MISSION_STATUSES: Mission['status'][] = ['pending', 'planning', 'ready', 'executing', 'reviewing', 'paused'];
 
@@ -38,6 +38,7 @@ interface FullMission {
   objectives: MissionObjective[];
   tasks: MissionTask[];
   timeline: TimelineEntry[];
+  lessons: Lesson[];
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -105,7 +106,7 @@ export default function MissionDetailPage() {
 
         {!loading && data?.mission && (
           <MissionDetail
-            data={data as { mission: Mission; objectives: MissionObjective[]; tasks: MissionTask[]; timeline: TimelineEntry[] }}
+            data={data as { mission: Mission; objectives: MissionObjective[]; tasks: MissionTask[]; timeline: TimelineEntry[]; lessons: Lesson[] }}
             onRefetch={() => load(true)}
           />
         )}
@@ -118,15 +119,22 @@ function MissionDetail({
   data,
   onRefetch,
 }: {
-  data: { mission: Mission; objectives: MissionObjective[]; tasks: MissionTask[]; timeline: TimelineEntry[] };
+  data: { mission: Mission; objectives: MissionObjective[]; tasks: MissionTask[]; timeline: TimelineEntry[]; lessons: Lesson[] };
   onRefetch: () => void;
 }) {
-  const { mission, objectives, tasks, timeline } = data;
+  const { mission, objectives, tasks, timeline, lessons } = data;
   const accent = STATUS_COLOR[mission.status] ?? '#00F3FF';
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const canCancel = NON_TERMINAL_MISSION_STATUSES.includes(mission.status);
   const stalledTasks = tasks.filter(isTaskStalled);
+  // M4-03: the one honest "this mission didn't fully succeed" signal
+  // (lib/swarm/missionEngine.ts's recalculateProgress() already writes
+  // this on completion) had no UI reader anywhere — confirmed by the
+  // audit. Distinct from M3-08's "stalled" banner: this is a mission that
+  // finished running, not one still stuck mid-flight.
+  const partialFailure = lessons.find((l) => l.outcome === 'partial');
+  const fullFailure = mission.status === 'failed' ? lessons.find((l) => l.outcome === 'failure') : undefined;
 
   const submitCancel = async () => {
     setCancelling(true);
@@ -194,6 +202,33 @@ function MissionDetail({
             <p className="font-mono text-[11px] text-amber-200">
               {stalledTasks.length === 1 ? 'A task hasn’t' : `${stalledTasks.length} tasks haven’t`} progressed in over 10 minutes — still in progress, waiting on task processing. This environment has no automatic background scheduler active, so an interrupted task won’t resume on its own; it will need to be reprocessed manually or the mission restarted.
             </p>
+          </div>
+        )}
+
+        {/* M4-03: a mission that finished running but didn't fully succeed —
+            distinct from the "stalled" banner above (still mid-flight). */}
+        {partialFailure && (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-orange-500/30 bg-orange-500/10 p-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-400" />
+            <div className="min-w-0">
+              <p className="font-mono text-[11px] font-bold uppercase tracking-wide text-orange-300">Completed with failures</p>
+              <p className="mt-1 font-mono text-[11px] text-orange-200">{partialFailure.summary}</p>
+              {partialFailure.detail && (
+                <p className="mt-1 font-mono text-[10px] text-orange-200/70">{partialFailure.detail}</p>
+              )}
+            </div>
+          </div>
+        )}
+        {fullFailure && (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+            <div className="min-w-0">
+              <p className="font-mono text-[11px] font-bold uppercase tracking-wide text-red-300">Mission failed</p>
+              <p className="mt-1 font-mono text-[11px] text-red-200">{fullFailure.summary}</p>
+              {fullFailure.detail && (
+                <p className="mt-1 font-mono text-[10px] text-red-200/70">{fullFailure.detail}</p>
+              )}
+            </div>
           </div>
         )}
 

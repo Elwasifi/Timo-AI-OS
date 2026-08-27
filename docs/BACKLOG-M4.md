@@ -31,7 +31,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-03 — Surface lessons_learned partial-failure signal in the mission UI
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-03" section.
 
 `lib/swarm/missionEngine.ts:378`'s `recalculateProgress()` correctly writes a `'partial_failure'` `lessons_learned` row when a mission completes with some failed tasks, but grep-confirmed no UI component ever reads/displays it — the one honest signal in the system is currently invisible to the user.
 
