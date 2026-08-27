@@ -254,11 +254,12 @@ function formatDepartmentName(id: string): string {
 
 export async function getExecutionStats(tenantId?: string | null): Promise<ExecutionStats> {
   const missions = await listMissions(200, undefined, tenantId ?? undefined);
-  const allTasks: MissionTask[] = [];
-  for (const m of missions) {
-    const tasks = await getTasks(m.id);
-    allTasks.push(...tasks);
-  }
+  // M4-07: was a sequential await-in-a-loop across up to 200 missions — a
+  // real, worsening N+1 that ran on every Main Dashboard mount via
+  // AnalyticsWidget. Fetching all missions' tasks in parallel doesn't
+  // change what's returned, just how long it takes to get there.
+  const perMissionTasks = await Promise.all(missions.map((m) => getTasks(m.id)));
+  const allTasks: MissionTask[] = perMissionTasks.flat();
 
   const completed = allTasks.filter((t) => t.status === 'completed');
   const failed = allTasks.filter((t) => t.status === 'failed');
@@ -482,11 +483,12 @@ export async function getToolUsageStats(): Promise<ToolUsageStats> {
 // on its own, unlike the activity feed's titles/details).
 export async function getSystemStats(tenantId?: string | null): Promise<SystemStats> {
   const missions = await listMissions(200, undefined, tenantId ?? undefined);
-  let totalTasks = 0;
-  for (const m of missions) {
-    const tasks = await getTasks(m.id);
-    totalTasks += tasks.length;
-  }
+  // M4-07: same sequential N+1 as getExecutionStats() above. Currently
+  // dead in practice (only reachable via the orphaned /api/stats/dashboard
+  // route — Operational Integrity Audit section 7) but fixed anyway rather
+  // than left as a landmine for whenever that route gets wired up.
+  const perMissionTasks = await Promise.all(missions.map((m) => getTasks(m.id)));
+  const totalTasks = perMissionTasks.reduce((sum, tasks) => sum + tasks.length, 0);
 
   const agents = AGENT_DEFINITIONS.filter((a) => a.isActive);
   const managers = agents.filter((a) => a.level === 'manager');

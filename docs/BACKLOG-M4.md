@@ -74,7 +74,7 @@ Confirmed: every "live" widget on Main Dashboard (`command-widgets.tsx`, `comman
 
 ## M4-07 — Parallelize getExecutionStats()'s per-mission task fetch
 **Priority:** High
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-07" section.
 
 `lib/dashboard/dashboardService.ts:255`'s `getExecutionStats()` loops `await getTasks(m.id)` sequentially across up to 200 missions — a real, worsening N+1 pattern that runs on every Main Dashboard mount via `AnalyticsWidget`.
 
