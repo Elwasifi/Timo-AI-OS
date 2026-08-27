@@ -20,7 +20,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-02 — Placeholder tools must signal failure, not fake success
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-02" section.
 
 `lib/tools/builtin-tools.ts`'s `placeholderHandler()` (`files.read`, `files.write`, `web.search`, and any other `'beta'`-status stub) always returns a canned success-looking string with no way for the caller to know nothing real happened — a fake-success trap for any task that lands on one of these tools, not just the M4-01 case.
 

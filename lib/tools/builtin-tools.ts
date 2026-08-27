@@ -226,10 +226,19 @@ const n8nImportHandler: ToolHandler = async (args) => {
 
 // ---- Placeholder tools (future adapters) ----
 
+// M4-02: this used to return a plain object (`{ message: '...' }`) as its
+// result — lib/tools/executor.ts's execute() treats ANY non-throwing
+// handler return as `ok: true` (see its try block: `const data = await
+// registered.handler(...)` unconditionally builds a success envelope from
+// whatever comes back). A placeholder "success" was indistinguishable from
+// a real one to every caller — decideTools(), the mission task executor,
+// and mission completion rollup all trusted it. Throwing here is the
+// executor's real, only failure signal — it flows through the same
+// retry/backoff and terminal-fail path a genuine tool error would.
 function placeholderHandler(service: string): ToolHandler {
   return async () => {
     logger.n8nWarn(`Tool called for unconfigured service: ${service}`);
-    return { message: `${service} adapter not yet configured. This tool is ready for future integration (MCP, OAuth, local runtime).` };
+    throw new Error(`${service} is not yet implemented — no real action was taken. This tool is a placeholder for future integration (MCP, OAuth, local runtime).`);
   };
 }
 
