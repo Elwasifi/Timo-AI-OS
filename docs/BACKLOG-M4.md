@@ -52,7 +52,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-05 — Re-validate n8n connection status instead of trusting stale cache
 **Priority:** High
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-05" section.
 
 `app_settings.n8n_connection_status` currently shows a stale `"connected":true` even though the audit confirmed the configured Cloudflare tunnel URL is DNS-dead right now — actively misleading, and it independently corroborates M4-01/M4-02's finding that real n8n calls can't currently succeed.
 

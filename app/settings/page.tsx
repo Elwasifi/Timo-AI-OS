@@ -1703,7 +1703,31 @@ function N8nSection() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    loadSettings().then(setSettings).catch(() => setError('Failed to load settings'));
+    loadSettings()
+      .then((loaded) => {
+        setSettings(loaded);
+        // M4-05: re-validate live on every Settings->n8n view instead of
+        // trusting whatever app_settings.n8n_connection_status was last
+        // set to (possibly stale/long since gone dead) — only if a URL is
+        // actually configured, so a fresh install doesn't show a spurious
+        // failure before the user has entered anything.
+        if (loaded.n8n_url) {
+          setTesting(true);
+          testConnection()
+            .then(setTestResult)
+            .catch((err) =>
+              setTestResult({
+                connected: false,
+                version: null,
+                latency: 0,
+                authStatus: 'unknown',
+                error: err instanceof Error ? err.message : 'Connection test failed',
+              })
+            )
+            .finally(() => setTesting(false));
+        }
+      })
+      .catch(() => setError('Failed to load settings'));
   }, []);
 
   if (!settings) return <div className="py-8 text-center text-sm text-muted-foreground">Loading...</div>;
