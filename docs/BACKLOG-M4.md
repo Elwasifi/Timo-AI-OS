@@ -10,7 +10,7 @@
 
 ## M4-01 — Fix task-text-vs-original-request bug feeding detectIntent()
 **Priority:** Critical
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-01" section.
 
 Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `taskText` from the mission-planner's generic paraphrase (e.g. "Design the automation workflow") instead of the user's original request (e.g. "create a workflow for managing WhatsApp"), and feeds that into `detectIntent()`. `lib/context/intent-detector.ts:101`'s n8n-intent regex matches the original request but not the paraphrase, so tool routing falls through to the wrong category and lands on `lib/tools/builtin-tools.ts:229`'s `placeholderHandler()` instead of the real n8n tool.
 

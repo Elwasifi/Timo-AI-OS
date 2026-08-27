@@ -163,7 +163,20 @@ export async function executeTask(
       // "run the daily report workflow"), the real tool executor runs —
       // respecting requiresApproval/isSimulation exactly as it already does
       // for chat, since both callers share the same toolExecutor.execute().
-      const taskText = `${task.title}. ${task.description}`;
+      //
+      // M4-01: the planner generates generic, paraphrased task text (e.g.
+      // "Design the automation workflow") that often strips the specific
+      // verb/noun combination (e.g. "create a workflow") detectIntent()'s
+      // regexes look for — confirmed live: a mission created from "create
+      // a workflow for managing WhatsApp" produced a task whose own text
+      // never matched the n8n-intent pattern, silently routing tool
+      // selection to unrelated placeholder tools instead of
+      // n8n.createWorkflow. mission.userRequest carries the user's actual
+      // original wording (already stored on every mission — no schema
+      // change needed) — appending it gives detectIntent() (regex-based)
+      // and the AI tool planner (which also reads this same text) the real
+      // request to work from, not just the paraphrase.
+      const taskText = `${task.title}. ${task.description}\n\nOriginal user request: ${mission.userRequest}`;
       const toolStep = await trackStep('Tool Decision', async () => {
         const routingIntentStub: Intent = {
           category: 'general',
