@@ -46,6 +46,31 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+// M4-06: every widget below used to fetch exactly once on mount with no
+// revalidation — the confirmed cause of "needs a manual refresh every
+// minute for things to work" (Operational Integrity Audit, section 7).
+// Shared polling hook so each widget stays live without its own timer
+// bookkeeping; mirrors right-sidebar.tsx's existing setInterval pattern.
+const WIDGET_POLL_MS = 15_000;
+function usePolled<T>(fetcher: () => Promise<T>, intervalMs = WIDGET_POLL_MS): T | null {
+  const [data, setData] = useState<T | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetcher().then((d) => {
+        if (!cancelled) setData(d);
+      });
+    };
+    load();
+    const t = setInterval(load, intervalMs);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [fetcher, intervalMs]);
+  return data;
+}
+
 function GroupLabel({ children }: { children: ReactNode }) {
   return (
     <div className="col-span-full mt-1 font-mono text-[10px] uppercase tracking-[0.2em] text-temo-titanium/60 first:mt-0">
@@ -58,11 +83,7 @@ function GroupLabel({ children }: { children: ReactNode }) {
 
 function ActiveTasksWidget() {
   const router = useRouter();
-  const [summary, setSummary] = useState<TaskQueueSummary | null>(null);
-
-  useEffect(() => {
-    getTaskQueueSummary().then(setSummary);
-  }, []);
+  const summary = usePolled(getTaskQueueSummary);
 
   return (
     <Panel title="Active Tasks" className="widget">
@@ -86,11 +107,7 @@ function ActiveTasksWidget() {
 
 function RuntimeSummaryWidget() {
   const router = useRouter();
-  const [active, setActive] = useState<CurrentActiveMission | null>(null);
-
-  useEffect(() => {
-    getCurrentActiveMission().then(setActive);
-  }, []);
+  const active = usePolled(getCurrentActiveMission);
 
   return (
     <Panel title="Runtime Summary" className="widget">
@@ -117,12 +134,10 @@ function RuntimeSummaryWidget() {
 
 // ---- Live Activity ----
 
-function LiveActivityWidget() {
-  const [items, setItems] = useState<RuntimeActivityItem[] | null>(null);
+const getRecentActivity = () => getRuntimeActivity(6);
 
-  useEffect(() => {
-    getRuntimeActivity(6).then(setItems);
-  }, []);
+function LiveActivityWidget() {
+  const items = usePolled(getRecentActivity);
 
   return (
     <Panel title="Live Activity" className="widget">
@@ -148,12 +163,8 @@ function LiveActivityWidget() {
 // ---- System Health ----
 
 function SystemHealthWidget() {
-  const [health, setHealth] = useState<SystemHealth | null>(null);
+  const health = usePolled(getSystemHealth);
   const agents = useDashboardStore((s) => s.agents);
-
-  useEffect(() => {
-    getSystemHealth().then(setHealth);
-  }, []);
 
   const statusColor = (s: string) => (s === 'healthy' ? '#6ee7b7' : s === 'degraded' ? '#facc15' : s === 'down' ? '#f87171' : '#94a3b8');
 
@@ -185,11 +196,7 @@ function SystemHealthWidget() {
 // ---- API Calls / Provider Activity ----
 
 function ApiCallsWidget() {
-  const [stats, setStats] = useState<ProviderStats[] | null>(null);
-
-  useEffect(() => {
-    getProviderStats().then(setStats);
-  }, []);
+  const stats = usePolled(getProviderStats);
 
   const withUsage = (stats ?? []).filter((p) => p.usageCount > 0).sort((a, b) => b.usageCount - a.usageCount);
 
@@ -217,11 +224,7 @@ function ApiCallsWidget() {
 
 function MemoryWidget() {
   const router = useRouter();
-  const [stats, setStats] = useState<MemoryStats | null>(null);
-
-  useEffect(() => {
-    getMemoryStats().then(setStats);
-  }, []);
+  const stats = usePolled(getMemoryStats);
 
   return (
     <Panel title="Memory" className="widget">
@@ -245,11 +248,7 @@ function MemoryWidget() {
 
 function KnowledgeWidget() {
   const router = useRouter();
-  const [stats, setStats] = useState<KnowledgeStats | null>(null);
-
-  useEffect(() => {
-    getKnowledgeStats().then(setStats);
-  }, []);
+  const stats = usePolled(getKnowledgeStats);
 
   return (
     <Panel title="Knowledge" className="widget">
@@ -273,11 +272,10 @@ function KnowledgeWidget() {
 
 function AnalyticsWidget() {
   const router = useRouter();
-  const [stats, setStats] = useState<ExecutionStats | null>(null);
-
-  useEffect(() => {
-    getExecutionStats().then(setStats);
-  }, []);
+  // M4-07 will parallelize getExecutionStats()'s per-mission N+1 fetch — a
+  // longer interval here keeps this widget live without hammering that
+  // still-sequential query every 15s in the meantime.
+  const stats = usePolled(getExecutionStats, 60_000);
 
   return (
     <Panel title="Analytics" className="widget">
@@ -301,11 +299,7 @@ function AnalyticsWidget() {
 
 function WorkflowsWidget() {
   const router = useRouter();
-  const [stats, setStats] = useState<WorkflowStats | null>(null);
-
-  useEffect(() => {
-    getWorkflowStats().then(setStats);
-  }, []);
+  const stats = usePolled(getWorkflowStats);
 
   return (
     <Panel title="Workflows" className="widget">

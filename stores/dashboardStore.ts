@@ -24,6 +24,8 @@ interface DashboardState {
   agentsLoaded: boolean;
   missions: Mission[];
   missionsLoaded: boolean;
+  /** M4-06: real error from the last loadMissions() call, or null. Previously swallowed by an empty catch, leaving stale/empty state with no user-facing signal. */
+  missionsError: string | null;
   currentProviderId: string;
   setCurrentProvider: (id: string) => void;
   updateAgentStatus: (agentId: string, status: Agent['status'], activity?: string) => void;
@@ -387,6 +389,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   agentsLoaded: false,
   missions: [],
   missionsLoaded: false,
+  missionsError: null,
 
   loadAgents: async () => {
     const { loadAgents: loadRegistry, agentRecordToRuntimeAgent } = await import('@/lib/agents/agentRegistryService');
@@ -400,12 +403,17 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   },
 
   loadMissions: async () => {
-    const { listMissions } = await import('@/lib/swarm/missionService');
+    const { listMissionsOrThrow } = await import('@/lib/swarm/missionService');
     try {
-      const missions = await listMissions(50);
-      set({ missions, missionsLoaded: true });
-    } catch {
-      // Leave whatever missions were already in state.
+      const missions = await listMissionsOrThrow(50);
+      set({ missions, missionsLoaded: true, missionsError: null });
+    } catch (err) {
+      // M4-06: previously silent — a query failure left whatever stale
+      // (or empty) missions were already in state with zero signal that
+      // anything went wrong. Missions themselves are left untouched
+      // (still the last good snapshot), but the error is now real and
+      // visible to callers.
+      set({ missionsError: err instanceof Error ? err.message : 'Failed to load missions' });
     }
   },
 }));

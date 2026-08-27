@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Target, Plus, Search } from 'lucide-react';
+import { Target, Plus, Search, AlertCircle } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
 import { MissionCard, type Mission as MissionCardData } from '@/components/temo/mission-card';
 import { EmptyState, GlassPanel } from '@/components/temo/primitives';
@@ -14,6 +14,7 @@ const STATUS_TABS = ['All', 'Active', 'Pending', 'Completed', 'Failed'] as const
 export default function MissionsPage() {
   const router = useRouter();
   const missions = useDashboardStore((s) => s.missions);
+  const missionsError = useDashboardStore((s) => s.missionsError);
   const loadMissions = useDashboardStore((s) => s.loadMissions);
   const [tab, setTab] = useState<string>('All');
   const [query, setQuery] = useState('');
@@ -21,8 +22,14 @@ export default function MissionsPage() {
   // Real missions from the missions table (lib/swarm/missionService.listMissions),
   // via the same shared store slice the Homepage's Mission Control widget can
   // read — not the mock `workflows` array this page used to render.
+  // M4-06: previously fetched once on mount only — this page and the
+  // Homepage Mission Control widget could silently disagree until a full
+  // page reload. Now polls on a reasonable cadence like the rest of the
+  // "live" dashboard surfaces.
   useEffect(() => {
     loadMissions();
+    const t = setInterval(loadMissions, 15_000);
+    return () => clearInterval(t);
   }, [loadMissions]);
 
   const cardData: MissionCardData[] = missions.map((m) => {
@@ -66,6 +73,13 @@ export default function MissionsPage() {
             <Plus className="h-4 w-4" /> Create Mission
           </button>
         </div>
+
+        {missionsError && (
+          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 font-mono text-xs text-destructive">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            Failed to load missions: {missionsError}
+          </div>
+        )}
 
         {/* Filter tabs + search */}
         <div className="flex flex-wrap items-center justify-between gap-3">

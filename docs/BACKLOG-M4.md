@@ -63,7 +63,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-06 — Make "live" dashboard widgets actually live, or label them as snapshots
 **Priority:** High
-**Status:** Open
+**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-06" section.
 
 Confirmed: every "live" widget on Main Dashboard (`command-widgets.tsx`, `command-deck.tsx`'s `MissionWidget`, etc.) fetches exactly once on mount with zero polling/revalidation — the direct, confirmed cause of "needs a manual refresh every minute for things to work."
 
