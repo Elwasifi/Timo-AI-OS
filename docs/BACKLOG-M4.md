@@ -10,7 +10,7 @@
 
 ## M4-01 — Fix task-text-vs-original-request bug feeding detectIntent()
 **Priority:** Critical
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-01" section.
+**Status:** Merged (main@acac47a). Live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-01" section.
 
 Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `taskText` from the mission-planner's generic paraphrase (e.g. "Design the automation workflow") instead of the user's original request (e.g. "create a workflow for managing WhatsApp"), and feeds that into `detectIntent()`. `lib/context/intent-detector.ts:101`'s n8n-intent regex matches the original request but not the paraphrase, so tool routing falls through to the wrong category and lands on `lib/tools/builtin-tools.ts:229`'s `placeholderHandler()` instead of the real n8n tool.
 
@@ -20,7 +20,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-02 — Placeholder tools must signal failure, not fake success
 **Priority:** Critical
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-02" section.
+**Status:** Merged (main@acac47a). Live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-02" section.
 
 `lib/tools/builtin-tools.ts`'s `placeholderHandler()` (`files.read`, `files.write`, `web.search`, and any other `'beta'`-status stub) always returns a canned success-looking string with no way for the caller to know nothing real happened — a fake-success trap for any task that lands on one of these tools, not just the M4-01 case.
 
@@ -31,7 +31,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-03 — Surface lessons_learned partial-failure signal in the mission UI
 **Priority:** Critical
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-03" section.
+**Status:** Merged (main@acac47a). Live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-03" section.
 
 `lib/swarm/missionEngine.ts:378`'s `recalculateProgress()` correctly writes a `'partial_failure'` `lessons_learned` row when a mission completes with some failed tasks, but grep-confirmed no UI component ever reads/displays it — the one honest signal in the system is currently invisible to the user.
 
@@ -41,7 +41,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-04 — Timeout guard on VoicePlayer.speak()
 **Priority:** Critical
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-04" section.
+**Status:** Merged (main@acac47a). Live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-04" section.
 
 `lib/voice/voice-player.ts`'s `speak()` promise only resolves via the browser's `onend`/`onerror` callback on `SpeechSynthesisUtterance`, with no timeout anywhere in the chain — a well-documented real Web Speech API flakiness. If neither callback ever fires, `voice-manager.ts`'s `isProcessingVoice` flag stays `true` forever, silently swallowing every future voice attempt with zero error shown.
 
@@ -52,7 +52,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-05 — Re-validate n8n connection status instead of trusting stale cache
 **Priority:** High
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-05" section.
+**Status:** Merged (main@acac47a). Live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-05" section.
 
 `app_settings.n8n_connection_status` currently shows a stale `"connected":true` even though the audit confirmed the configured Cloudflare tunnel URL is DNS-dead right now — actively misleading, and it independently corroborates M4-01/M4-02's finding that real n8n calls can't currently succeed.
 
@@ -63,7 +63,7 @@ Root cause confirmed in the audit: `lib/swarm/executionLayer.ts:166` builds `tas
 
 ## M4-06 — Make "live" dashboard widgets actually live, or label them as snapshots
 **Priority:** High
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-06" section.
+**Status:** Merged (main@acac47a). Live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-06" section.
 
 Confirmed: every "live" widget on Main Dashboard (`command-widgets.tsx`, `command-deck.tsx`'s `MissionWidget`, etc.) fetches exactly once on mount with zero polling/revalidation — the direct, confirmed cause of "needs a manual refresh every minute for things to work."
 
@@ -74,7 +74,7 @@ Confirmed: every "live" widget on Main Dashboard (`command-widgets.tsx`, `comman
 
 ## M4-07 — Parallelize getExecutionStats()'s per-mission task fetch
 **Priority:** High
-**Status:** Pushed for review — live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-07" section.
+**Status:** Merged (main@acac47a). Live-verified. See `docs/TEMO-ARCHITECTURE.md`'s dated "M4-07" section.
 
 `lib/dashboard/dashboardService.ts:255`'s `getExecutionStats()` loops `await getTasks(m.id)` sequentially across up to 200 missions — a real, worsening N+1 pattern that runs on every Main Dashboard mount via `AnalyticsWidget`.
 
