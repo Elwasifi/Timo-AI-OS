@@ -14,6 +14,7 @@
 
 import { classifyComplexity, resolveCapabilities } from './missionPlanner';
 import type { DecisionResult, PipelineType } from './executionTypes';
+import { asksToRememberInput } from '@/lib/context/intent-detector';
 
 // ---- Signal Detection ----
 
@@ -107,15 +108,33 @@ export function makeDecision(userRequest: string): DecisionResult {
   }
 
   // ---- Final Decision ----
-  const pipeline: PipelineType = missionScore > simpleScore ? 'mission' : 'simple';
+  let pipeline: PipelineType = missionScore > simpleScore ? 'mission' : 'simple';
   const totalScore = missionScore + simpleScore;
   const confidence = totalScore > 0
     ? Math.round((Math.max(missionScore, simpleScore) / totalScore) * 100)
     : 50;
 
-  const reason = pipeline === 'mission'
+  let reason = pipeline === 'mission'
     ? `Mission signals outweigh simple signals (${missionScore} vs ${simpleScore}). Request requires decomposition.`
     : `Simple signals outweigh mission signals (${simpleScore} vs ${missionScore}). Direct response appropriate.`;
+
+  // M5-01: an explicit "remember that X" statement must always reach
+  // memory-decision.ts's deterministic storage rule (Rule #1 there) —
+  // this keyword score was running first, unaware "remember" statements
+  // exist at all, so one containing mission-sounding words could get
+  // hijacked into a mission and never get stored (live-reproduced: "remember
+  // that we are building a multi-agent AI operating system called Temo"
+  // scored mission-worthy purely from "build"/"system", Deep Integrity
+  // Audit Section D). This overrides the score outright — storing a
+  // memory when explicitly asked is a correctness guarantee, not
+  // something a keyword tally should be allowed to overrule — using the
+  // same detector memory-decision.ts itself relies on, rather than a
+  // second, independent definition of "remember" that could drift from it.
+  if (pipeline === 'mission' && asksToRememberInput(userRequest)) {
+    pipeline = 'simple';
+    reason = 'Explicit "remember" statement — routed to memory storage regardless of mission-verb score.';
+    signals.push('explicit remember statement (overrides mission-verb scoring)');
+  }
 
   return {
     pipeline,
