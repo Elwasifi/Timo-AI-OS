@@ -48,6 +48,42 @@ import type { ExecutionResult, ExecutionStep, ExecutionContext, PriorTaskResult,
 import type { AgentRecord } from '@/lib/agents/types';
 import type { Intent } from '@/types';
 
+// ---- Result-shape guard (M5-02) ----
+//
+// Verifies a task's result actually reads as an answer, not empty/blank
+// output or raw JSON values (the shape of tool-call arguments, not
+// prose) — the specific fake-success shape that reached 'completed'
+// status live. Deliberately a shape check, not a content/quality check:
+// this isn't trying to judge whether the answer is GOOD, only whether
+// it's structurally an answer at all.
+//
+// Checking whether the WHOLE trimmed string parses as one JSON value
+// isn't enough — live-confirmed the actual degenerate output was TWO
+// JSON objects concatenated across lines (one per retry attempt, e.g.
+// `{"queries":[...]}\n{"queries":[...]}`), which fails a single
+// JSON.parse() on the combined string (trailing-data error) and would
+// have slipped past that check as "not JSON, must be prose." Splitting
+// into lines and checking whether EVERY non-blank line individually
+// parses as JSON catches that shape too, while still accepting a real
+// answer that happens to quote a JSON snippet inside otherwise-prose
+// text (not every line of that would parse as JSON on its own).
+function looksLikeRealAnswer(output: string): boolean {
+  const trimmed = output.trim();
+  if (trimmed.length === 0) return false;
+
+  const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const isJsonLine = (line: string): boolean => {
+    try {
+      JSON.parse(line);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  return !(lines.length > 0 && lines.every(isJsonLine));
+}
+
 // ---- Timeout helper ----
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -340,6 +376,23 @@ export async function executeTask(
         );
         steps.push(llmStep.step);
         output = llmStep.value;
+      }
+
+      // M5-02: same class of bug as M1-04/M4-01/M4-02 (fake success reported
+      // as real), recurring in a new place — Atlas's "Research market trends"
+      // task reached status:'completed' with result.output literally being
+      // `{"query":"...", "max_results":10, "recency_days":90}`, the tool
+      // call's own REQUEST arguments, not an answer (live-confirmed, Deep
+      // Integrity Audit Section E). The LLM produced tool-call-shaped JSON
+      // instead of prose — a real answer to a research/summary/analysis task
+      // is essentially never, in its entirety, a parseable JSON value, so
+      // that's what a structural guard checks for, rather than special-casing
+      // this one task/tool. Applies to both branches above (tool-answer and
+      // LLM output) — a fake success is a fake success regardless of which
+      // path produced it. Throwing routes it through the same retry/backoff/
+      // fail loop as any other execution failure, never silently accepted.
+      if (!looksLikeRealAnswer(output)) {
+        throw new Error('Model returned a degenerate result (empty, or raw JSON/tool-call arguments instead of an answer) — treating as a failed attempt.');
       }
 
       // Success — record completion
