@@ -31,6 +31,7 @@ import {
   updateTask,
   appendExecutionLog,
   recordLesson,
+  claimMissionTerminalStatus,
 } from './missionService';
 import {
   planMission,
@@ -391,6 +392,17 @@ export async function recalculateProgress(missionId: string): Promise<void> {
     status = 'completed';
     if (failed > 0 && completed === 0) {
       status = 'failed';
+    }
+
+    // M5-04: claim the terminal transition atomically before running any
+    // side effects — if this returns false, a concurrent call already
+    // transitioned this mission out of non-terminal status first, so the
+    // completion/failure bookkeeping below has already run once for this
+    // mission and must not run again.
+    const claimed = await claimMissionTerminalStatus(missionId, status, 100);
+    if (!claimed) return;
+
+    if (status === 'failed') {
       await recordMissionFailed(missionId, full.mission.title, `${failed} of ${total} tasks failed`);
 
       const errors = full.tasks
@@ -428,6 +440,7 @@ export async function recalculateProgress(missionId: string): Promise<void> {
         });
       }
     }
+    return;
   }
 
   await updateMission(missionId, { progress, status });

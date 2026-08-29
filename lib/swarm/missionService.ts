@@ -247,6 +247,36 @@ export async function updateMission(
   return mapMission(data as MissionRow);
 }
 
+/**
+ * M5-04: atomic conditional transition to a terminal mission status
+ * (completed/failed/cancelled). Only succeeds — returns true — if the
+ * mission's status is still non-terminal at write time (a single
+ * Postgres WHERE clause, not a separate read-then-write, so this is
+ * race-free). recalculateProgress() uses this to guard its
+ * recordMissionCompleted()/recordLesson() side effects: those calls
+ * should only ever run once per mission, but recalculateProgress()
+ * itself is a non-atomic read-modify-write that can run concurrently
+ * (two tasks completing near-simultaneously via different execution
+ * paths) — without this guard, both callers could observe the mission
+ * as "not yet terminal," both proceed, and both fire the completion
+ * side effects for the same mission.
+ */
+export async function claimMissionTerminalStatus(
+  id: string,
+  status: Extract<Mission['status'], 'completed' | 'failed' | 'cancelled'>,
+  progress: number,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('missions')
+    .update({ status, progress })
+    .eq('id', id)
+    .not('status', 'in', '(completed,failed,cancelled)')
+    .select('id')
+    .maybeSingle();
+
+  return !error && !!data;
+}
+
 export async function listMissions(
   limit = 50,
   status?: MissionStatus,
