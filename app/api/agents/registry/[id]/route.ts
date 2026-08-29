@@ -3,6 +3,8 @@ import { getAgentById, updateAgent, deleteAgent, type UpdateAgentInput } from '@
 import type { AgentPermissions } from '@/lib/agents/types';
 import { ok, badRequest, notFound, internalError, fail } from '@/lib/api/response';
 import { requireUser } from '@/lib/auth/apiAuth';
+import { requestApproval, findApprovalByPayload } from '@/lib/governance/approvals';
+import { INTERNAL_TENANT_ID } from '@/lib/governance/internalTenant';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -86,12 +88,63 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
   }
 }
 
+// S0-05: agent_registry is global across every tenant (shared workforce
+// by design, per CLAUDE.md) — a hard delete here removes an agent for
+// EVERY tenant in the system, not just the caller's own. requireUser()
+// alone only proves the caller is signed in as *some* user; it says
+// nothing about whether they should be allowed to take a destructive,
+// cross-tenant action. This now goes through the same approval_requests
+// gate as gated tool execution (lib/tools/executor.ts) — a real Settings
+// -> Approvals UI already exists and resolves these.
+//
+// Deliberately server-authoritative rather than trusting the caller to
+// pass back an approval id it remembers client-side: an earlier version
+// of this route took an `?approvalId=` query param, and testing it live
+// surfaced a real gap — a page reload or a tab switch between "request
+// approval" and "retry delete" loses any client-held state, so the
+// approved request could never actually be redeemed. Looking it up by
+// the agent id itself instead means the delete just works once someone
+// approves it, regardless of what the client remembers.
 export async function DELETE(req: Request, { params }: { params: { id: string } }) {
   const start = Date.now();
   try {
     const user = await requireUser(req);
     if (!user) {
       return NextResponse.json(fail('UNAUTHORIZED', 'Sign in required', start), { status: 401 });
+    }
+
+    const existing = await getAgentById(params.id);
+    if (!existing) {
+      return NextResponse.json(notFound('Agent not found', start), { status: 404 });
+    }
+
+    const approval = await findApprovalByPayload('destructive_action', 'agentId', params.id);
+
+    if (!approval) {
+      const created = await requestApproval({
+        tenantId: INTERNAL_TENANT_ID,
+        type: 'destructive_action',
+        title: `Delete agent: ${existing.displayName}`,
+        detail: `${user.email ?? user.id} requested permanent deletion of agent "${params.id}" (${existing.displayName}). This removes the agent for every tenant — it is not tenant-scoped.`,
+        payload: { agentId: params.id },
+        requestedBy: user.id,
+      });
+      return NextResponse.json(
+        fail(
+          'APPROVAL_REQUIRED',
+          'Deleting an agent affects every tenant and requires approval. A request has been created in Settings -> Approvals.',
+          start,
+          { pendingApprovalId: created?.id },
+        ),
+        { status: 403 },
+      );
+    }
+
+    if (approval.status !== 'approved') {
+      return NextResponse.json(
+        fail('APPROVAL_REQUIRED', 'This delete is still pending approval in Settings -> Approvals.', start, { pendingApprovalId: approval.id }),
+        { status: 403 },
+      );
     }
 
     const result = await deleteAgent(params.id);
