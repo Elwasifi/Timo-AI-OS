@@ -121,8 +121,29 @@ export async function getRuntimeState(): Promise<RuntimeState> {
   };
 }
 
+/**
+ * M5-03: runtime_state is a literal single-row global singleton (id='default')
+ * shared by every concurrently running mission, with no locking on the plain
+ * UPDATE this used to run unconditionally — two missions racing (two
+ * tenants, or the in-request pipeline racing the background queue
+ * processor) could each write mission-specific fields, and whichever
+ * commits last silently wins regardless of which mission is actually
+ * still running (Deep Integrity Audit, Section F).
+ *
+ * `expectedMissionId` is an optional optimistic-lock precondition: when
+ * given, the UPDATE only applies if `current_mission_id` still equals it
+ * at write time (Postgres row-level WHERE, so this is atomic — no
+ * separate read-then-write race). A caller writing mission-specific state
+ * should pass its own mission id; if the update returns null, some other
+ * mission has since become "current" and this caller's stale write was
+ * correctly discarded instead of silently clobbering the newer mission's
+ * state. Omitted (the default) preserves the previous unconditional
+ * behavior for callers writing non-mission-specific fields (e.g. a bare
+ * executionState heartbeat with no missionId in scope at all).
+ */
 export async function updateRuntimeState(
   patch: Partial<Omit<RuntimeState, 'updatedAt'>>,
+  expectedMissionId?: string | null,
 ): Promise<RuntimeState | null> {
   const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
   if (patch.currentMissionId !== undefined) update.current_mission_id = patch.currentMissionId;
@@ -133,12 +154,11 @@ export async function updateRuntimeState(
   if (patch.timelineSummary !== undefined) update.timeline_summary = patch.timelineSummary;
   if (patch.metadata !== undefined) update.metadata = patch.metadata;
 
-  const { data, error } = await supabase
-    .from('runtime_state')
-    .update(update)
-    .eq('id', 'default')
-    .select('*')
-    .maybeSingle();
+  let query = supabase.from('runtime_state').update(update).eq('id', 'default');
+  if (expectedMissionId !== undefined) {
+    query = query.eq('current_mission_id', expectedMissionId);
+  }
+  const { data, error } = await query.select('*').maybeSingle();
 
   if (error || !data) return null;
   return {
