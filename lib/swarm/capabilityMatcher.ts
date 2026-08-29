@@ -92,8 +92,8 @@ function scoreAgent(
   const capList = matched.join(', ');
   const reason =
     matched.length === 1
-      ? `role '${agent.roleId}' has capability: ${capList}`
-      : `role '${agent.roleId}' has ${matched.length} matching capabilities: ${capList}`;
+      ? `agent '${agent.id}' has capability: ${capList}`
+      : `agent '${agent.id}' has ${matched.length} matching capabilities: ${capList}`;
 
   return {
     agent,

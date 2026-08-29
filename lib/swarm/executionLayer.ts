@@ -111,7 +111,7 @@ export async function executeTask(
   const managerId = task.assignedManager ?? 'temo';
   const managerName = managerId;
 
-  // Resolve the manager's stable roleId from the agent registry
+  // Resolve the manager's stable identifier from the agent registry
   const managerRecord = await getAgentById(managerId);
   const managerRoleId = resolveRoleId(managerRecord);
 
@@ -690,7 +690,7 @@ async function executeDelegatedTask(
       : `Provider: worker execution (router fallback)`,
     detail: workerDecision.selected
       ? `Model: ${workerDecision.selected.model} — ${workerDecision.reason}`
-      : `Model: ${workerRecord.model} (Worker: ${workerRecord.roleId})`,
+      : `Model: ${workerRecord.model} (Worker: ${workerRecord.id})`,
   });
 
   if (workerResult.status === 'failed') {
@@ -759,7 +759,7 @@ function buildWorkerSystemPrompt(
   worker: AgentRecord,
 ): string {
   const workerHeader =
-    `You are ${worker.displayName}, ${worker.role} (roleId: ${worker.roleId}). ` +
+    `You are ${worker.displayName}, ${worker.role} (id: ${worker.id}). ` +
     `You are executing a task delegated by your department manager. ` +
     `Your capabilities: ${worker.capabilities.join(', ')}. ` +
     `Stay focused on the task and provide a complete, actionable result.\n\n`;

@@ -237,7 +237,6 @@ export async function getMissionStatus(
         task,
         assignedManager: {
           id: task.assignedManager,
-          roleId: task.assignedManager,
           displayName: task.assignedManager,
           role: '',
           level: 'manager',
@@ -263,7 +262,6 @@ export async function getMissionStatus(
         match: {
           agent: {
             id: task.assignedManager,
-            roleId: task.assignedManager,
             displayName: task.assignedManager,
             role: '',
             level: 'manager',

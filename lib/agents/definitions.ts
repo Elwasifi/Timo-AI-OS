@@ -15,7 +15,6 @@ import type { AgentRecord } from './types';
 export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   {
     id: 'temo',
-    roleId: 'chief_executive_ai',
     displayName: 'Temo',
     role: 'Chief AI / CEO Coordinator',
     level: 'chief',
@@ -54,7 +53,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'nova',
-    roleId: 'engineering_manager',
     displayName: 'Nova',
     role: 'Engineering Manager',
     level: 'manager',
@@ -93,7 +91,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'nova-frontend',
-    roleId: 'frontend_engineer',
     displayName: 'Frontend Engineer',
     role: 'Frontend Engineer',
     level: 'worker',
@@ -130,7 +127,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'nova-backend',
-    roleId: 'backend_engineer',
     displayName: 'Backend Engineer',
     role: 'Backend Engineer',
     level: 'worker',
@@ -167,7 +163,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'nova-qa',
-    roleId: 'qa_debug_engineer',
     displayName: 'QA & Debug Engineer',
     role: 'QA & Debug Engineer',
     level: 'worker',
@@ -204,7 +199,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'flow',
-    roleId: 'automation_manager',
     displayName: 'Flow',
     role: 'Automation Manager',
     level: 'manager',
@@ -243,7 +237,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'atlas',
-    roleId: 'research_manager',
     displayName: 'Atlas',
     role: 'Research & Intelligence Manager',
     level: 'manager',
@@ -281,7 +274,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'luna',
-    roleId: 'design_manager',
     displayName: 'Luna',
     role: 'Design Manager',
     level: 'manager',
@@ -319,7 +311,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'echo',
-    roleId: 'marketing_manager',
     displayName: 'Echo',
     role: 'Marketing & Content Manager',
     level: 'manager',
@@ -357,7 +348,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'orion',
-    roleId: 'trading_manager',
     displayName: 'Orion',
     role: 'Trading Manager',
     level: 'manager',
@@ -402,7 +392,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   // file.
   {
     id: 'vertex',
-    roleId: 'chief_strategy_officer',
     displayName: 'Vertex',
     role: 'Chief Strategy Officer',
     level: 'manager',
@@ -437,7 +426,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'forge',
-    roleId: 'chief_innovation_officer',
     displayName: 'Forge',
     role: 'Chief Innovation Officer',
     level: 'manager',
@@ -472,7 +460,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'sentinel',
-    roleId: 'chief_governance_risk_officer',
     displayName: 'Sentinel',
     role: 'Chief Governance & Risk Officer',
     level: 'manager',
@@ -507,7 +494,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'cortex',
-    roleId: 'chief_corporate_intelligence_officer',
     displayName: 'Cortex',
     role: 'Chief Corporate Intelligence Officer',
     level: 'manager',
@@ -541,7 +527,6 @@ export const AGENT_DEFINITIONS: readonly AgentRecord[] = [
   },
   {
     id: 'ledger',
-    roleId: 'chief_financial_officer',
     displayName: 'Ledger',
     role: 'Chief Financial Officer',
     level: 'manager',

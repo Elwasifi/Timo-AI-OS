@@ -38,7 +38,6 @@ import type { Agent } from '@/types';
 
 interface AgentRegistryRow {
   id: string;
-  role_id: string | null;
   display_name: string;
   role: string;
   level: string;
@@ -89,7 +88,6 @@ interface BusinessUnitRow {
 function mapAgentRow(row: AgentRegistryRow): AgentRecord {
   return {
     id: row.id,
-    roleId: row.role_id ?? row.id,
     displayName: row.display_name,
     role: row.role,
     jobTitle: row.role,
@@ -527,10 +525,9 @@ export function getAgentSync(id: string): AgentRecord | undefined {
 // and G-Brain graph can use it without duplicating identity.
 export function registryRecordToRuntime(
   rec: AgentRecord,
-): Pick<Agent, 'id' | 'roleId' | 'jobTitle' | 'hierarchyLevel' | 'reportsTo' | 'level' | 'parentId' | 'childrenIds' | 'departmentId' | 'priority' | 'tools' | 'isActive'> {
+): Pick<Agent, 'id' | 'jobTitle' | 'hierarchyLevel' | 'reportsTo' | 'level' | 'parentId' | 'childrenIds' | 'departmentId' | 'priority' | 'tools' | 'isActive'> {
   return {
     id: rec.id,
-    roleId: rec.roleId,
     jobTitle: rec.jobTitle ?? rec.role,
     hierarchyLevel: rec.hierarchyLevel ?? rec.level,
     reportsTo: rec.reportsTo ?? rec.parentId,
@@ -583,7 +580,6 @@ export function agentRecordToRuntimeAgent(record: AgentRecord): Agent {
     memory: { conversationCount: 0, lastInteraction: 'N/A', topics: [], summary: '' },
     isFavorite: false,
     currentActivity: record.description,
-    roleId: record.roleId,
     jobTitle: record.jobTitle ?? record.role,
     hierarchyLevel: record.hierarchyLevel ?? record.level,
     reportsTo: record.reportsTo ?? record.parentId,
@@ -611,7 +607,6 @@ export function mergeRegistryIntoAgents(
     if (!rec) return agent;
     return {
       ...agent,
-      roleId: rec.roleId,
       jobTitle: rec.jobTitle ?? rec.role,
       hierarchyLevel: rec.hierarchyLevel ?? rec.level,
       reportsTo: rec.reportsTo ?? rec.parentId,

@@ -54,8 +54,6 @@ export interface BusinessUnitWithDepartments extends BusinessUnitRecord {
 export interface AgentRecord {
   /** Immutable agent identity — never changes, used for runtime references */
   id: string;
-  /** Stable organizational role identifier, independent of displayName */
-  roleId: string;
   /** User-visible name — can be renamed without breaking functionality */
   displayName: string;
   /** Job title (e.g. 'Engineering Manager') */

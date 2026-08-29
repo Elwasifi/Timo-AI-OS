@@ -132,7 +132,7 @@ export async function executeWorker(
 
   const systemPrompt =
     systemPromptOverride ??
-    (`You are ${worker.displayName}, ${worker.role} (roleId: ${worker.roleId}). ` +
+    (`You are ${worker.displayName}, ${worker.role} (id: ${worker.id}). ` +
       `You are executing a task delegated by your department manager. ` +
       `Your capabilities: ${worker.capabilities.join(', ')}. ` +
       'Provide concrete, implementation-ready solutions. Always include code examples ' +

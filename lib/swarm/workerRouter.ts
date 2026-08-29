@@ -1,7 +1,7 @@
 // Role-Based Worker Router
 //
 // Selects the best Worker for a task using the agent registry's stable
-// metadata: roleId, capabilities, department, parentId, and active status.
+// metadata: id, capabilities, department, parentId, and active status.
 //
 // Hierarchy is enforced: only workers whose parentId matches the assigned
 // manager are candidates. This prevents arbitrary cross-department routing.
@@ -92,7 +92,7 @@ export async function findWorkerForTask(
         agent: worker,
         score,
         matchedCapabilities: matched,
-        reason: `${worker.roleId} has skills: ${matched.join(', ')}`,
+        reason: `${worker.id} has skills: ${matched.join(', ')}`,
       };
     }
   }
@@ -101,8 +101,12 @@ export async function findWorkerForTask(
 }
 
 /**
- * Resolve the stable roleId for an agent, falling back to its id.
+ * Resolve a stable identifier string for an agent for logging/prompt
+ * purposes. M5-09: this used to prefer a `roleId` field that had no
+ * backing DB column and always silently equaled `id` anyway — simplified
+ * to just return `id` directly instead of aliasing through a field that
+ * never carried distinct data.
  */
 export function resolveRoleId(agent: AgentRecord | null | undefined): string {
-  return agent?.roleId ?? agent?.id ?? 'unknown';
+  return agent?.id ?? 'unknown';
 }
