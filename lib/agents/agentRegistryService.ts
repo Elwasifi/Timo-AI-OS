@@ -168,6 +168,29 @@ export async function loadAgents(): Promise<AgentRecord[]> {
   }
 }
 
+/**
+ * Same query as loadAgents(), but throws on a real query failure instead
+ * of silently falling back to AGENT_DEFINITIONS. M5-07: loadAgents()'s
+ * "swallow and fall back" contract is relied on by several existing
+ * callers (org-chart.tsx, crew-coordinator.ts, manager-delegation.ts,
+ * capabilityMatcher.ts, etc.) that intentionally want an agent list no
+ * matter what — this variant exists for the one caller that needs to
+ * tell "the DB is genuinely empty/unreachable" apart from "loaded fine,"
+ * mirroring M4-06's listMissionsOrThrow() pattern for the same reason.
+ */
+export async function loadAgentsOrThrow(): Promise<AgentRecord[]> {
+  const { data, error } = await supabase
+    .from('agent_registry')
+    .select('*')
+    .eq('is_active', true)
+    .order('sort_order', { ascending: true });
+
+  if (error) throw new Error(error.message);
+  if (!data || data.length === 0) return [...AGENT_DEFINITIONS];
+
+  return (data as AgentRegistryRow[]).map(mapAgentRow);
+}
+
 export async function loadDepartments(): Promise<DepartmentRecord[]> {
   try {
     const { data, error } = await supabase
