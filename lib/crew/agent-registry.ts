@@ -4,7 +4,7 @@ import { mergeRegistryIntoAgents } from '@/lib/agents/agentRegistryService';
 
 /**
  * AgentRegistry — in-memory routing cache for crew member lookups by id,
- * name, and role. Consumed by CrewManager, AgentSelector, and the UI layer.
+ * name, and role. Consumed by CrewManager and the UI layer.
  *
  * As of Sprint 1, this class is no longer the source of truth for agent
  * identity/hierarchy — lib/agents/agentRegistryService.ts is canonical.
