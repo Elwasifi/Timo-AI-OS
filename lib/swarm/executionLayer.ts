@@ -33,7 +33,7 @@ import { executeWorker, managerReview, type WorkerTask } from '@/lib/crew/manage
 import { detectIntent } from '@/lib/context/intent-detector';
 import { decideTools } from '@/lib/context/tool-decision';
 import { buildManagerContext } from './managerContext';
-import { updateTask, claimTask, appendExecutionLog, getTasks, updateMission } from './missionService';
+import { updateTask, claimTask, appendExecutionLog, getTasks } from './missionService';
 import { recalculateProgress } from './missionEngine';
 import {
   recordEvent,
@@ -606,11 +606,16 @@ export async function executeMissionTasks(
       });
     }
 
-    // Update mission progress after each task
+    // M5-05: this used to also call `updateMission(mission.id, { progress })`
+    // here, using completedCount/totalCount (ignoring failed tasks) — a
+    // different, incorrect formula from recalculateProgress()'s
+    // (completed+failed)/total below, which runs immediately after and
+    // unconditionally overwrote this write anyway. Removed as dead-weight
+    // work using a divergent formula that never actually won; these
+    // variables are kept only for the timeline event's narrative detail.
     const completedCount = results.filter((r) => r.status === 'completed').length;
     const totalCount = tasks.length;
     const progress = Math.round(((completedCount) / totalCount) * 100);
-    await updateMission(mission.id, { progress });
     await recordEvent(mission.id, 'mission_updated', {
       entityType: 'mission',
       entityId: mission.id,
