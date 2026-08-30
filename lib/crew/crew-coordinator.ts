@@ -16,7 +16,7 @@ import { ConversationService } from '@/lib/ai/conversation-service';
 import { logger } from '@/lib/utils/logger';
 import { useOrchestrationStore } from '@/stores/orchestrationStore';
 import { executeN8nAction, isN8nRequest } from './n8n-action-handler';
-import { delegateManagerTask } from './manager-delegation';
+import { delegateManagerTask, selectWorkerForManager } from './manager-delegation';
 import { agentToolBridge } from '@/lib/tools/agent-bridge';
 import { toolRegistry } from '@/lib/tools/registry';
 import { permissionEngine } from '@/lib/tools/permissions';
@@ -176,6 +176,22 @@ export class CrewCoordinator {
     this.emitTimeline(task.id, 'Context Manager', 'Running reasoning pipeline...', 'active');
     useContextManagerStore.getState().setRunning(true);
 
+    // M5-11: work out whether this request would delegate to a worker
+    // BEFORE the tool-decision gate runs, so a worker's own
+    // AGENT_PERMISSIONS scope (M5-10) is what actually gets checked for
+    // delegated work — this previously always checked the manager's
+    // broader permissions instead, even for work a worker would end up
+    // doing (Deep Integrity Audit, Section B). Real delegation below
+    // (delegateManagerTask) does its own worker selection independently;
+    // this is a cheap, side-effect-free pre-check purely to know which
+    // agent's permissions apply, not a second delegation.
+    const routedAgent = this.registry.getById(routing.selectedAgentId);
+    let toolDecisionAgentId = routing.selectedAgentId;
+    if (routedAgent?.level === 'manager') {
+      const candidateWorker = await selectWorkerForManager(routedAgent.id, input);
+      if (candidateWorker) toolDecisionAgentId = candidateWorker.id;
+    }
+
     let ctxResult;
     try {
       ctxResult = await runContextManager(
@@ -186,6 +202,7 @@ export class CrewCoordinator {
         this.registry.getAll().length,
         useAuthStore.getState().currentTenantId,
         options?.isSimulation ?? false,
+        toolDecisionAgentId,
       );
     } catch (e) {
       console.warn('[coordinator] Context Manager failed:', e instanceof Error ? e.message : e);
