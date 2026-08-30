@@ -176,13 +176,17 @@ async function runMissionPipeline(
   const timeline = await getTimeline(mission.id);
 
   // 5. Update runtime state
+  // M5-03: pass this mission's own id as the optimistic-lock precondition
+  // — if a different mission has since claimed the "current" slot, this
+  // stale write is a no-op rather than clobbering the newer mission's
+  // live state with this mission's final numbers.
   const execState: ExecutionState = failed.length === 0 ? 'completed' : 'failed';
   await updateRuntimeState({
     currentMissionId: mission.id,
     executionState: execState,
     runningTaskIds: [],
     missionProgress: 100,
-  });
+  }, mission.id);
 
   // 6. Build the synthesized response from execution results
   const response = buildMissionResponse(mission, executionResults, failed.length > 0);

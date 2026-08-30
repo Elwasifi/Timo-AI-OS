@@ -15,7 +15,17 @@ const MEMORY_QUERY_PATTERNS = [
   /\bmy (prefer|setting|config|choice|favorite|default|name|email|provider|model|platform|language)\b/i,
   /\bwhat (project|app|product|platform|provider) (are|is) (we|i) (building|working|making|using)\b/i,
   /\bwhat (have|did) i (created|made|built|done|used|configured)\b/i,
-  /\b(what|who) (is|are) .*\b/i,
+  // M5-01: was `/\b(what|who) (is|are) .*\b/i` — an unbounded catch-all
+  // that matched almost any "what is X" / "who is X" sentence in
+  // English, including pure general-knowledge questions ("What is the
+  // capital of Spain?"), silently short-circuiting them to "I couldn't
+  // find this information in your memory" instead of ever reaching the
+  // LLM (Deep Integrity Audit, Section D — live-reproduced). Narrowed to
+  // require a possessive ("my"/"our"), which is what actually
+  // distinguishes "what is my role?" (a real memory query — see
+  // lib/validation/tests.ts's identity-team-01/identity-role-01) from a
+  // general-knowledge question with no personal referent at all.
+  /\b(what|who) (is|are) (my|our)\b/i,
   /\btell me about\b/i,
   /\bwhat do you (know|remember) (about|of)\b/i,
   /\b(recall|recite|remind me of)\b/i,
@@ -76,7 +86,7 @@ function isQuestion(input: string): boolean {
 
 // Combined remember check: imperative patterns always match; declarative
 // assignment patterns only match when the sentence is NOT a question.
-function asksToRememberInput(input: string): boolean {
+export function asksToRememberInput(input: string): boolean {
   if (IMPERATIVE_REMEMBER_PATTERNS.some((p) => p.test(input))) return true;
   if (isQuestion(input)) return false;
   return DECLARATIVE_ASSIGNMENT_PATTERNS.some((p) => p.test(input));

@@ -152,8 +152,6 @@ export interface Agent {
   memory: AgentMemory;
   isFavorite: boolean;
   currentActivity: string;
-  /** Stable organizational role identifier, independent of displayName */
-  roleId?: string;
   /** Job title from the registry (aliases `role`) */
   jobTitle?: string;
   /** Hierarchy level metadata from the registry */

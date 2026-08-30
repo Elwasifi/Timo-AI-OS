@@ -115,6 +115,35 @@ export async function getApproval(id: string): Promise<ApprovalRequest | null> {
   return mapRow(data as ApprovalRow);
 }
 
+/**
+ * Finds the most recent approval request of a given type whose payload
+ * contains { [payloadKey]: payloadValue }, restricted to the given
+ * statuses (default: still-relevant ones — not yet resolved either way).
+ * Server-authoritative alternative to a caller remembering an approval id
+ * itself (e.g. in component state) — a page reload or a caller retrying
+ * from a different session both resolve to the same real DB state instead
+ * of losing track of an already-pending or already-approved request.
+ */
+export async function findApprovalByPayload(
+  type: ApprovalType,
+  payloadKey: string,
+  payloadValue: string,
+  statuses: ApprovalStatus[] = ['pending', 'approved'],
+): Promise<ApprovalRequest | null> {
+  const { data, error } = await supabase
+    .from('approval_requests')
+    .select('*')
+    .eq('type', type)
+    .contains('payload', { [payloadKey]: payloadValue })
+    .in('status', statuses)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return mapRow(data as ApprovalRow);
+}
+
 export async function listPendingApprovals(tenantId?: string): Promise<ApprovalRequest[]> {
   let query = supabase.from('approval_requests').select('*').eq('status', 'pending').order('created_at', { ascending: false });
   if (tenantId) query = query.eq('tenant_id', tenantId);

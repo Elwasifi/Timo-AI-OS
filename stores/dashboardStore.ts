@@ -22,6 +22,8 @@ interface DashboardState {
   agents: Agent[];
   /** True once agents has been replaced by a real agent_registry load — before that, agents holds seed/fallback data only. */
   agentsLoaded: boolean;
+  /** M5-07: real error from the last loadAgents() call, or null. Same pattern as missionsError (M4-06) — previously swallowed by an empty catch, leaving stale/fallback state with no user-facing signal. */
+  agentsError: string | null;
   missions: Mission[];
   missionsLoaded: boolean;
   /** M4-06: real error from the last loadMissions() call, or null. Previously swallowed by an empty catch, leaving stale/empty state with no user-facing signal. */
@@ -387,18 +389,23 @@ export const useDashboardStore = create<DashboardState>((set) => ({
     })),
 
   agentsLoaded: false,
+  agentsError: null,
   missions: [],
   missionsLoaded: false,
   missionsError: null,
 
   loadAgents: async () => {
-    const { loadAgents: loadRegistry, agentRecordToRuntimeAgent } = await import('@/lib/agents/agentRegistryService');
+    const { loadAgentsOrThrow, agentRecordToRuntimeAgent } = await import('@/lib/agents/agentRegistryService');
     try {
-      const records = await loadRegistry();
-      set({ agents: records.map(agentRecordToRuntimeAgent), agentsLoaded: true });
-    } catch {
-      // Leave whatever agents were already in state (seed data on first
-      // failure, last-good data on a later failure) — never blank the UI.
+      const records = await loadAgentsOrThrow();
+      set({ agents: records.map(agentRecordToRuntimeAgent), agentsLoaded: true, agentsError: null });
+    } catch (err) {
+      // M5-07: previously silent — a query failure left whatever stale
+      // (or seed) agents were already in state with zero signal anything
+      // went wrong. Agents themselves are left untouched (still the last
+      // good snapshot), but the error is now real and visible. Same
+      // pattern as M4-06's loadMissions() fix in this same file.
+      set({ agentsError: err instanceof Error ? err.message : 'Failed to load agents' });
     }
   },
 

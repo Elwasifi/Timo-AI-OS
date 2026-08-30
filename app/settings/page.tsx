@@ -446,12 +446,18 @@ function AgentsSection() {
 
   const submitDelete = async (id: string) => {
     setConfirmDeleteId(null);
+    // S0-05: no approval id to track client-side — the route looks up
+    // any pending/approved request for this agent id itself, so this
+    // just works once someone approves it in Settings -> Approvals,
+    // regardless of what happened on the client in between.
     const res = await authFetch(`/api/agents/registry/${id}`, { method: 'DELETE' });
     const json = await res.json();
     if (json.success) {
       toast({ title: 'Agent deleted' });
       load();
       useDashboardStore.getState().loadAgents();
+    } else if (json.error?.code === 'APPROVAL_REQUIRED') {
+      toast({ title: 'Approval required', description: 'Deleting an agent affects every tenant. Approve the request in Settings -> Approvals, then delete again.' });
     } else {
       toast({ title: 'Delete failed', description: json.error?.message, variant: 'destructive' });
     }

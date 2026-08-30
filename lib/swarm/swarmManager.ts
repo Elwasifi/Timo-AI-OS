@@ -59,7 +59,7 @@ export async function dispatchTask(
   await appendExecutionLog(task.id, {
     timestamp: new Date().toISOString(),
     event: 'task_assigned',
-    detail: `Assigned to ${match.agent.roleId} (${match.agent.role}) — ${match.reason}`,
+    detail: `Assigned to ${match.agent.id} (${match.agent.role}) — ${match.reason}`,
     agentId: match.agent.id,
   });
 

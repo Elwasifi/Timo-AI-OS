@@ -33,7 +33,7 @@ import { executeWorker, managerReview, type WorkerTask } from '@/lib/crew/manage
 import { detectIntent } from '@/lib/context/intent-detector';
 import { decideTools } from '@/lib/context/tool-decision';
 import { buildManagerContext } from './managerContext';
-import { updateTask, claimTask, appendExecutionLog, getTasks, updateMission } from './missionService';
+import { updateTask, claimTask, appendExecutionLog, getTasks } from './missionService';
 import { recalculateProgress } from './missionEngine';
 import {
   recordEvent,
@@ -47,6 +47,52 @@ import type { MissionTask, Mission, MissionObjective } from './types';
 import type { ExecutionResult, ExecutionStep, ExecutionContext, PriorTaskResult, ManagerContext } from './executionTypes';
 import type { AgentRecord } from '@/lib/agents/types';
 import type { Intent } from '@/types';
+
+// ---- Result-shape guard (M5-02) ----
+//
+// Verifies a task's result actually reads as an answer, not empty/blank
+// output or raw JSON values (the shape of tool-call arguments, not
+// prose) — the specific fake-success shape that reached 'completed'
+// status live. Deliberately a shape check, not a content/quality check:
+// this isn't trying to judge whether the answer is GOOD, only whether
+// it's structurally an answer at all.
+//
+// Checking whether the WHOLE trimmed string parses as one JSON value
+// isn't enough — live-confirmed the actual degenerate output was TWO
+// JSON objects concatenated across lines (one per retry attempt, e.g.
+// `{"queries":[...]}\n{"queries":[...]}`), which fails a single
+// JSON.parse() on the combined string (trailing-data error) and would
+// have slipped past that check as "not JSON, must be prose." Splitting
+// into lines and checking whether EVERY non-blank line individually
+// parses as JSON catches that shape too, while still accepting a real
+// answer that happens to quote a JSON snippet inside otherwise-prose
+// text (not every line of that would parse as JSON on its own).
+//
+// Known limitation: this rejects ANY output that is entirely valid JSON,
+// regardless of intent. Correct for every task type today (research,
+// analysis, review, synthesis, etc. all produce prose) — but a future
+// task whose legitimate purpose is to return structured JSON (e.g. "give
+// me this as a JSON object") would be incorrectly rejected by this guard
+// as if it were degenerate. No such task exists today, so no behavior
+// change is needed now — noted here so it isn't rediscovered as a
+// surprise later. If that need arises, the guard should take the task's
+// expected output shape into account rather than assuming prose always.
+function looksLikeRealAnswer(output: string): boolean {
+  const trimmed = output.trim();
+  if (trimmed.length === 0) return false;
+
+  const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const isJsonLine = (line: string): boolean => {
+    try {
+      JSON.parse(line);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  return !(lines.length > 0 && lines.every(isJsonLine));
+}
 
 // ---- Timeout helper ----
 
@@ -75,7 +121,7 @@ export async function executeTask(
   const managerId = task.assignedManager ?? 'temo';
   const managerName = managerId;
 
-  // Resolve the manager's stable roleId from the agent registry
+  // Resolve the manager's stable identifier from the agent registry
   const managerRecord = await getAgentById(managerId);
   const managerRoleId = resolveRoleId(managerRecord);
 
@@ -342,6 +388,23 @@ export async function executeTask(
         output = llmStep.value;
       }
 
+      // M5-02: same class of bug as M1-04/M4-01/M4-02 (fake success reported
+      // as real), recurring in a new place — Atlas's "Research market trends"
+      // task reached status:'completed' with result.output literally being
+      // `{"query":"...", "max_results":10, "recency_days":90}`, the tool
+      // call's own REQUEST arguments, not an answer (live-confirmed, Deep
+      // Integrity Audit Section E). The LLM produced tool-call-shaped JSON
+      // instead of prose — a real answer to a research/summary/analysis task
+      // is essentially never, in its entirety, a parseable JSON value, so
+      // that's what a structural guard checks for, rather than special-casing
+      // this one task/tool. Applies to both branches above (tool-answer and
+      // LLM output) — a fake success is a fake success regardless of which
+      // path produced it. Throwing routes it through the same retry/backoff/
+      // fail loop as any other execution failure, never silently accepted.
+      if (!looksLikeRealAnswer(output)) {
+        throw new Error('Model returned a degenerate result (empty, or raw JSON/tool-call arguments instead of an answer) — treating as a failed attempt.');
+      }
+
       // Success — record completion
       const durationMs = Date.now() - startTime;
 
@@ -553,11 +616,16 @@ export async function executeMissionTasks(
       });
     }
 
-    // Update mission progress after each task
+    // M5-05: this used to also call `updateMission(mission.id, { progress })`
+    // here, using completedCount/totalCount (ignoring failed tasks) — a
+    // different, incorrect formula from recalculateProgress()'s
+    // (completed+failed)/total below, which runs immediately after and
+    // unconditionally overwrote this write anyway. Removed as dead-weight
+    // work using a divergent formula that never actually won; these
+    // variables are kept only for the timeline event's narrative detail.
     const completedCount = results.filter((r) => r.status === 'completed').length;
     const totalCount = tasks.length;
     const progress = Math.round(((completedCount) / totalCount) * 100);
-    await updateMission(mission.id, { progress });
     await recordEvent(mission.id, 'mission_updated', {
       entityType: 'mission',
       entityId: mission.id,
@@ -632,7 +700,7 @@ async function executeDelegatedTask(
       : `Provider: worker execution (router fallback)`,
     detail: workerDecision.selected
       ? `Model: ${workerDecision.selected.model} — ${workerDecision.reason}`
-      : `Model: ${workerRecord.model} (Worker: ${workerRecord.roleId})`,
+      : `Model: ${workerRecord.model} (Worker: ${workerRecord.id})`,
   });
 
   if (workerResult.status === 'failed') {
@@ -701,7 +769,7 @@ function buildWorkerSystemPrompt(
   worker: AgentRecord,
 ): string {
   const workerHeader =
-    `You are ${worker.displayName}, ${worker.role} (roleId: ${worker.roleId}). ` +
+    `You are ${worker.displayName}, ${worker.role} (id: ${worker.id}). ` +
     `You are executing a task delegated by your department manager. ` +
     `Your capabilities: ${worker.capabilities.join(', ')}. ` +
     `Stay focused on the task and provide a complete, actionable result.\n\n`;
