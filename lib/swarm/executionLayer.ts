@@ -67,6 +67,16 @@ import type { Intent } from '@/types';
 // parses as JSON catches that shape too, while still accepting a real
 // answer that happens to quote a JSON snippet inside otherwise-prose
 // text (not every line of that would parse as JSON on its own).
+//
+// Known limitation: this rejects ANY output that is entirely valid JSON,
+// regardless of intent. Correct for every task type today (research,
+// analysis, review, synthesis, etc. all produce prose) — but a future
+// task whose legitimate purpose is to return structured JSON (e.g. "give
+// me this as a JSON object") would be incorrectly rejected by this guard
+// as if it were degenerate. No such task exists today, so no behavior
+// change is needed now — noted here so it isn't rediscovered as a
+// surprise later. If that need arises, the guard should take the task's
+// expected output shape into account rather than assuming prose always.
 function looksLikeRealAnswer(output: string): boolean {
   const trimmed = output.trim();
   if (trimmed.length === 0) return false;
