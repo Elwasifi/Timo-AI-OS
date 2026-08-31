@@ -1,10 +1,8 @@
-# Milestone 5, Stage 1 — Security Containment + Behavior Correctness Backlog
+# Milestone 5 — Security, Correctness & Governance Backlog
 
 > Owner: Amro. Implemented by: Claude Code (local). Status values: `Open` → `In Progress` → `Pushed for Review` → `Reviewed — ready to merge` → `Merged`.
-> Branch: `milestone-5-stage1-security-correctness`, checked out locally for the whole stage, one commit per ticket pushed immediately after each is done and live-verified.
 > Source: the Deep Integrity Audit (2026-08-29) — the audit's own report is not duplicated here, only the resulting tickets.
-> This backlog file was created retroactively once the stage was already complete — Stage 1 was scoped directly from the audit in chat rather than via an intermediate written backlog, so every ticket below is recorded already at its final `Merged` status rather than walking through the earlier lifecycle states.
-> Two-stage milestone: Stage 2 (agent permissions expansion) is explicitly a separate, later pass — not started, not scoped here.
+> Two-stage milestone. Stage 1 (below): security containment + behavior correctness, branch `milestone-5-stage1-security-correctness`. Stage 2 (further below): governance / capability-contract gap, branch `milestone-5-stage2-governance`. Both merged to `main` — Stage 1 at `2bab101`, Stage 2 at `b8d74fa`.
 
 ---
 
@@ -156,6 +154,58 @@ vertex/forge/sentinel/cortex/ledger were missing from the static fallback array 
 
 ---
 
-## Not part of this stage (Stage 2, separate and later)
-- Agent permissions expansion for the 9 currently tool-dead agents (vertex/forge/sentinel/cortex/ledger/orion/nova-frontend/nova-backend/nova-qa).
+# Milestone 5, Stage 2 — Governance Backlog
+
+> Branch: `milestone-5-stage2-governance`, off `main` at Stage 1's merge (`2bab101`). One commit per ticket, live-verified. Merged to `main` at `b8d74fa`.
+> Source: the Deep Integrity Audit (2026-08-29), Sections B/J — the capability-contract gap (agents shipped with no tool permissions) and the tenant-isolation gap in the Knowledge Engine / runtime tables.
+
+## M5-10 — Add AGENT_PERMISSIONS entries for the 9 tool-dead agents
+**Priority:** High
+**Status:** Merged (main@b8d74fa). See `lib/tools/types.ts`.
+
+vertex, forge, sentinel, cortex, ledger, orion, nova-frontend, nova-backend, and nova-qa were all active in `agent_registry` with zero entries in `AGENT_PERMISSIONS` — `permissionEngine.validate()` throws for any agent with no entry at all, so all 9 were structurally unable to execute any tool.
+
+**Acceptance criteria:**
+- Each new entry independently scoped to what that role actually needs (not copy-pasted from a neighbor), with a reasoning comment per entry.
+- Nova's 3 workers get their own entries, not an inherited/aliased copy of Nova's.
+
+## M5-11 — Fix delegated-work permission gating to check the worker's own id
+**Priority:** High
+**Status:** Merged (main@b8d74fa). See `lib/swarm/executionLayer.ts`, `lib/crew/crew-coordinator.ts`, `lib/context/context-manager.ts`.
+
+`executionLayer.ts:189` and `crew-coordinator.ts:281` always passed the *manager's* id to `permissionEngine.getPermissions()`/`decideTools()`, even for a task actually executed by a delegated worker — meaning M5-10's per-worker scoping would never actually have been checked.
+
+**Acceptance criteria:**
+- `executionLayer.ts`: uses the already-resolved `workerId` (from `findWorkerForTask()`) ahead of the manager id.
+- `crew-coordinator.ts`: pre-resolves the likely worker via `selectWorkerForManager()` before the tool-decision gate runs (that pipeline normally resolves the worker later, inside `delegateManagerTask`), passed through a new optional `toolDecisionAgentId` parameter on `runContextManager()` — memory/context-building attribution deliberately still uses the routed manager, unchanged.
+- Live-verified: direct `permissionEngine.validate()` checks for nova/nova-frontend/nova-backend/nova-qa across their real tool categories, confirming the previous behavior (manager's permissions leaking to worker calls) and the fix, without regressing any currently-working delegated task.
+
+## M5-12 — Build-time check for agents missing a permissions entry
+**Priority:** Medium
+**Status:** Merged (main@b8d74fa). See `tests/agent-permissions.test.ts`, `package.json`'s `prebuild` script.
+
+This exact gap (an active agent shipped with no `AGENT_PERMISSIONS` entry) recurred 3 times (Orion, the 5 Corporate Office agents, structurally for all workers) before M5-10 closed it.
+
+**Acceptance criteria:**
+- A real integration test against the live `agent_registry` fails with the specific missing agent id(s) named, if any active row has no matching entry.
+- Wired into `npm run build` via `prebuild`, so a future gap fails the build rather than shipping silently.
+- Live-verified: temporarily removed one entry, confirmed the test failed naming that exact agent, restored it, confirmed 10/10 passing again.
+
+## M5-13 — Tenant-scope structured_facts, fact_revisions, memory_events, runtime_activity
+**Priority:** Critical
+**Status:** Merged (main@b8d74fa). Live-verified in both directions. See the two migrations dated 2026-08-30/31 and `docs/TEMO-ARCHITECTURE.md`.
+
+None of these 4 tables had any tenant scoping — cross-tenant data leakage by construction (Deep Integrity Audit, Section H1-e).
+
+**Acceptance criteria:**
+- Real `tenant_id` columns added and actually wired through RLS, the 4 `SECURITY DEFINER` RPC functions that bypass RLS entirely, and the app-code call sites that already had `tenantId` in scope but never passed it through.
+- `structured_facts`'s global `(subject, predicate)` unique index replaced with a tenant-scoped one in the same migration that adds the column.
+- `runtime_activity`'s `tenant_id` derived via a `BEFORE INSERT` trigger from its existing `mission_id` column, rather than threading `tenantId` through ~21 `emitRuntimeEvent()` call sites.
+- `runtime_state` explicitly documented (via `COMMENT ON TABLE`) as deliberately NOT scoped — a single-row global singleton can't express per-tenant state via a column; real isolation would need an architectural redesign, already flagged out of scope in Stage 1.
+- A first-pass tenant-membership check on the 4 RPC functions (`is_tenant_member(p_tenant_id)`) was caught live, immediately after the first push, to unconditionally reject the app's own real server-side calls (service-role client has no `auth.uid()`). Corrected in a same-day follow-up migration to skip the check for `auth.role() = 'service_role'` (already gated upstream at the API route layer per this project's V1 security posture) while still enforcing it for a real authenticated browser session.
+- Live-verified: dry-run in `BEGIN`/`ROLLBACK` before each of the two pushes; `tenant_id` backfill confirmed populated with 0 unexpected nulls; both RPC auth-gate directions confirmed against the live DB using the app's real service-role client (succeeds) and a real throwaway authenticated non-member user spoofing a foreign `tenant_id` (still rejected); typecheck clean; full test suite (10/10) passing.
+
+---
+
+## Not part of either stage
 - Everything else the Deep Integrity Audit flagged as Medium priority or lower and not listed above.
