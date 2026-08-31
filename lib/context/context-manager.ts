@@ -184,8 +184,10 @@ export async function runContextManager(
   }
 
   step2.status = 'completed';
-  const memDetail = memoryResult.wasStored
-    ? `Stored as ${memoryResult.classification?.label ?? 'Memory'}`
+  const memDetail = memoryResult.classification
+    ? memoryResult.wasStored
+      ? `Stored as ${memoryResult.classification.label}`
+      : `Storage failed — not stored (${memoryResult.classification.label})`
     : `${memoryResult.memories.length} memories found, confidence: ${(memoryResult.confidence * 100).toFixed(0)}%`;
   step2.detail = memDetail;
   step2.durationMs = Date.now() - step2.timestamp;
@@ -209,12 +211,20 @@ export async function runContextManager(
       memories: memoryResult.memories,
       memoryConfidence: memoryResult.confidence,
       memoryClassification: memoryResult.classification?.label ?? null,
-      memoryDecisionReason: memoryResult.wasStored
-        ? `User asked to remember; classified as ${memoryResult.classification?.label ?? 'Memory'} and stored.`
+      // M6-01: this used to branch on wasStored, which now correctly
+      // distinguishes "stored" from "attempted but failed" for a remember
+      // request — classification !== null is the real signal for "this was
+      // a remember request" regardless of whether storage succeeded.
+      memoryDecisionReason: memoryResult.classification
+        ? memoryResult.wasStored
+          ? `User asked to remember; classified as ${memoryResult.classification.label} and stored.`
+          : `User asked to remember; classified as ${memoryResult.classification.label} but storage failed — reported honestly, not stored.`
         : `Memory match confidence ${(memoryResult.confidence * 100).toFixed(0)}% >= threshold; returning stored memory directly.`,
       toolDecisionReason: 'Skipped — memory fully answered the question.',
-      llmSkipReason: memoryResult.wasStored
-        ? 'Memory was stored; confirmation returned to user.'
+      llmSkipReason: memoryResult.classification
+        ? memoryResult.wasStored
+          ? 'Memory was stored; confirmation returned to user.'
+          : 'Memory storage failed; failure reported to user instead of a false confirmation.'
         : 'Memory answered with high confidence; LLM not needed.',
       timelineEvents: memoryResult.timelineEvents,
       ragContext: memoryResult.ragContext,

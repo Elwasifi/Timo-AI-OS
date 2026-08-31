@@ -4,9 +4,10 @@
 
 import { toolRegistry } from '@/lib/tools/registry';
 import { ensureBuiltinToolsRegistered } from '@/lib/tools/builtin-tools';
-import { toolPlanner } from '@/lib/tools/planner';
+import { toolPlanner, ToolPlanningError } from '@/lib/tools/planner';
 import { permissionEngine } from '@/lib/tools/permissions';
 import { toolExecutor } from '@/lib/tools/executor';
+import { logger } from '@/lib/utils/logger';
 import type { ToolResultEnvelope, ToolRequest } from '@/lib/tools/types';
 import type { ChainResult } from '@/lib/tools/chain';
 import type { DetectedIntent, ToolExecutionRecord } from './types';
@@ -62,9 +63,37 @@ export async function decideTools(
     };
   }
 
-  // Use the AI tool planner to pick the best tool(s) and arguments
+  // Use the AI tool planner to pick the best tool(s) and arguments.
+  // M6-01: this used to be `.catch(() => null)` — any real planner failure
+  // (every fallback AI provider exhausted, or an unparseable response) was
+  // indistinguishable from the AI legitimately deciding no tool fits, and
+  // fell straight into the direct-pattern fallback below with zero trace of
+  // what actually happened (found live during M5-11 testing, surfaced only
+  // as an empty "Tool execution failed for: "). toolPlanner.plan() now
+  // throws ToolPlanningError (already logged with full diagnostic context
+  // at the source) instead of swallowing internally, so this can make an
+  // explicit, documented decision rather than a silent one.
   const permissions = permissionEngine.getPermissions(agentId);
-  const plan = await toolPlanner.plan(input, agentId, permissions).catch(() => null);
+  let plan: Awaited<ReturnType<typeof toolPlanner.plan>> = null;
+  let plannerFailureReason: string | null = null;
+  try {
+    plan = await toolPlanner.plan(input, agentId, permissions);
+  } catch (err) {
+    if (err instanceof ToolPlanningError) {
+      plannerFailureReason = err.message;
+      logger.error('decideTools: tool planner failed, falling back to direct-pattern execution', {
+        error: err.message,
+        provider: err.provider,
+        agentId,
+        timestamp: Date.now(),
+      });
+    } else {
+      // Genuinely unexpected — not something planner.ts's own contract
+      // promised to catch. Re-throw rather than absorb an unknown failure
+      // mode into the same "no tool found" bucket.
+      throw err;
+    }
+  }
 
   const executions: ToolExecutionRecord[] = [];
 
@@ -142,13 +171,26 @@ export async function decideTools(
     toolAnswer = buildToolAnswer(executions);
   }
 
+  // M6-01: executions.length === 0 (nothing ran at all — no plan, and no
+  // direct-pattern match either) used to fall through to `error: null`
+  // here, the other half of the same silent-swallow bug: `shouldUseTool:
+  // true, success: false, error: null` gives the caller no way to tell
+  // "planner genuinely failed" from "nothing matched and that's fine."
+  // Always carry a real, documented reason when nothing executed.
+  let error: string | null = null;
+  if (allFailed) {
+    error = executions.map((e) => e.error).filter(Boolean).join('; ');
+  } else if (executions.length === 0) {
+    error = plannerFailureReason ?? 'No matching tool could be planned or matched for this request.';
+  }
+
   return {
     shouldUseTool: true,
     selectedToolIds,
     executions,
     toolAnswer,
     success: anySuccess,
-    error: allFailed ? executions.map((e) => e.error).filter(Boolean).join('; ') : null,
+    error,
   };
 }
 
