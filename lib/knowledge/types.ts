@@ -89,6 +89,7 @@ export interface ResolveResult {
 }
 
 export interface QueryParams {
+  tenantId: string;
   subject?: string;
   predicate?: string;
   categories?: FactCategory[];
@@ -119,6 +120,7 @@ export interface LearnParams {
   category: FactCategory;
   confidence: number;
   reason: string;
+  tenantId?: string | null;
 }
 
 export interface UpdateParams {
@@ -126,6 +128,7 @@ export interface UpdateParams {
   newValue?: string;
   newConfidence?: number;
   reason?: string;
+  tenantId?: string | null;
 }
 
 export interface DeleteParams {

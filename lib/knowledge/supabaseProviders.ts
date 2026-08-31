@@ -26,6 +26,7 @@ export const supabaseStructuredProvider: IStructuredProvider = {
       p_subject: input.subject,
       p_predicate: input.predicate,
       p_object: input.object,
+      p_tenant_id: input.tenantId,
       p_category: input.category,
       p_confidence: input.confidence,
       p_confidence_source: input.confidenceSource,
@@ -63,6 +64,7 @@ export const supabaseStructuredProvider: IStructuredProvider = {
 
   async query(params: QueryParams): Promise<StructuredFact[]> {
     const { data, error } = await supabase.rpc('match_structured_facts', {
+      p_tenant_id: params.tenantId,
       p_subject: params.subject ?? null,
       p_predicate: params.predicate ?? null,
       p_categories: params.categories ?? null,
@@ -73,20 +75,21 @@ export const supabaseStructuredProvider: IStructuredProvider = {
     return (data as Record<string, unknown>[]).map(mapStructuredFactRow);
   },
 
-  async getHistory(subject, predicate): Promise<StructuredFact[]> {
+  async getHistory(subject, predicate, tenantId): Promise<StructuredFact[]> {
     const { data, error } = await supabase.rpc('get_fact_history', {
       p_subject: subject,
       p_predicate: predicate,
+      p_tenant_id: tenantId,
     });
     if (error) throw new Error(`Fact history failed: ${error.message}`);
     return (data as Record<string, unknown>[]).map(mapStructuredFactRow);
   },
 
-  async update(factId, newValue, newConfidence, reason): Promise<StructuredFact | null> {
+  async update(factId, tenantId, newValue, newConfidence, reason): Promise<StructuredFact | null> {
     // Use replace if we have a new value, otherwise just update confidence
     if (newValue !== undefined) {
       const result = await this.replace(factId, newValue, reason, newConfidence);
-      const facts = await this.query({ searchText: result.newFactId, limit: 1 });
+      const facts = await this.query({ tenantId, searchText: result.newFactId, limit: 1 });
       return facts[0] ?? null;
     }
     if (newConfidence !== undefined) {

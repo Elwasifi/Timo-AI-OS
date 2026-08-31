@@ -125,6 +125,7 @@ export async function buildManagerContext(
     const answerResult = await knowledge.answer({
       question: task.title,
       agent: manager.id,
+      tenantId: mission.tenantId,
     });
     if (answerResult.source !== 'not_found' && answerResult.answer) {
       relevantKnowledge = answerResult.answer;

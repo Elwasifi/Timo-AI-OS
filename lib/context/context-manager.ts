@@ -103,7 +103,7 @@ export async function runContextManager(
     reasoningSteps.push(step1b);
 
     try {
-      const answerResult = await knowledge.answer({ question: input, agent: agentId, conversationId: conversationId ?? undefined });
+      const answerResult = await knowledge.answer({ question: input, agent: agentId, conversationId: conversationId ?? undefined, tenantId });
       if (answerResult.source !== 'not_found') {
         step1b.status = 'completed';
         step1b.detail = `Answered by ${answerResult.source} (confidence: ${answerResult.confidence}%)`;
