@@ -9,12 +9,26 @@ import { useDashboardStore } from '@/stores/dashboardStore';
 import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { orchestrate } from '@/lib/swarm';
 import { useAuthStore } from '@/stores/authStore';
+import { getClientProfile } from '@/lib/governance/clientProfile';
 import { logger } from '@/lib/utils/logger';
 import type { VoiceSettings } from '@/types';
 
 export type ReplyHandler = (response: string, transcript: string) => void;
 
 type VoiceMode = 'push-to-talk' | 'continuous';
+
+// M6-09: settings.pushToTalk already had a real, live Settings UI toggle
+// ("Push to talk" / "Hold spacebar to speak") that persisted to the store —
+// but nothing ever read it to actually switch VoiceManager's mode, which
+// stayed hardcoded to 'push-to-talk' regardless. Continuous mode itself had
+// no turn-detection at all: stopRecognitionAndProcess() was only ever
+// called from push-to-talk branches, so a continuous session would just
+// listen forever with nothing to submit a turn — not usable as
+// "continuous" in any real sense. VAD_SILENCE_MS is a simple, free
+// silence-timeout VAD built on SpeechRecognition's own transcript timing
+// (no raw audio/AnalyserNode needed) — reset on every interim/final
+// result, fires a turn submission if speech has genuinely paused.
+const VAD_SILENCE_MS = 1500;
 
 export class VoiceManager {
   private recorder = new VoiceRecorder();
@@ -24,6 +38,34 @@ export class VoiceManager {
   private mode: VoiceMode = 'push-to-talk';
   private isProcessingVoice = false;
   private recognitionEnded = false;
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True while a continuous-mode hands-free conversation is meant to keep
+   * going turn after turn — distinct from isListening, which is false
+   * during the (silent, in-between) processing/speaking part of each turn.
+   * Cleared on any explicit user stop so a finishing turn doesn't
+   * auto-resume into a session the user already ended. */
+  private continuousSessionActive = false;
+
+  private clearSilenceTimer(): void {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+  }
+
+  /** Resets the VAD's silence window — called on every transcript update
+   * while in continuous mode. If speech genuinely pauses for VAD_SILENCE_MS,
+   * the pending turn is submitted automatically. */
+  private armSilenceTimer(): void {
+    this.clearSilenceTimer();
+    this.silenceTimer = setTimeout(() => {
+      if (this.mode !== 'continuous' || this.isProcessingVoice) return;
+      const pending = this.transcript.getFull().trim();
+      if (pending.length === 0) return;
+      logger.voiceDebug('VAD: silence detected, submitting turn');
+      void this.stopRecognitionAndProcess();
+    }, VAD_SILENCE_MS);
+  }
 
   setReplyHandler(handler: ReplyHandler): void {
     this.replyHandler = handler;
@@ -32,6 +74,34 @@ export class VoiceManager {
   setMode(mode: VoiceMode): void {
     this.mode = mode;
     logger.voiceDebug(`Mode set to ${mode}`);
+  }
+
+  private languageSynced = false;
+
+  /**
+   * M6-09: speech-recognition language and the client's chat-language
+   * preference (lib/governance/clientProfile.ts, M3-06's "Egyptian Arabic,
+   * not formal Modern Standard Arabic" directive used for AI responses)
+   * were two completely unconnected settings — a client whose profile
+   * prefers Arabic still got en-US speech recognition by default until
+   * they separately, manually changed it in Settings -> Voice. Runs once
+   * per session; never overrides a language the user has already actively
+   * chosen (only nudges the untouched en-US default).
+   */
+  private async syncLanguageFromProfile(): Promise<void> {
+    if (this.languageSynced) return;
+    this.languageSynced = true;
+    try {
+      const tenantId = useAuthStore.getState().currentTenantId;
+      const profile = await getClientProfile(tenantId);
+      const store = useVoiceStore.getState();
+      if (profile?.preferredLanguage === 'ar' && store.settings.language === 'en-US') {
+        store.setLanguage('ar-EG');
+        logger.voice('Voice recognition language auto-set to ar-EG from client profile');
+      }
+    } catch {
+      // Non-fatal — recognition still works with whatever language is set.
+    }
   }
 
   isRecognitionSupported(): boolean {
@@ -47,6 +117,7 @@ export class VoiceManager {
   }
 
   async connect(): Promise<void> {
+    await this.syncLanguageFromProfile();
     const store = useVoiceStore.getState();
     await VoiceService.connect({ language: store.settings.language });
     store.setConnected(true);
@@ -74,6 +145,11 @@ export class VoiceManager {
     const store = useVoiceStore.getState();
     if (!store.isConnected) await this.connect();
 
+    // M6-09: sync from the real Settings -> Voice -> "Push to talk" toggle,
+    // which persisted to the store but was never actually read here before.
+    this.setMode(store.settings.pushToTalk ? 'push-to-talk' : 'continuous');
+    if (this.mode === 'continuous') this.continuousSessionActive = true;
+
     // Stop any ongoing speech
     this.player.stop();
     store.stopSpeaking();
@@ -84,6 +160,7 @@ export class VoiceManager {
 
     this.transcript.reset();
     this.recognitionEnded = false;
+    this.clearSilenceTimer();
     store.startListening();
     store.setTranscript('');
     store.setInterimTranscript('');
@@ -98,6 +175,7 @@ export class VoiceManager {
         const interim = this.transcript.getInterim();
         store.setTranscript(full);
         store.setInterimTranscript(interim);
+        if (this.mode === 'continuous') this.armSilenceTimer();
         logger.voiceDebug(`Transcript ${isFinal ? 'final' : 'interim'}: "${text.slice(0, 40)}"`);
 
         // Auto-send in push-to-talk when we get a final result
@@ -166,6 +244,7 @@ export class VoiceManager {
         this.transcript.push(text, isFinal);
         store.setTranscript(this.transcript.getFull());
         store.setInterimTranscript(this.transcript.getInterim());
+        if (this.mode === 'continuous') this.armSilenceTimer();
       },
       (error) => {
         logger.voiceWarn(`Recognition restart error: ${error}`);
@@ -188,6 +267,11 @@ export class VoiceManager {
    */
   async stopListening(): Promise<void> {
     logger.voice('Stop listening requested');
+    // M6-09: an explicit user stop always ends a continuous session — a
+    // turn already in flight (below) must not auto-resume into listening
+    // again once it finishes.
+    this.continuousSessionActive = false;
+    this.clearSilenceTimer();
     const finalText = this.transcript.getFinal();
     if (finalText.trim().length > 0 && !this.isProcessingVoice) {
       this.stopRecognitionAndProcess();
@@ -204,6 +288,7 @@ export class VoiceManager {
   private async stopRecognitionAndProcess(): Promise<void> {
     if (this.isProcessingVoice) return;
     this.isProcessingVoice = true;
+    this.clearSilenceTimer();
 
     this.recorder.stop();
     await VoiceService.stopListening();
@@ -211,8 +296,12 @@ export class VoiceManager {
     const store = useVoiceStore.getState();
     store.stopListening();
 
-    // Capture the finalized transcript BEFORE the store is reset.
-    const text = this.transcript.getFinal().trim();
+    // Capture the finalized transcript BEFORE the store is reset. Falls
+    // back to the full (interim-included) transcript for the continuous-
+    // mode VAD path: the browser may not have finalized the last fragment
+    // yet when the silence timeout fires, even though real speech content
+    // is there.
+    const text = (this.transcript.getFinal() || this.transcript.getFull()).trim();
     logger.voice(`Processing voice input: "${text.slice(0, 60)}"`);
 
     if (!text) {
@@ -294,6 +383,17 @@ export class VoiceManager {
       store.setThinking(false);
       store.reset();
       this.isProcessingVoice = false;
+    }
+
+    // M6-09: real hands-free multi-turn conversation — without this,
+    // "continuous" mode only ever completed exactly one turn before
+    // falling silent, the same as push-to-talk. Only resumes if the user
+    // hasn't explicitly stopped in the meantime (continuousSessionActive)
+    // and nothing put the manager to sleep during this turn.
+    if (this.mode === 'continuous' && this.continuousSessionActive && !useVoiceStore.getState().isSleeping) {
+      setTimeout(() => {
+        if (this.continuousSessionActive && !this.isProcessingVoice) void this.startListening();
+      }, 300);
     }
   }
 
@@ -387,6 +487,8 @@ export class VoiceManager {
   }
 
   stopAll(): void {
+    this.continuousSessionActive = false;
+    this.clearSilenceTimer();
     this.player.stop();
     this.recorder.abort();
     this.isProcessingVoice = false;
