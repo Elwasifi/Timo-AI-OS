@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "prebuild": "vitest run tests/agent-permissions.test.ts",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",

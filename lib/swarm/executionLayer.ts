@@ -232,7 +232,14 @@ export async function executeTask(
           needsClarification: false,
         };
         const detectedIntent = detectIntent(taskText, routingIntentStub);
-        return decideTools(taskText, detectedIntent, managerId, mission.tenantId, mission.isSimulation, mission.id, task.id);
+        // M5-11: workerId (resolved above via findWorkerForTask, before
+        // this point) is who will actually execute the delegated work —
+        // this used to always pass managerId here regardless, so a
+        // worker's own AGENT_PERMISSIONS scope (M5-10) was never actually
+        // checked; tool access for delegated work was gated entirely on
+        // the manager's broader permissions (Deep Integrity Audit,
+        // Section B).
+        return decideTools(taskText, detectedIntent, workerId ?? managerId, mission.tenantId, mission.isSimulation, mission.id, task.id);
       });
       steps.push(toolStep.step);
       const toolResult = toolStep.value;

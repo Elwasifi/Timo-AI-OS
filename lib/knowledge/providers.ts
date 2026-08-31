@@ -17,6 +17,7 @@ export interface IStructuredProvider {
     subject: string;
     predicate: string;
     object: string;
+    tenantId: string;
     category: FactCategory;
     confidence: number;
     confidenceSource: string;
@@ -40,9 +41,9 @@ export interface IStructuredProvider {
 
   query(params: QueryParams): Promise<StructuredFact[]>;
 
-  getHistory(subject: string, predicate: string): Promise<StructuredFact[]>;
+  getHistory(subject: string, predicate: string, tenantId: string): Promise<StructuredFact[]>;
 
-  update(factId: string, newValue?: string, newConfidence?: number, reason?: string): Promise<StructuredFact | null>;
+  update(factId: string, tenantId: string, newValue?: string, newConfidence?: number, reason?: string): Promise<StructuredFact | null>;
 
   softDelete(factId: string): Promise<boolean>;
   permanentDelete(factId: string): Promise<boolean>;

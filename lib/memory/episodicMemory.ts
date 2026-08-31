@@ -4,6 +4,7 @@
 
 import { supabase } from '@/lib/supabase/client';
 import { memoryStore } from './memoryStore';
+import { INTERNAL_TENANT_ID } from '@/lib/governance/internalTenant';
 import type { EpisodicEvent, MemoryRecord } from './types';
 
 const TABLE = 'memory_events';
@@ -18,6 +19,7 @@ export const episodicMemory = {
     severity?: 'info' | 'warning' | 'error' | 'success';
     metadata?: Record<string, unknown>;
     memoryId?: string;
+    tenantId?: string | null;
   }): Promise<EpisodicEvent> {
     const { data, error } = await supabase.from(TABLE).insert({
       memory_id: input.memoryId ?? null,
@@ -28,6 +30,7 @@ export const episodicMemory = {
       project: input.project ?? null,
       severity: input.severity ?? 'info',
       metadata: input.metadata ?? {},
+      tenant_id: input.tenantId ?? INTERNAL_TENANT_ID,
     }).select().single();
     if (error) throw new Error(`Episodic record failed: ${error.message}`);
     return data as EpisodicEvent;
@@ -64,6 +67,7 @@ export const episodicMemory = {
       project: input.project,
       severity: input.severity,
       memoryId: memory.id,
+      tenantId: input.tenantId,
     });
 
     return { memory, event };

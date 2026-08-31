@@ -13,6 +13,7 @@ import {
   supabaseTimelineProvider,
 } from './supabaseProviders';
 import { eventBus } from './eventBus';
+import { INTERNAL_TENANT_ID } from '@/lib/governance/internalTenant';
 import { planQuery, type QueryPlan } from './queryPlanner';
 import { extractFacts, resolveQuestionAttribute } from './factExtractor';
 import { formatFactAnswer, formatNotFoundAnswer, formatHistoryAnswer, formatConflictPrompt } from './factFormatter';
@@ -34,6 +35,11 @@ const timeline = supabaseTimelineProvider;
 export const knowledge = {
   // ---- Store: extract facts + store structured + semantic + link ----
   async store(input: StoreParams): Promise<StoreResult> {
+    // Falls back to the internal tenant only when a caller genuinely has no
+    // tenant context yet — mirrors the same last-resort pattern used in
+    // lib/memory/memoryStore.ts, not a default any real client-tenant caller
+    // should ever actually hit (they already thread tenantId through).
+    const tenantId = input.tenantId ?? INTERNAL_TENANT_ID;
     const facts = extractFacts(input.text);
     const conflicts: ConflictInfo[] = [];
     const storedFacts: StructuredFact[] = [];
@@ -65,6 +71,7 @@ export const knowledge = {
           subject: fact.subject,
           predicate: fact.predicate,
           object: fact.object,
+          tenantId,
           category: fact.category,
           confidence: fact.confidence,
           confidenceSource: fact.confidenceSource,
@@ -106,11 +113,11 @@ export const knowledge = {
               fact.object,
               'Forced replacement',
             );
-            const newFacts = await structured.query({ subject: fact.subject, predicate: fact.predicate, limit: 1 });
+            const newFacts = await structured.query({ tenantId, subject: fact.subject, predicate: fact.predicate, limit: 1 });
             if (newFacts[0]) storedFacts.push(newFacts[0]);
           }
         } else if (result.action === 'created') {
-          const newFacts = await structured.query({ subject: fact.subject, predicate: fact.predicate, limit: 1 });
+          const newFacts = await structured.query({ tenantId, subject: fact.subject, predicate: fact.predicate, limit: 1 });
           if (newFacts[0]) storedFacts.push(newFacts[0]);
 
           emitEvent({
@@ -153,7 +160,8 @@ export const knowledge = {
   },
 
   // ---- Answer: the retrieval pipeline (planner → providers) ----
-  async answer(input: { question: string; agent?: string; conversationId?: string }): Promise<AnswerResult> {
+  async answer(input: { question: string; agent?: string; conversationId?: string; tenantId?: string | null }): Promise<AnswerResult> {
+    const tenantId = input.tenantId ?? INTERNAL_TENANT_ID;
     const start = Date.now();
     const plan = planQuery(input.question);
     const providersQueried: string[] = [];
@@ -167,6 +175,7 @@ export const knowledge = {
       if (questionAttr) {
         retrievalPath.push('structured');
         const facts = await structured.query({
+          tenantId,
           subject: questionAttr.subject,
           predicate: questionAttr.predicate,
         });
@@ -275,6 +284,7 @@ export const knowledge = {
   async update(params: UpdateParams): Promise<StructuredFact | null> {
     const result = await structured.update(
       params.factId,
+      params.tenantId ?? INTERNAL_TENANT_ID,
       params.newValue,
       params.newConfidence,
       params.reason,
@@ -312,10 +322,12 @@ export const knowledge = {
 
   // ---- Learn: for Learning Engine — store inferred knowledge ----
   async learn(params: LearnParams): Promise<StoreResult> {
+    const tenantId = params.tenantId ?? INTERNAL_TENANT_ID;
     const result = await structured.upsert({
       subject: params.subject,
       predicate: params.predicate,
       object: params.object,
+      tenantId,
       category: params.category,
       confidence: params.confidence,
       confidenceSource: 'inferred',
@@ -334,7 +346,7 @@ export const knowledge = {
       });
     }
 
-    const facts = await structured.query({ subject: params.subject, predicate: params.predicate, limit: 1 });
+    const facts = await structured.query({ tenantId, subject: params.subject, predicate: params.predicate, limit: 1 });
     return {
       action: result.action as StoreResult['action'],
       facts,
@@ -349,6 +361,7 @@ export const knowledge = {
     newValue: string;
     resolution: 'replace' | 'keep_old' | 'keep_both';
     reason?: string;
+    tenantId?: string | null;
   }): Promise<ResolveResult> {
     if (input.resolution === 'keep_old') {
       return { action: 'kept_old', fact: null };
@@ -356,7 +369,7 @@ export const knowledge = {
 
     if (input.resolution === 'replace') {
       const result = await structured.replace(input.oldFactId, input.newValue, input.reason ?? 'User confirmed replacement');
-      const facts = await structured.query({ searchText: result.newFactId, limit: 1 });
+      const facts = await structured.query({ tenantId: input.tenantId ?? INTERNAL_TENANT_ID, searchText: result.newFactId, limit: 1 });
       const fact = facts[0] ?? null;
 
       if (fact) {
@@ -400,8 +413,8 @@ export const knowledge = {
   },
 
   // ---- History: get fact version history ----
-  async history(subject: string, predicate: string): Promise<StructuredFact[]> {
-    return structured.getHistory(subject, predicate);
+  async history(subject: string, predicate: string, tenantId?: string | null): Promise<StructuredFact[]> {
+    return structured.getHistory(subject, predicate, tenantId ?? INTERNAL_TENANT_ID);
   },
 
   // ---- Events: subscribe to knowledge events ----

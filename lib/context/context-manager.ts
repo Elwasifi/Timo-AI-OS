@@ -42,6 +42,14 @@ export async function runContextManager(
   agentCount: number,
   tenantId?: string | null,
   isSimulation?: boolean,
+  // M5-11: the agent whose AGENT_PERMISSIONS scope decideTools() should
+  // check — defaults to `agentId` (unchanged behavior for every existing
+  // caller). Lets crew-coordinator.ts pass a worker's own id when this
+  // request is about to be delegated, without changing `agentId` itself
+  // (which still attributes memory storage/context-building to the
+  // routed manager, unaffected — this ticket is scoped to tool
+  // permission gating specifically, not memory attribution semantics).
+  toolDecisionAgentId?: string,
 ): Promise<ContextManagerResult> {
   const reasoningSteps: ReasoningStep[] = [];
 
@@ -95,7 +103,7 @@ export async function runContextManager(
     reasoningSteps.push(step1b);
 
     try {
-      const answerResult = await knowledge.answer({ question: input, agent: agentId, conversationId: conversationId ?? undefined });
+      const answerResult = await knowledge.answer({ question: input, agent: agentId, conversationId: conversationId ?? undefined, tenantId });
       if (answerResult.source !== 'not_found') {
         step1b.status = 'completed';
         step1b.detail = `Answered by ${answerResult.source} (confidence: ${answerResult.confidence}%)`;
@@ -235,7 +243,7 @@ export async function runContextManager(
 
   let toolResult;
   try {
-    toolResult = await decideTools(input, detectedIntent, agentId, tenantId, isSimulation);
+    toolResult = await decideTools(input, detectedIntent, toolDecisionAgentId ?? agentId, tenantId, isSimulation);
   } catch (e) {
     toolResult = {
       shouldUseTool: false,
