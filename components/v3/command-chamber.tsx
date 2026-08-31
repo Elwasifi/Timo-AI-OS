@@ -105,10 +105,11 @@ export function CommandChamber() {
         </div>
         <div className="relative h-4 w-px bg-temo-cyan/15" />
         <div className="relative flex items-center gap-5">
-          <TelemetryItem icon={Cpu} label="CPU" value={health.cpu} unit="%" />
-          <TelemetryItem icon={MemoryStick} label="MEM" value={health.memory} unit="%" />
-          <TelemetryItem icon={Network} label="NET" value={health.network} unit="%" />
-          <TelemetryItem icon={Zap} label="API" value={health.apiCalls.toLocaleString()} />
+          {/* M6-04: cpu/memory/network were a fake Math.random() walk with
+              no real signal behind them — removed rather than faked. See
+              stores/systemStore.ts. */}
+          <TelemetryItem icon={Zap} label="STATUS" value={health?.overall ?? 'unknown'} />
+          <TelemetryItem icon={Zap} label="API" value={health ? health.apiCallsTotal.toLocaleString() : '—'} />
         </div>
         <div className="relative ml-auto flex items-center gap-2">
           <Radio className="h-3 w-3 text-temo-cyan/50" />

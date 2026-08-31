@@ -4,9 +4,6 @@ import { memo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Activity,
-  Cpu,
-  MemoryStick,
-  Wifi,
   Radio,
   Zap,
   CheckCircle2,
@@ -20,7 +17,7 @@ import {
   Wrench,
   type LucideIcon,
 } from 'lucide-react';
-import { useSystemStore } from '@/stores/systemStore';
+import { useSystemStore, startSystemHealthPolling } from '@/stores/systemStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useUIStore } from '@/stores/uiStore';
 import { useOrchestrationStore } from '@/stores/orchestrationStore';
@@ -285,25 +282,62 @@ const RunningTasksSection = memo(function RunningTasksSection() {
   );
 });
 
+const STATUS_STYLES: Record<string, { dot: string; text: string }> = {
+  healthy: { dot: 'bg-success', text: 'text-success' },
+  degraded: { dot: 'bg-warning', text: 'text-warning' },
+  down: { dot: 'bg-destructive', text: 'text-destructive' },
+  unknown: { dot: 'bg-muted-foreground', text: 'text-muted-foreground' },
+};
+
 const SystemHealthSection = memo(function SystemHealthSection() {
   const health = useSystemStore((s) => s.health);
-  const tickHealth = useSystemStore((s) => s.tickHealth);
 
+  // M6-04: real data now — see stores/systemStore.ts. Single shared
+  // poller: this and system-footer.tsx's identical call start at most one
+  // interval between them (module-level guard), not two independent ones
+  // random-walking their own fake numbers.
   useEffect(() => {
-    const t = setInterval(tickHealth, 3000);
-    return () => clearInterval(t);
-  }, [tickHealth]);
+    startSystemHealthPolling();
+  }, []);
+
+  if (!health) {
+    return (
+      <Section title="System Health" icon={Activity}>
+        <div className="glass rounded-xl p-3 text-xs text-muted-foreground">Checking system health…</div>
+      </Section>
+    );
+  }
+
+  const overallStyle = STATUS_STYLES[health.overall] ?? STATUS_STYLES.unknown;
 
   return (
-    <Section title="System Health" icon={Cpu}>
-      <div className="glass rounded-xl p-3 space-y-3">
-        <HealthBar icon={Cpu} label="CPU" value={health.cpu} />
-        <HealthBar icon={MemoryStick} label="Memory" value={health.memory} />
-        <HealthBar icon={Wifi} label="Network" value={health.network} />
+    <Section title="System Health" icon={Activity}>
+      <div className="glass rounded-xl p-3 space-y-2.5">
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-muted-foreground">Overall</span>
+          <span className={cn('flex items-center gap-1.5 font-semibold uppercase', overallStyle.text)}>
+            <span className={cn('h-1.5 w-1.5 rounded-full', overallStyle.dot)} />
+            {health.overall}
+          </span>
+        </div>
+        {health.checks.map((check) => {
+          const style = STATUS_STYLES[check.status] ?? STATUS_STYLES.unknown;
+          return (
+            <div key={check.name} className="flex items-center justify-between text-xs" title={check.detail}>
+              <span className="flex items-center gap-1.5 text-muted-foreground">
+                <span className={cn('h-1.5 w-1.5 rounded-full', style.dot)} />
+                {check.name}
+              </span>
+              {check.latencyMs != null && (
+                <span className="tabular-nums text-muted-foreground">{check.latencyMs}ms</span>
+              )}
+            </div>
+          );
+        })}
         <div className="flex items-center justify-between border-t border-border/40 pt-2 text-xs">
-          <span className="text-muted-foreground">API Calls Today</span>
+          <span className="text-muted-foreground">API Calls (total)</span>
           <span className="font-semibold tabular-nums text-primary">
-            {health.apiCalls.toLocaleString()}
+            {health.apiCallsTotal.toLocaleString()}
           </span>
         </div>
       </div>
@@ -362,37 +396,6 @@ function StatusDot({ status }: { status: string }) {
     <div className="flex items-center gap-1.5">
       <span className={cn('h-2 w-2 rounded-full', color)} />
       <span className="text-[10px] capitalize text-muted-foreground">{status}</span>
-    </div>
-  );
-}
-
-function HealthBar({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: typeof Cpu;
-  label: string;
-  value: number;
-}) {
-  const color =
-    value > 80 ? 'from-warning to-destructive' : value > 60 ? 'from-primary to-warning' : 'from-primary to-secondary';
-  return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-xs">
-        <span className="flex items-center gap-1.5 text-muted-foreground">
-          <Icon className="h-3 w-3" />
-          {label}
-        </span>
-        <span className="tabular-nums font-medium">{value}%</span>
-      </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
-        <motion.div
-          className={cn('h-full rounded-full bg-gradient-to-r', color)}
-          animate={{ width: `${value}%` }}
-          transition={{ type: 'spring', stiffness: 120 }}
-        />
-      </div>
     </div>
   );
 }
