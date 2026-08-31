@@ -2,7 +2,7 @@
 
 import { useState, useRef, type FormEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Paperclip, Mic, ArrowUp, Slash, FlaskConical } from 'lucide-react';
+import { Mic, ArrowUp, Slash, FlaskConical } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 type InputBarProps = {
@@ -63,11 +63,12 @@ export function InputBar({ onSend, onVoiceToggle, isStreaming, disabled, placeho
         className,
       )}
     >
-      {/* Left: attachment */}
-      <button type="button" className="shrink-0 text-temo-titanium transition-colors hover:text-temo-cyan" disabled={disabled}>
-        <Paperclip className="h-5 w-5" />
-      </button>
-
+      {/* M6-08: the attachment button here previously had no onClick at
+          all — did nothing when clicked. Removed rather than wired: real
+          file-attachment support (upload, storage, passing content into
+          the AI request) is a genuine feature, not a cleanup-scope fix,
+          and a button that looks functional but silently does nothing is
+          worse than no button. */}
       {/* Simulation/R&D mode toggle — missions run with no real external side effects */}
       {onToggleSimulation && (
         <button

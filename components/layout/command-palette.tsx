@@ -40,7 +40,6 @@ export function CommandPalette() {
   const agents = useDashboardStore((s) => s.agents);
   const workflows = useDashboardStore((s) => s.workflows);
   const setRightSidebarOpen = useUIStore((s) => s.setRightSidebarOpen);
-  const setVoiceDockOpen = useUIStore((s) => s.setVoiceDockOpen);
   const [query, setQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -77,7 +76,6 @@ export function CommandPalette() {
       { id: 'act-voice', label: 'Start Voice Mode', group: 'Commands', icon: Mic, keywords: 'voice listen speak microphone', action: () => { setOpen(false); void voiceManager.startListening(); } },
       { id: 'act-newchat', label: 'New Chat', group: 'Commands', icon: MessageSquare, keywords: 'new chat start conversation', action: () => go('/chat') },
       { id: 'act-toggle-sidebar', label: 'Toggle Right Panel', group: 'Commands', icon: Zap, keywords: 'sidebar panel toggle', action: () => { setRightSidebarOpen(true); setOpen(false); } },
-      { id: 'act-toggle-dock', label: 'Toggle Voice Dock', group: 'Commands', icon: Mic, keywords: 'dock voice toggle', action: () => { setVoiceDockOpen(true); setOpen(false); } },
     ];
 
     return [...nav, ...agentItems, ...workflowItems, ...actions];
@@ -86,7 +84,7 @@ export function CommandPalette() {
       setOpen(false);
       router.push(href);
     }
-  }, [agents, workflows, router, setOpen, setRightSidebarOpen, setVoiceDockOpen]);
+  }, [agents, workflows, router, setOpen, setRightSidebarOpen]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return commands;

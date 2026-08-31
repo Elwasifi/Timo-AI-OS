@@ -6,7 +6,6 @@ import {
   Send,
   Sparkles,
   Mic,
-  Paperclip,
   Plus,
   Copy,
   Check,
@@ -273,6 +272,24 @@ export default function ChatPage() {
       },
     });
   }, []);
+
+  // M6-08: "Regenerate" had an empty onClick — did nothing when clicked.
+  // Removes the given assistant response and its preceding user turn, then
+  // resubmits that same user text through the real pipeline. (The user
+  // bubble reappears with a fresh timestamp rather than staying in place —
+  // send() is the only entry point into the real pipeline and always
+  // appends a new user message; duplicating its internals just to avoid a
+  // timestamp change wasn't worth the risk this late in a large session.)
+  const regenerate = (assistantMessageId: string) => {
+    const idx = messages.findIndex((msg) => msg.id === assistantMessageId);
+    if (idx < 0) return;
+    let userIdx = idx - 1;
+    while (userIdx >= 0 && messages[userIdx].role !== 'user') userIdx -= 1;
+    if (userIdx < 0) return;
+    const userText = messages[userIdx].content;
+    setMessages((m) => m.slice(0, userIdx));
+    void send(userText);
+  };
 
   const send = async (text: string) => {
     if (!text.trim() || isStreaming || isRouting) return;
@@ -593,6 +610,7 @@ export default function ChatPage() {
                   message={m}
                   agents={agents}
                   onSpeak={voiceManager.speak.bind(voiceManager)}
+                  onRegenerate={() => regenerate(m.id)}
                   isMuted={isMuted}
                 />
               ))}
@@ -692,11 +710,13 @@ const MessageBubble = memo(function MessageBubble({
   message,
   agents,
   onSpeak,
+  onRegenerate,
   isMuted,
 }: {
   message: Message;
   agents: { id: string; name: string; color: string; icon: string; avatarUrl?: string | null }[];
   onSpeak: (text: string) => void;
+  onRegenerate: () => void;
   isMuted: boolean;
 }) {
   const isUser = message.role === 'user';
@@ -852,7 +872,7 @@ const MessageBubble = memo(function MessageBubble({
             {!isMuted && (
               <ActionButton icon={Volume2} label="Speak" onClick={() => onSpeak(message.content)} color={color} />
             )}
-            <ActionButton icon={RotateCcw} label="Regenerate" onClick={() => {}} color={color} />
+            <ActionButton icon={RotateCcw} label="Regenerate" onClick={onRegenerate} color={color} />
           </div>
         )}
       </div>
