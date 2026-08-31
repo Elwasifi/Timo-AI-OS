@@ -6,6 +6,10 @@ import type { AgentRecord } from './types';
 export type Tone = 'cyan' | 'amber' | 'emerald' | 'pink' | 'violet' | 'teal' | 'indigo' | 'gold' | 'orange';
 
 export interface SubAgentUI {
+  /** M6-05: the real agent registry id — needed to match against
+   * MissionTask.assignedWorker for live "who's actually working right now"
+   * status; `title` alone (a display name) can't be matched reliably. */
+  id: string;
   title: string;
   status: 'online' | 'busy' | 'idle';
   image: string;
@@ -105,6 +109,7 @@ export function recordToUI(record: AgentRecord, allRecords: AgentRecord[] = []):
   const children = allRecords
     .filter((c) => c.parentId === record.id && c.level === 'worker' && c.isActive)
     .map((c, i) => ({
+      id: c.id,
       title: c.displayName,
       status: mapStatus(c.status),
       image: c.avatarUrl ?? HOLO_IMAGES[i % HOLO_IMAGES.length],
