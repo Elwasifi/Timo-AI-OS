@@ -41,8 +41,6 @@ export interface AppSettings {
   routing_strategy: RoutingStrategy;
   /** Per-task-type manual overrides, e.g. { voice: { provider: 'gemini', model: 'gemini-2.5-flash' } }. Empty = fully automatic. */
   routing_preferences: Record<string, { provider?: ProviderId; model?: string }>;
-  // Brave Search (web.search tool — M6-02). Free tier: 2000 queries/month.
-  brave_search_api_key: string | null;
 }
 
 export type ProviderId = 'gemini' | 'groq' | 'nvidia' | 'openrouter' | 'ollama';
@@ -108,7 +106,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   routing_mode: 'automatic',
   routing_strategy: 'balanced',
   routing_preferences: {},
-  brave_search_api_key: null,
 };
 
 export const PROVIDER_MODELS: Record<ProviderId, string[]> = {
