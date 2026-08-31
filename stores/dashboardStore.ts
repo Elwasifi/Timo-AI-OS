@@ -45,7 +45,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
     {
       id: 'gemini',
       name: 'Gemini Live',
-      model: 'gemini-2.0-flash',
+      model: 'gemini-3.6-flash',
       status: 'active',
       latency: 142,
       color: '#00E5FF',
@@ -69,7 +69,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
     {
       id: 'openrouter',
       name: 'OpenRouter',
-      model: 'gemini-2.0-flash-001',
+      model: 'gemini-3.6-flash',
       status: 'idle',
       latency: 240,
       color: '#6366F1',

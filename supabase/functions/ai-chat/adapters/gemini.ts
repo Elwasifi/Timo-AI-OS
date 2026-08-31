@@ -11,14 +11,17 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 export const geminiAdapter: AIProviderAdapter = {
   id: 'gemini',
   label: 'Google Gemini',
-  defaultModel: 'gemini-2.0-flash',
+  // M6-02 side-check: every model previously listed here — gemini-2.0-flash,
+  // gemini-2.0-flash-lite, gemini-1.5-flash, gemini-1.5-pro,
+  // gemini-2.5-flash, gemini-2.5-pro — is confirmed dead on this project's
+  // key (live-tested all 6, every one 404s: "no longer available[/to new
+  // users]"). Silently 404ing and falling through the fallback chain with
+  // nothing surfacing it is the same silent-failure class as M6-01.
+  // gemini-3.6-flash (already app_settings's configured default) is the
+  // only model confirmed to actually respond on this account.
+  defaultModel: 'gemini-3.6-flash',
   models: [
-    'gemini-2.0-flash',
-    'gemini-2.0-flash-lite',
-    'gemini-1.5-flash',
-    'gemini-1.5-pro',
-    'gemini-2.5-flash',
-    'gemini-2.5-pro',
+    'gemini-3.6-flash',
   ],
   supportsTools: true,
   requiresKey: true,

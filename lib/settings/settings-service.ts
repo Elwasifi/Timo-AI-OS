@@ -87,13 +87,23 @@ export const DEFAULT_SETTINGS: AppSettings = {
   temperature: 0.7,
   max_tokens: 2048,
   gemini_api_key: null,
-  gemini_model: 'gemini-2.0-flash',
+  // M6-02 side-check: gemini-2.0-flash is confirmed dead (live 404: "no
+  // longer available") — this was the DEFAULT_SETTINGS fallback used
+  // whenever loadSettings()'s DB read fails, meaning a DB outage would
+  // silently steer real chat calls at a 404ing model with no visible
+  // signal, the same silent-failure class as M6-01.
+  gemini_model: 'gemini-3.6-flash',
   groq_api_key: null,
   groq_model: 'llama-3.3-70b-versatile',
   nvidia_api_key: null,
   nvidia_model: 'meta/llama-3.1-405b-instruct',
   openrouter_api_key: null,
-  openrouter_model: 'google/gemini-2.0-flash-001',
+  // M6-02 side-check: google/gemini-2.0-flash-001 is confirmed dead on
+  // OpenRouter too (live 404: "No endpoints found") — not just Google's
+  // direct API. google/gemini-3.6-flash confirmed to resolve (a real
+  // model-not-found 404 became a 402 insufficient-credits response,
+  // which only happens once the model itself is recognized).
+  openrouter_model: 'google/gemini-3.6-flash',
   ollama_base_url: null,
   ollama_api_key: null,
   ollama_model: 'llama3',
@@ -109,10 +119,19 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const PROVIDER_MODELS: Record<ProviderId, string[]> = {
-  gemini: ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.5-flash', 'gemini-2.5-pro'],
+  // M6-02 side-check: every other entry previously listed here is
+  // confirmed dead on this project's key (live 404 on all 6, including
+  // gemini-2.5-flash/-pro, which Google's own listModels() misleadingly
+  // still lists as available). gemini-3.6-flash is the only model
+  // confirmed to actually respond.
+  gemini: ['gemini-3.6-flash'],
   groq: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'llama-3.1-70b-versatile', 'mixtral-8x7b-32768', 'gemma2-9b-it'],
   nvidia: ['meta/llama-3.1-405b-instruct', 'meta/llama-3.1-70b-instruct', 'meta/llama-3.1-8b-instruct', 'mistralai/mixtral-8x22b-instruct-v0.1', 'nvidia/llama-3.1-nemotron-70b-instruct'],
-  openrouter: ['google/gemini-2.0-flash-001', 'openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet', 'meta-llama/llama-3.3-70b-instruct', 'google/gemini-flash-1.5', 'groq/llama-3.3-70b-versatile'],
+  // M6-02 side-check: google/gemini-2.0-flash-001 and google/gemini-flash-1.5
+  // both confirmed dead on OpenRouter's catalog (404/not found live) — only
+  // the Gemini entries were in scope for this check, the OpenAI/Anthropic/
+  // Llama/Groq ones here are unverified, not touched.
+  openrouter: ['google/gemini-3.6-flash', 'openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet', 'meta-llama/llama-3.3-70b-instruct', 'groq/llama-3.3-70b-versatile'],
   ollama: ['llama3', 'llama3.1', 'mistral', 'phi3', 'qwen2.5', 'gemma2'],
 };
 

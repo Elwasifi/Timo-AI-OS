@@ -33,13 +33,18 @@ function parseOpenRouterModel(raw: Record<string, unknown>): ModelInfo {
 export const openrouterAdapter = createOpenAICompat({
   id: 'openrouter',
   label: 'OpenRouter',
-  defaultModel: 'google/gemini-2.0-flash-001',
+  // M6-02 side-check: google/gemini-2.0-flash-001 confirmed dead live
+  // (404 "No endpoints found"); google/gemini-flash-1.5 confirmed absent
+  // from OpenRouter's own /models catalog. google/gemini-3.6-flash
+  // confirmed to resolve (a real model-not-found 404 became a 402
+  // insufficient-credits response instead, which only happens once the
+  // model itself is recognized).
+  defaultModel: 'google/gemini-3.6-flash',
   models: [
-    'google/gemini-2.0-flash-001',
+    'google/gemini-3.6-flash',
     'openai/gpt-4o-mini',
     'anthropic/claude-3.5-sonnet',
     'meta-llama/llama-3.3-70b-instruct',
-    'google/gemini-flash-1.5',
     'groq/llama-3.3-70b-versatile',
   ],
   baseUrl: OPENROUTER_BASE_URL,
