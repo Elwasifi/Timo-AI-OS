@@ -355,20 +355,20 @@ export default function ChatPage() {
         stream: true,
         tenantId: useAuthStore.getState().currentTenantId ?? '00000000-0000-0000-0000-000000000001',
         isSimulation: simulationMode,
-        // M3-02: the mission pipeline has no other progress signal until it
+        // M6-03: the mission pipeline has no other progress signal until it
         // fully completes (unlike the simple pipeline, which already
-        // streams live timeline events) — post an immediate, real
-        // acknowledgment message as soon as we know a mission was picked,
-        // instead of leaving the user looking at just a typing indicator
-        // for however long the mission takes.
-        onDecision: (pipeline) => {
-          if (pipeline !== 'mission') return;
+        // streams live timeline events) — onAcknowledgment posts a real,
+        // request-specific acknowledgment (generated fast, via Groq) as
+        // soon as it resolves, instead of leaving the user looking at just
+        // a typing indicator for however long the mission takes. Replaces
+        // M3-02's single hardcoded string with real per-request text.
+        onAcknowledgment: (ackText) => {
           setMessages((m) => [
             ...m,
             {
               id: `ack${Date.now()}`,
               role: 'assistant',
-              content: "Got it — this needs a full mission, so I'm breaking it down and getting to work. I'll follow up here with the result.",
+              content: ackText,
               agentId: 'temo',
               agentName: 'Temo',
               agentColor: '#00E5FF',
