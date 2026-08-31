@@ -88,6 +88,12 @@ export default function ChatPage() {
 
   const currentTimeline = useOrchestrationStore((s) => s.currentTimeline);
   const isRouting = useOrchestrationStore((s) => s.isRouting);
+  // M6-07: activeWorkerId already existed and already updated live the
+  // instant a manager delegates (crewCoordinator's onWorkerActive callback,
+  // wired above) — nothing in the UI ever rendered it. Real-time, no
+  // polling latency, unlike M6-05's G-Brain data (5s poll) — this is the
+  // faster, session-local complement to that, not a replacement for it.
+  const activeWorkerId = useOrchestrationStore((s) => s.activeWorkerId);
   const setRouting = useOrchestrationStore((s) => s.setRouting);
   const setRoutingInProgress = useOrchestrationStore((s) => s.setRoutingInProgress);
   const clearTimeline = useOrchestrationStore((s) => s.clearTimeline);
@@ -292,8 +298,14 @@ export default function ChatPage() {
       }
     }
 
-    // Clear previous timeline and start routing
+    // Clear previous timeline and start routing.
+    // M6-07: activeWorkerId was never reset between requests anywhere in
+    // this flow — found while wiring it into the UI for the first time.
+    // Without this, a stale worker id from a PREVIOUS mission's delegation
+    // would still be set (and now visibly shown) during a brand new
+    // request that never delegates to any worker at all.
     clearTimeline();
+    useOrchestrationStore.getState().setActiveWorker(null);
     setRoutingInProgress(true);
 
     // Emit Thinking event to G-Brain
@@ -588,6 +600,29 @@ export default function ChatPage() {
             <div ref={bottomRef} />
           </div>
         </div>
+
+        {/* M6-07: activeWorkerId already updates live the instant a manager
+            delegates — this is the first UI surface for it. Shown only
+            alongside the live timeline (the same "something is actively
+            happening" window), not as a standalone persistent element. */}
+        <AnimatePresence>
+          {currentTimeline.length > 0 && activeWorkerId && (
+            <motion.div
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground"
+            >
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+              <span>
+                <span className="font-medium text-foreground">
+                  {agents.find((a) => a.id === activeWorkerId)?.name ?? activeWorkerId}
+                </span>{' '}
+                is working on this right now
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Live timeline (shows during routing) */}
         <AnimatePresence>
