@@ -76,6 +76,26 @@ export default function MissionDetailPage() {
     load();
   }, [load]);
 
+  // M7-06: this page fetched mission data exactly once on mount and never
+  // again — no polling, no live subscription, nothing. Objectives/Tasks/
+  // Timeline all rendered from that single snapshot, so a mission that
+  // kept executing (or completed) after the page loaded left the panel
+  // frozen at whatever status existed at mount time until a manual
+  // browser refresh — the root cause of the Objectives panel getting
+  // stuck on PENDING. The backend has no caching anywhere in this path
+  // (/api/missions/[id] is force-dynamic; missionService.ts's
+  // getFullMission() queries Supabase directly with no cache layer) —
+  // confirmed via trace before writing this fix. Polls the same
+  // known-correct fetch this page already uses, stopping automatically
+  // once the mission reaches a terminal status so it doesn't keep polling
+  // a finished mission forever.
+  useEffect(() => {
+    const status = data?.mission?.status;
+    if (!status || !NON_TERMINAL_MISSION_STATUSES.includes(status)) return;
+    const interval = setInterval(() => load(true), 3000);
+    return () => clearInterval(interval);
+  }, [data?.mission?.status, load]);
+
   return (
     <AppShell>
       <div className="space-y-6 pb-8">

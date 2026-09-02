@@ -28,7 +28,9 @@ import {
   createObjectives,
   createTasks,
   getFullMission,
+  getTasks,
   updateTask,
+  updateObjective,
   appendExecutionLog,
   recordLesson,
   claimMissionTerminalStatus,
@@ -442,6 +444,40 @@ export async function recalculateProgress(missionId: string): Promise<void> {
   }
 
   await updateMission(missionId, { progress, status });
+}
+
+/**
+ * M7-06: mission_objectives.status was set once at creation ('pending')
+ * and never updated again anywhere in the codebase — updateObjective()
+ * (missionService.ts) existed but had zero callers. Live-confirmed on a
+ * real completed mission: every objective row's updated_at exactly
+ * equalled its created_at, even though every one of its tasks had
+ * genuinely completed. Mirrors recalculateProgress()'s exact
+ * completed/failed rollup semantics (partial failure still resolves
+ * 'completed' as long as at least one task under the objective
+ * succeeded), scoped to just the tasks belonging to one objective
+ * instead of the whole mission. Re-fetches tasks fresh rather than
+ * trusting an in-memory list, for the same reason recalculateProgress()
+ * does — the caller's copy may already be stale by the time this runs.
+ */
+export async function recalculateObjectiveStatus(missionId: string, objectiveId: string): Promise<void> {
+  const tasks = await getTasks(missionId);
+  const objectiveTasks = tasks.filter((t) => t.objectiveId === objectiveId);
+  if (objectiveTasks.length === 0) return;
+
+  const total = objectiveTasks.length;
+  const completed = objectiveTasks.filter((t) => t.status === 'completed').length;
+  const failed = objectiveTasks.filter((t) => t.status === 'failed').length;
+
+  if (completed + failed === total) {
+    const status = failed > 0 && completed === 0 ? 'failed' : 'completed';
+    await updateObjective(objectiveId, { status });
+    return;
+  }
+
+  if (completed + failed > 0 || objectiveTasks.some((t) => t.status === 'running')) {
+    await updateObjective(objectiveId, { status: 'in_progress' });
+  }
 }
 
 const TERMINAL_MISSION_STATUSES: Mission['status'][] = ['completed', 'failed', 'cancelled'];

@@ -34,7 +34,7 @@ import { detectIntent } from '@/lib/context/intent-detector';
 import { decideTools } from '@/lib/context/tool-decision';
 import { buildManagerContext } from './managerContext';
 import { updateTask, claimTask, appendExecutionLog, getTasks } from './missionService';
-import { recalculateProgress } from './missionEngine';
+import { recalculateProgress, recalculateObjectiveStatus } from './missionEngine';
 import {
   recordEvent,
   recordTaskStarted,
@@ -607,6 +607,15 @@ export async function executeMissionTasks(
     const objective = objectives.find((o) => o.id === task.objectiveId) ?? null;
     const result = await executeTask(task, mission, objective, [...priorResults]);
     results.push(result);
+
+    // M7-06: roll this task's outcome up into its objective's status —
+    // mission_objectives.status was set once at creation and never
+    // touched again anywhere in the codebase (the Objectives panel stuck
+    // permanently on PENDING). Mirrors the mission-level
+    // recalculateProgress() call below, scoped to one objective.
+    if (objective) {
+      await recalculateObjectiveStatus(mission.id, objective.id);
+    }
 
     // Thread completed results to subsequent tasks so review/synthesis
     // agents see the actual worker output
