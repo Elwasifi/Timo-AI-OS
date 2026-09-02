@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { authFetch } from '@/lib/api/authFetch';
 import type { SystemEvent, RunningTask } from '@/types';
 
 // M6-04: health used to be tickHealth()'s Math.random() walk — cpu/memory/
@@ -71,12 +72,23 @@ export const useSystemStore = create<SystemState>((set) => ({
       tasks: s.tasks.map((t) => (t.id === id ? { ...t, progress } : t)),
     })),
 
+  // M7-07: root cause of the top-nav "UNKNOWN" health badge — these two
+  // calls used plain fetch() against routes that require a Bearer token
+  // (lib/auth/apiAuth.ts's requireUser() reads it from the Authorization
+  // header only, never cookies). Live-confirmed: both requests returned
+  // 401 "Sign in required" from a genuinely authenticated session,
+  // because no Authorization header was ever attached — fetchHealth()
+  // always fell through to its `success: false` branch, permanently
+  // defaulting `overall` to 'unknown' regardless of real system health.
+  // authFetch() (lib/api/authFetch.ts) is this project's existing
+  // wrapper for exactly this — attaches the signed-in user's access
+  // token automatically.
   fetchHealth: async () => {
     const [healthRes, providersRes] = await Promise.allSettled([
-      fetch('/api/runtime/health').then(
+      authFetch('/api/runtime/health').then(
         (r) => r.json() as Promise<ApiEnvelope<{ overall: HealthStatus; checks: HealthCheck[] }>>,
       ),
-      fetch('/api/stats/providers').then(
+      authFetch('/api/stats/providers').then(
         (r) => r.json() as Promise<ApiEnvelope<{ stats: { providerId: string; usageCount: number; latencyMs: number | null }[] }>>,
       ),
     ]);
