@@ -9,6 +9,7 @@ import { useDashboardStore } from '@/stores/dashboardStore';
 import { useOrchestrationStore } from '@/stores/orchestrationStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { useRotatingState } from '@/hooks/use-rotating-state';
+import { authFetch } from '@/lib/api/authFetch';
 import { cn } from '@/lib/utils';
 
 // ── API response types ──
@@ -297,10 +298,16 @@ export function TemoCoreEcosystem({ size = 320 }: { size?: number }) {
   const fetchSatelliteData = useCallback(async () => {
     try {
       const [memRes, knowRes, toolRes, missionRes] = await Promise.allSettled([
-        fetch('/api/stats/memory').then((r) => r.json() as Promise<ApiEnvelope<{ stats: MemoryStats }>>),
-        fetch('/api/stats/knowledge').then((r) => r.json() as Promise<ApiEnvelope<{ stats: KnowledgeStats }>>),
-        fetch('/api/stats/tools').then((r) => r.json() as Promise<ApiEnvelope<{ stats: ToolUsageStats }>>),
-        fetch('/api/missions/summary').then((r) => r.json() as Promise<ApiEnvelope<{ summary: MissionSummary }>>),
+        // M7-07b: same root cause as M7-07's health badge — these are
+        // auth-required routes (lib/auth/apiAuth.ts's requireUser() only
+        // reads the Authorization header, never cookies) but were called
+        // with plain fetch(), so they always 401'd for a real signed-in
+        // user. authFetch() (lib/api/authFetch.ts) attaches the session's
+        // Bearer token.
+        authFetch('/api/stats/memory').then((r) => r.json() as Promise<ApiEnvelope<{ stats: MemoryStats }>>),
+        authFetch('/api/stats/knowledge').then((r) => r.json() as Promise<ApiEnvelope<{ stats: KnowledgeStats }>>),
+        authFetch('/api/stats/tools').then((r) => r.json() as Promise<ApiEnvelope<{ stats: ToolUsageStats }>>),
+        authFetch('/api/missions/summary').then((r) => r.json() as Promise<ApiEnvelope<{ summary: MissionSummary }>>),
       ]);
 
       setSatData({

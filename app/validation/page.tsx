@@ -11,6 +11,7 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { authFetch } from '@/lib/api/authFetch';
 import { cn } from '@/lib/utils';
 import type { SuiteResult, TestResult } from '@/lib/validation/types';
 
@@ -44,7 +45,10 @@ export default function ValidationPage() {
     setRunning(true);
     setError(null);
     try {
-      const res = await fetch('/api/validation/run', {
+      // M7-07b: /api/validation/run calls requireUser() (auth-required),
+      // which only reads the Authorization header, never cookies — plain
+      // fetch() always 401'd for a real signed-in user.
+      const res = await authFetch('/api/validation/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
