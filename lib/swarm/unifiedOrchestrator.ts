@@ -25,9 +25,57 @@ import {
   type RuntimeState,
   type ExecutionState,
 } from './runtimeStore';
+import { route } from '@/lib/ai/router';
+import { chatWithFallback } from '@/lib/ai/ai-provider';
 import type { OrchestratorResult, PipelineType } from './executionTypes';
 import type { Mission } from './types';
 import type { RoutingResult, TaskRecord } from '@/types';
+
+// M6-03: the mission pipeline (launchMission + executeMissionTasks) has no
+// progress signal until it fully finishes — the user was staring at a bare
+// typing indicator the whole time. M3-02 already added a synchronous
+// onDecision hook for this, but the acknowledgment text itself was a single
+// hardcoded string in the UI layer, identical regardless of what was
+// actually asked. This generates a real, fast, request-specific
+// acknowledgment instead — routed via the FAST_CHAT profile (high latency
+// sensitivity, high cost sensitivity) so it resolves on the quickest
+// available provider (usually Groq) well before the mission itself
+// finishes, not blocking mission kickoff either way (fire-and-forget below).
+const FALLBACK_ACKNOWLEDGMENT = "Got it — this needs a full mission, so I'm breaking it down and getting to work. I'll follow up here with the result.";
+
+export async function generateFastAcknowledgment(userRequest: string, tenantId: string): Promise<string> {
+  try {
+    const decision = await route({
+      classification: {
+        taskType: 'FAST_CHAT',
+        complexity: 'simple',
+        urgency: 'medium',
+        expectedContextSize: 'small',
+        needsTools: false,
+        needsReasoning: false,
+        needsStructuredOutput: false,
+        needsVision: false,
+        latencySensitivity: 'high',
+        costSensitivity: 'high',
+        reliabilityRequirement: 'normal',
+      },
+      tenantId,
+    });
+    const result = await chatWithFallback(
+      [{ role: 'user', content: userRequest }],
+      {
+        systemPrompt: "The user just sent a request that needs real planning and multi-step work — it will take a while. In ONE short, natural sentence, acknowledge specifically what they asked for and say you're getting started on it now. Do not answer the request itself. Do not use quotation marks.",
+        temperature: 0.4,
+        maxTokens: 60,
+        candidates: decision.candidates,
+        usageContext: { operation: 'fast_acknowledgment', tenantId },
+      },
+    );
+    return result.content.trim() || FALLBACK_ACKNOWLEDGMENT;
+  } catch {
+    return FALLBACK_ACKNOWLEDGMENT;
+  }
+}
 
 export interface OrchestrateOptions {
   announce?: boolean;
@@ -51,6 +99,14 @@ export interface OrchestrateOptions {
    * indicator for however long the mission takes.
    */
   onDecision?: (pipeline: PipelineType, reason: string) => void;
+  /**
+   * M6-03: fires once (fire-and-forget, never blocks the pipeline) with a
+   * real, request-specific acknowledgment for a mission-pipeline request —
+   * generated fast (FAST_CHAT routing profile) so it lands well before the
+   * mission itself finishes. Falls back to a static message if the
+   * acknowledgment call itself fails; never left unfired.
+   */
+  onAcknowledgment?: (text: string) => void;
 }
 
 export interface OrchestrateResult extends OrchestratorResult {
@@ -271,6 +327,14 @@ export async function orchestrate(
   // M3-02: notify the caller which pipeline was picked before running it —
   // see OrchestrateOptions.onDecision for why this exists.
   options.onDecision?.(decision.pipeline, decision.reason);
+
+  // M6-03: kick off the fast acknowledgment in parallel with everything
+  // below — never awaited here, so it can never delay mission kickoff or
+  // the final response.
+  if (decision.pipeline === 'mission' && options.onAcknowledgment) {
+    const onAck = options.onAcknowledgment;
+    generateFastAcknowledgment(userRequest, options.tenantId).then(onAck);
+  }
 
   // 2. Emit thinking event — Temo is analyzing the request
   await emitRuntimeEvent({

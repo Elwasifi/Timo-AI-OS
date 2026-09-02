@@ -335,13 +335,17 @@ function MetricsView() {
 
   return (
     <div className="space-y-3">
+      {/* M6-04: cpu/memory/network were a fake Math.random() walk with no
+          real signal behind them — removed rather than faked. See
+          stores/systemStore.ts. */}
       <div className="glass rounded-xl p-3 space-y-3">
-        <MetricBar icon={Cpu} label="CPU" value={health.cpu} />
-        <MetricBar icon={MemoryStick} label="Memory" value={health.memory} />
-        <MetricBar icon={Wifi} label="Network" value={health.network} />
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-muted-foreground">System Status</span>
+          <span className="font-semibold uppercase text-primary">{health?.overall ?? 'unknown'}</span>
+        </div>
         <div className="flex items-center justify-between border-t border-border/30 pt-2 text-xs">
           <span className="text-muted-foreground">API Calls</span>
-          <span className="font-semibold tabular-nums text-primary">{health.apiCalls.toLocaleString()}</span>
+          <span className="font-semibold tabular-nums text-primary">{health ? health.apiCallsTotal.toLocaleString() : '—'}</span>
         </div>
       </div>
 

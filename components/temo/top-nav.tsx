@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Search, Bell, Settings, Activity } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
-import { useSystemStore } from '@/stores/systemStore';
+import { useSystemStore, startSystemHealthPolling } from '@/stores/systemStore';
 import { useVoiceStore } from '@/stores/voiceStore';
 import { cn } from '@/lib/utils';
 
@@ -25,9 +25,13 @@ export function TopNav() {
     return () => clearInterval(t);
   }, []);
 
+  // M6-04: real data, single shared poller (see systemStore.ts).
+  useEffect(() => {
+    startSystemHealthPolling();
+  }, []);
+
   const activeAgents = agents.filter((a) => a.status !== 'offline').length;
-  const cpuUsage = health.cpu;
-  const memUsage = health.memory;
+  const systemStatus = health?.overall ?? 'unknown';
 
   const missionStatus =
     isSleeping ? 'TEMO SLEEPING' :
@@ -50,9 +54,8 @@ export function TopNav() {
         <div className="hidden items-center gap-4 md:flex">
           <div className="flex items-center gap-1.5">
             <Activity className="h-3 w-3 text-temo-cyan" />
-            <span className="font-mono text-[11px] text-temo-titanium">CPU {Math.round(cpuUsage)}%</span>
+            <span className="font-mono text-[11px] uppercase text-temo-titanium">{systemStatus}</span>
           </div>
-          <span className="font-mono text-[11px] text-temo-titanium">MEM {Math.round(memUsage)}%</span>
           <span className="font-mono text-[11px] text-temo-titanium">AGENTS {activeAgents}</span>
           <span className={cn('font-mono text-[11px] font-bold', isSleeping ? 'text-temo-titanium/50' : orbState === 'idle' ? 'text-temo-titanium' : 'text-temo-cyan')}>
             {missionStatus}

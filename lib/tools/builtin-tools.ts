@@ -11,6 +11,20 @@ import { n8n } from '@/services/n8n';
 import { logger } from '@/lib/utils/logger';
 import { memory } from '@/lib/memory/memoryService';
 import { registerOperatorTools } from './operator-tools';
+import { webSearchHandler } from './webSearch';
+
+// ---- Web Search (M6-02) — real handler, not a placeholder. Registered
+// separately from placeholderTools below since it has a genuine
+// implementation (Brave Search API) rather than a throw-until-wired stub. ----
+
+const webSearchTool: ToolDefinition = {
+  id: 'web.search', name: 'Web Search', description: 'Search the web for real-time information.',
+  category: 'web', permissions: ['web'],
+  requiredParams: [{ name: 'query', type: 'string', description: 'Search query', required: true }],
+  optionalParams: [{ name: 'maxResults', type: 'number', description: 'Max results', required: false }],
+  responseSchema: { type: 'array', fields: { title: 'string', url: 'string', snippet: 'string' } },
+  status: 'active', version: '1.0.0', supportedAgents: ['atlas', 'echo', 'nova', 'luna', 'flow', 'temo'],
+};
 
 // ---- n8n Tools ----
 
@@ -315,16 +329,6 @@ const placeholderTools: { def: ToolDefinition }[] = [
   },
   {
     def: {
-      id: 'web.search', name: 'Web Search', description: 'Search the web for real-time information.',
-      category: 'web', permissions: ['web'],
-      requiredParams: [{ name: 'query', type: 'string', description: 'Search query', required: true }],
-      optionalParams: [{ name: 'maxResults', type: 'number', description: 'Max results', required: false }],
-      responseSchema: { type: 'array', fields: { title: 'string', url: 'string' } },
-      status: 'beta', version: '0.1.0', supportedAgents: ['atlas', 'echo', 'nova', 'luna', 'flow', 'temo'],
-    },
-  },
-  {
-    def: {
       id: 'voice.speak', name: 'Speak', description: 'Convert text to speech and play it.',
       category: 'voice', permissions: ['voice'],
       requiredParams: [{ name: 'text', type: 'string', description: 'Text to speak', required: true }],
@@ -362,6 +366,9 @@ export function registerBuiltinTools(): void {
 
   // Memory Engine tools
   registerMemoryTools();
+
+  // Web Search (M6-02) — real handler, registered ahead of placeholderTools.
+  toolRegistry.register(webSearchTool, webSearchHandler);
 
   // Internal Operator Mode tools (M1-09) — always registered (the registry
   // itself is not the security boundary), gated by assertInternalTenant()

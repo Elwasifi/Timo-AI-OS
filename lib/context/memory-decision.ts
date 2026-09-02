@@ -51,17 +51,37 @@ export async function decideMemory(
     const classification = classifyMemory(input);
     const cleanedStatement = cleanRememberStatement(input);
 
+    // M6-01: this used to hardcode `wasStored: true` and return the
+    // success confirmation message unconditionally, even when nothing was
+    // actually persisted — the exact fake-success pattern this project has
+    // hit before (M1-04, M4-01, M4-02, M5-02). Two layers of this:
+    // (1) both storage paths could throw and be silently swallowed, and
+    // (2) knowledge.store() itself is deliberately resilient — it catches
+    // its own per-fact and semantic-only failures internally (non-fatal by
+    // design, so one bad fact doesn't kill the others) — so it can resolve
+    // successfully having stored *nothing at all* (confirmed live: a
+    // malformed tenantId caused every internal write to fail, and
+    // knowledge.store() still returned normally). A non-throwing call is
+    // NOT the same as a real write — has to check what actually landed.
+    let stored = false;
     try {
       // Delegate to Knowledge Engine — it extracts structured facts and
       // stores both structured + semantic in one call.
-      await knowledge.store({
+      const result = await knowledge.store({
         text: cleanedStatement,
         source: 'user',
         agent: agentId,
         tenantId,
       });
+      stored = result.facts.length > 0 || result.conflicts.length > 0 || result.semanticMemoryId !== null;
     } catch {
-      // Knowledge Engine failed — fall back to direct semantic store
+      // Knowledge Engine call itself threw — fall through below.
+    }
+
+    if (!stored) {
+      // Either the Knowledge Engine call threw, or it resolved without
+      // actually persisting anything — try the direct semantic store as a
+      // last resort before reporting an honest failure.
       try {
         await memory.store({
           type: classification.type,
@@ -73,10 +93,13 @@ export async function decideMemory(
           agent: agentId,
           tenantId,
         });
+        stored = true;
       } catch {
-        // Storage failed — still return confirmation so user knows we tried
+        // Both storage paths failed — reported honestly below, not swallowed.
       }
     }
+
+    const failureMessage = "I tried to remember that, but storage failed on my end — it wasn't actually saved. Please try again in a moment.";
 
     return {
       shouldUseMemory: true,
@@ -86,11 +109,11 @@ export async function decideMemory(
       timelineEvents: [],
       ragContext: null,
       confidence: 0.95,
-      directAnswer: classification.confirmationMessage,
+      directAnswer: stored ? classification.confirmationMessage : failureMessage,
       fullyAnswered: true,
-      wasStored: true,
+      wasStored: stored,
       classification,
-      humanReadableAnswer: classification.confirmationMessage,
+      humanReadableAnswer: stored ? classification.confirmationMessage : failureMessage,
     };
   }
 

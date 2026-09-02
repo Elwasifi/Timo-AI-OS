@@ -8,6 +8,7 @@ import {
   loadBusinessUnitsWithDepartments,
 } from '@/lib/agents/agentRegistryService';
 import { getRecentTasksByManager } from '@/lib/swarm/missionService';
+import { getCurrentActiveMission } from '@/lib/dashboard/dashboardService';
 import type { MissionTask } from '@/lib/swarm/types';
 import type { BusinessUnitWithDepartments } from '@/lib/agents/types';
 import {
@@ -19,6 +20,8 @@ import {
   type Tone,
 } from '@/lib/agents/frontendBridge';
 import { Holo, VoiceAura, Node } from './holo';
+import { usePolled } from '@/lib/hooks/usePolled';
+import { useSystemStore, startSystemHealthPolling } from '@/stores/systemStore';
 
 type Band = {
   id: string;
@@ -306,7 +309,6 @@ export function OrgChart() {
   const [units, setUnits] = useState<BusinessUnitWithDepartments[]>([]);
   const [selected, setSelected] = useState<AgentUI | null>(null);
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [activeManager, setActiveManager] = useState<string>('');
 
   useEffect(() => {
     loadAgents().then((records) => {
@@ -314,9 +316,43 @@ export function OrgChart() {
         .filter((r) => r.level === 'manager' && r.isActive)
         .map((r) => recordToUI(r, records));
       setAgents(managers);
-      if (managers.length > 0) setActiveManager(managers[0].id);
     });
     loadBusinessUnitsWithDepartments().then(setUnits);
+  }, []);
+
+  // M6-05: replaces the old setInterval that cycled `activeManager` through
+  // every manager every 3.2s regardless of what was actually happening —
+  // a fake "who's active" indicator. Polls the real current mission's
+  // tasks (same data source command-widgets.tsx's ActiveTasksWidget uses,
+  // M4-06's pattern) and derives real active managers/workers from tasks
+  // that are genuinely status:'running' right now, plus a real
+  // manager→worker delegation line for any running task with both
+  // assigned. 5s — mission task status changes faster than the 15s default
+  // dashboard-widget cadence.
+  const activeMission = usePolled(() => getCurrentActiveMission(), 5000);
+  const runningTasks = useMemo(
+    () => activeMission?.tasks.filter((t) => t.status === 'running') ?? [],
+    [activeMission],
+  );
+  const activeManagerIds = useMemo(
+    () => new Set(runningTasks.map((t) => t.assignedManager).filter((id): id is string => !!id)),
+    [runningTasks],
+  );
+  const activeWorkerIds = useMemo(
+    () => new Set(runningTasks.map((t) => t.assignedWorker).filter((id): id is string => !!id)),
+    [runningTasks],
+  );
+  const delegations = useMemo(
+    () =>
+      runningTasks
+        .filter((t) => t.assignedManager && t.assignedWorker)
+        .map((t) => ({ taskId: t.id, managerId: t.assignedManager!, workerId: t.assignedWorker!, title: t.title })),
+    [runningTasks],
+  );
+
+  const systemHealth = useSystemStore((s) => s.health);
+  useEffect(() => {
+    startSystemHealthPolling();
   }, []);
 
   // Group managers into their Corporate Office / Operating Company bands.
@@ -360,18 +396,6 @@ export function OrgChart() {
     bands.forEach((b) => b.agents.forEach((a) => m.set(a.id, b)));
     return m;
   }, [bands]);
-
-  useEffect(() => {
-    if (agents.length === 0) return;
-    const t = setInterval(() => {
-      setActiveManager((prev) => {
-        const idx = agents.findIndex((a) => a.id === prev);
-        if (idx < 0) return agents[0].id;
-        return agents[(idx + 1) % agents.length].id;
-      });
-    }, 3200);
-    return () => clearInterval(t);
-  }, [agents]);
 
   // ---- Radial geometry: computed once from data, no DOM measurement ----
   const { corporateNodes, operatingNodes, workerNodes, edges } = useMemo(() => {
@@ -452,11 +476,28 @@ export function OrgChart() {
             <LayoutDashboard size={14} />
             Main Dashboard
           </Link>
+          {/* M6-05: this used to be a hardcoded "99.98%" — no real
+              synchronization metric exists to back that number. Replaced
+              with the real overall system status (M6-04). */}
           <div className="org-live">
             <i />
-            SYSTEM SYNCHRONIZED <b>99.98%</b>
+            SYSTEM {(systemHealth?.overall ?? 'checking').toUpperCase()}
           </div>
         </div>
+        {delegations.length > 0 && (
+          <div className="org-delegation-ticker">
+            {delegations.map((d) => {
+              const manager = agents.find((a) => a.id === d.managerId);
+              const worker = agents.flatMap((a) => a.children).find((c) => c.id === d.workerId);
+              if (!manager || !worker) return null;
+              return (
+                <span key={d.taskId} className="org-delegation-line">
+                  <b>{manager.name}</b> &rarr; <b>{worker.title}</b>: {d.title}
+                </span>
+              );
+            })}
+          </div>
+        )}
       </header>
 
       {agents.length === 0 ? (
@@ -540,7 +581,7 @@ export function OrgChart() {
                       title={n.agent.role}
                       company={n.companyName}
                       status={n.agent.status}
-                      active={activeManager === n.agent.id}
+                      active={activeManagerIds.has(n.agent.id)}
                     />
                   </button>
                   {hoveredId === n.agent.id && (
@@ -569,7 +610,7 @@ export function OrgChart() {
                       title={n.agent.role}
                       company={n.companyName}
                       status={n.agent.status}
-                      active={activeManager === n.agent.id}
+                      active={activeManagerIds.has(n.agent.id)}
                     />
                   </button>
                   {hoveredId === n.agent.id && (
@@ -581,7 +622,7 @@ export function OrgChart() {
               {/* Ring 3 — workers, smallest, clustered around their manager's angle */}
               {workerNodes.map((w) => (
                 <div key={`${w.parentId}-${w.worker.title}`} className="radial-node radial-node-worker" style={{ left: `${(w.x / VB) * 100}%`, top: `${(w.y / VB) * 100}%` }}>
-                  <Node level="sub" image={w.worker.image} fallback={w.worker.title[0]} tone={w.tone} size="sm" name={w.worker.title} title="" status={w.worker.status} />
+                  <Node level="sub" image={w.worker.image} fallback={w.worker.title[0]} tone={w.tone} size="sm" name={w.worker.title} title="" status={w.worker.status} active={activeWorkerIds.has(w.worker.id)} />
                 </div>
               ))}
             </div>

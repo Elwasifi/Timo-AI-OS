@@ -14,6 +14,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
+import { usePolled } from '@/lib/hooks/usePolled';
 import { Activity, Brain, ListChecks, Radio, Workflow as WorkflowIcon } from 'lucide-react';
 import { Panel } from './command-deck';
 import { useDashboardStore } from '@/stores/dashboardStore';
@@ -44,31 +45,6 @@ function timeAgo(iso: string): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
-}
-
-// M4-06: every widget below used to fetch exactly once on mount with no
-// revalidation — the confirmed cause of "needs a manual refresh every
-// minute for things to work" (Operational Integrity Audit, section 7).
-// Shared polling hook so each widget stays live without its own timer
-// bookkeeping; mirrors right-sidebar.tsx's existing setInterval pattern.
-const WIDGET_POLL_MS = 15_000;
-function usePolled<T>(fetcher: () => Promise<T>, intervalMs = WIDGET_POLL_MS): T | null {
-  const [data, setData] = useState<T | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      fetcher().then((d) => {
-        if (!cancelled) setData(d);
-      });
-    };
-    load();
-    const t = setInterval(load, intervalMs);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-  }, [fetcher, intervalMs]);
-  return data;
 }
 
 function GroupLabel({ children }: { children: ReactNode }) {

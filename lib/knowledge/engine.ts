@@ -145,6 +145,13 @@ export const knowledge = {
           importance: 'medium',
           source: input.source ?? 'user',
           agent: input.agent,
+          // M6-01 follow-up: this call never threaded tenantId at all —
+          // unlike the sibling semantic.store() above (facts.length > 0
+          // branch, fixed in M5-13), every "remember" statement that
+          // doesn't match the narrow structured-fact regex set silently
+          // fell back to the internal tenant regardless of the real
+          // caller's tenant. Found live while verifying M6-01's fix.
+          tenantId,
         });
         semanticMemoryId = mem.id;
       } catch {

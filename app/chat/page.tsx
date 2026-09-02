@@ -6,7 +6,6 @@ import {
   Send,
   Sparkles,
   Mic,
-  Paperclip,
   Plus,
   Copy,
   Check,
@@ -88,6 +87,12 @@ export default function ChatPage() {
 
   const currentTimeline = useOrchestrationStore((s) => s.currentTimeline);
   const isRouting = useOrchestrationStore((s) => s.isRouting);
+  // M6-07: activeWorkerId already existed and already updated live the
+  // instant a manager delegates (crewCoordinator's onWorkerActive callback,
+  // wired above) — nothing in the UI ever rendered it. Real-time, no
+  // polling latency, unlike M6-05's G-Brain data (5s poll) — this is the
+  // faster, session-local complement to that, not a replacement for it.
+  const activeWorkerId = useOrchestrationStore((s) => s.activeWorkerId);
   const setRouting = useOrchestrationStore((s) => s.setRouting);
   const setRoutingInProgress = useOrchestrationStore((s) => s.setRoutingInProgress);
   const clearTimeline = useOrchestrationStore((s) => s.clearTimeline);
@@ -268,6 +273,24 @@ export default function ChatPage() {
     });
   }, []);
 
+  // M6-08: "Regenerate" had an empty onClick — did nothing when clicked.
+  // Removes the given assistant response and its preceding user turn, then
+  // resubmits that same user text through the real pipeline. (The user
+  // bubble reappears with a fresh timestamp rather than staying in place —
+  // send() is the only entry point into the real pipeline and always
+  // appends a new user message; duplicating its internals just to avoid a
+  // timestamp change wasn't worth the risk this late in a large session.)
+  const regenerate = (assistantMessageId: string) => {
+    const idx = messages.findIndex((msg) => msg.id === assistantMessageId);
+    if (idx < 0) return;
+    let userIdx = idx - 1;
+    while (userIdx >= 0 && messages[userIdx].role !== 'user') userIdx -= 1;
+    if (userIdx < 0) return;
+    const userText = messages[userIdx].content;
+    setMessages((m) => m.slice(0, userIdx));
+    void send(userText);
+  };
+
   const send = async (text: string) => {
     if (!text.trim() || isStreaming || isRouting) return;
 
@@ -292,8 +315,14 @@ export default function ChatPage() {
       }
     }
 
-    // Clear previous timeline and start routing
+    // Clear previous timeline and start routing.
+    // M6-07: activeWorkerId was never reset between requests anywhere in
+    // this flow — found while wiring it into the UI for the first time.
+    // Without this, a stale worker id from a PREVIOUS mission's delegation
+    // would still be set (and now visibly shown) during a brand new
+    // request that never delegates to any worker at all.
     clearTimeline();
+    useOrchestrationStore.getState().setActiveWorker(null);
     setRoutingInProgress(true);
 
     // Emit Thinking event to G-Brain
@@ -355,20 +384,20 @@ export default function ChatPage() {
         stream: true,
         tenantId: useAuthStore.getState().currentTenantId ?? '00000000-0000-0000-0000-000000000001',
         isSimulation: simulationMode,
-        // M3-02: the mission pipeline has no other progress signal until it
+        // M6-03: the mission pipeline has no other progress signal until it
         // fully completes (unlike the simple pipeline, which already
-        // streams live timeline events) — post an immediate, real
-        // acknowledgment message as soon as we know a mission was picked,
-        // instead of leaving the user looking at just a typing indicator
-        // for however long the mission takes.
-        onDecision: (pipeline) => {
-          if (pipeline !== 'mission') return;
+        // streams live timeline events) — onAcknowledgment posts a real,
+        // request-specific acknowledgment (generated fast, via Groq) as
+        // soon as it resolves, instead of leaving the user looking at just
+        // a typing indicator for however long the mission takes. Replaces
+        // M3-02's single hardcoded string with real per-request text.
+        onAcknowledgment: (ackText) => {
           setMessages((m) => [
             ...m,
             {
               id: `ack${Date.now()}`,
               role: 'assistant',
-              content: "Got it — this needs a full mission, so I'm breaking it down and getting to work. I'll follow up here with the result.",
+              content: ackText,
               agentId: 'temo',
               agentName: 'Temo',
               agentColor: '#00E5FF',
@@ -581,6 +610,7 @@ export default function ChatPage() {
                   message={m}
                   agents={agents}
                   onSpeak={voiceManager.speak.bind(voiceManager)}
+                  onRegenerate={() => regenerate(m.id)}
                   isMuted={isMuted}
                 />
               ))}
@@ -588,6 +618,29 @@ export default function ChatPage() {
             <div ref={bottomRef} />
           </div>
         </div>
+
+        {/* M6-07: activeWorkerId already updates live the instant a manager
+            delegates — this is the first UI surface for it. Shown only
+            alongside the live timeline (the same "something is actively
+            happening" window), not as a standalone persistent element. */}
+        <AnimatePresence>
+          {currentTimeline.length > 0 && activeWorkerId && (
+            <motion.div
+              initial={{ opacity: 0, y: -4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground"
+            >
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+              <span>
+                <span className="font-medium text-foreground">
+                  {agents.find((a) => a.id === activeWorkerId)?.name ?? activeWorkerId}
+                </span>{' '}
+                is working on this right now
+              </span>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Live timeline (shows during routing) */}
         <AnimatePresence>
@@ -657,11 +710,13 @@ const MessageBubble = memo(function MessageBubble({
   message,
   agents,
   onSpeak,
+  onRegenerate,
   isMuted,
 }: {
   message: Message;
   agents: { id: string; name: string; color: string; icon: string; avatarUrl?: string | null }[];
   onSpeak: (text: string) => void;
+  onRegenerate: () => void;
   isMuted: boolean;
 }) {
   const isUser = message.role === 'user';
@@ -817,7 +872,7 @@ const MessageBubble = memo(function MessageBubble({
             {!isMuted && (
               <ActionButton icon={Volume2} label="Speak" onClick={() => onSpeak(message.content)} color={color} />
             )}
-            <ActionButton icon={RotateCcw} label="Regenerate" onClick={() => {}} color={color} />
+            <ActionButton icon={RotateCcw} label="Regenerate" onClick={onRegenerate} color={color} />
           </div>
         )}
       </div>

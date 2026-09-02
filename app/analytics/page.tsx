@@ -1,16 +1,29 @@
 'use client';
 
+import { useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { BarChart3, TrendingUp, TrendingDown, DollarSign, Zap, Clock } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
 import { StatCard, GlassPanel, SectionHeader } from '@/components/temo/primitives';
-import { useSystemStore } from '@/stores/systemStore';
+import { useSystemStore, startSystemHealthPolling } from '@/stores/systemStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
+
+const STATUS_COLOR: Record<string, string> = {
+  healthy: '#10B981',
+  degraded: '#EAB308',
+  down: '#EF4444',
+  unknown: '#94A3B8',
+};
 
 export default function AnalyticsPage() {
   const health = useSystemStore((s) => s.health);
   const agents = useDashboardStore((s) => s.agents);
   const workflows = useDashboardStore((s) => s.workflows);
+
+  // M6-04: real data, single shared poller (see systemStore.ts).
+  useEffect(() => {
+    startSystemHealthPolling();
+  }, []);
 
   const totalTasks = agents.reduce((sum, a) => sum + (a.memory?.conversationCount ?? 0), 0);
   const activeWorkflows = workflows.filter((w) => w.status === 'running').length;
@@ -41,7 +54,7 @@ export default function AnalyticsPage() {
 
         {/* Macro stats */}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <StatCard label="API Calls" value={health.apiCalls.toLocaleString()} icon={<Zap className="h-4 w-4" />} accentColor="#EAB308" index={0} trend={{ direction: 'up', value: '+12%' }} />
+          <StatCard label="API Calls" value={health ? health.apiCallsTotal.toLocaleString() : '—'} icon={<Zap className="h-4 w-4" />} accentColor="#EAB308" index={0} />
           <StatCard label="Total Tasks" value={totalTasks} icon={<Clock className="h-4 w-4" />} accentColor="#EAB308" index={1} trend={{ direction: 'up', value: '+8%' }} />
           <StatCard label="Active Workflows" value={activeWorkflows} icon={<TrendingUp className="h-4 w-4" />} accentColor="#10B981" index={2} />
           <StatCard label="Completed" value={completedWorkflows} icon={<TrendingDown className="h-4 w-4" />} accentColor="#94A3B8" index={3} />
@@ -50,37 +63,33 @@ export default function AnalyticsPage() {
         {/* Charts */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <div>
-            <SectionHeader title="CPU & Memory Utilization" icon={<BarChart3 className="h-4 w-4" />} accent="#00F3FF" />
+            {/* M6-04: this was a fake CPU/Memory/Network Math.random() walk
+                — no such metric exists to read in this serverless
+                architecture, so it's replaced with the real subsystem
+                health checks already built (but previously unwired) in
+                lib/dashboard/healthService.ts / /api/runtime/health. */}
+            <SectionHeader title="System Health Checks" icon={<BarChart3 className="h-4 w-4" />} accent="#00F3FF" />
             <GlassPanel className="p-6">
-              <div className="space-y-4">
-                <div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="font-mono text-xs text-temo-titanium">CPU</span>
-                    <span className="font-mono text-xs font-bold text-temo-cyan">{health.cpu}%</span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                    <motion.div className="h-full rounded-full bg-temo-cyan" initial={{ width: 0 }} animate={{ width: `${health.cpu}%` }} transition={{ duration: 0.8 }} style={{ boxShadow: '0 0 8px #00F3FF80' }} />
-                  </div>
+              {!health ? (
+                <div className="font-mono text-xs text-temo-titanium">Checking system health…</div>
+              ) : (
+                <div className="space-y-3">
+                  {health.checks.map((check) => (
+                    <div key={check.name} className="flex items-center justify-between" title={check.detail}>
+                      <span className="flex items-center gap-2 font-mono text-xs text-temo-titanium">
+                        <span
+                          className="h-1.5 w-1.5 rounded-full"
+                          style={{ backgroundColor: STATUS_COLOR[check.status], boxShadow: `0 0 4px ${STATUS_COLOR[check.status]}` }}
+                        />
+                        {check.name}
+                      </span>
+                      <span className="font-mono text-xs font-bold" style={{ color: STATUS_COLOR[check.status] }}>
+                        {check.status}{check.latencyMs != null ? ` · ${check.latencyMs}ms` : ''}
+                      </span>
+                    </div>
+                  ))}
                 </div>
-                <div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="font-mono text-xs text-temo-titanium">Memory</span>
-                    <span className="font-mono text-xs font-bold text-temo-purple">{health.memory}%</span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                    <motion.div className="h-full rounded-full bg-temo-purple" initial={{ width: 0 }} animate={{ width: `${health.memory}%` }} transition={{ duration: 0.8 }} style={{ boxShadow: '0 0 8px #8B5CF680' }} />
-                  </div>
-                </div>
-                <div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="font-mono text-xs text-temo-titanium">Network</span>
-                    <span className="font-mono text-xs font-bold text-temo-blue">{health.network}%</span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                    <motion.div className="h-full rounded-full bg-temo-blue" initial={{ width: 0 }} animate={{ width: `${health.network}%` }} transition={{ duration: 0.8 }} style={{ boxShadow: '0 0 8px #0088FF80' }} />
-                  </div>
-                </div>
-              </div>
+              )}
             </GlassPanel>
           </div>
 
