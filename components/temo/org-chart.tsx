@@ -8,7 +8,7 @@ import {
   loadBusinessUnitsWithDepartments,
 } from '@/lib/agents/agentRegistryService';
 import { getRecentTasksByManager } from '@/lib/swarm/missionService';
-import { getCurrentActiveMission } from '@/lib/dashboard/dashboardService';
+import { getCurrentActiveMission, type CurrentActiveMission } from '@/lib/dashboard/dashboardService';
 import type { MissionTask } from '@/lib/swarm/types';
 import type { BusinessUnitWithDepartments } from '@/lib/agents/types';
 import {
@@ -20,7 +20,7 @@ import {
   type Tone,
 } from '@/lib/agents/frontendBridge';
 import { Holo, VoiceAura, Node } from './holo';
-import { usePolled } from '@/lib/hooks/usePolled';
+import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { useSystemStore, startSystemHealthPolling } from '@/stores/systemStore';
 
 type Band = {
@@ -320,16 +320,37 @@ export function OrgChart() {
     loadBusinessUnitsWithDepartments().then(setUnits);
   }, []);
 
-  // M6-05: replaces the old setInterval that cycled `activeManager` through
-  // every manager every 3.2s regardless of what was actually happening —
-  // a fake "who's active" indicator. Polls the real current mission's
-  // tasks (same data source command-widgets.tsx's ActiveTasksWidget uses,
-  // M4-06's pattern) and derives real active managers/workers from tasks
-  // that are genuinely status:'running' right now, plus a real
+  // M6-05 replaced the old fake cycling indicator with the real current
+  // mission's tasks (same data source command-widgets.tsx's
+  // ActiveTasksWidget uses) — derives real active managers/workers from
+  // tasks genuinely status:'running' right now, plus a real
   // manager→worker delegation line for any running task with both
-  // assigned. 5s — mission task status changes faster than the 15s default
-  // dashboard-widget cadence.
-  const activeMission = usePolled(() => getCurrentActiveMission(), 5000);
+  // assigned. M7-02 replaces M6-05's fixed 5s poll with a Supabase
+  // Realtime subscription on missions/mission_tasks (unfiltered by ID,
+  // since "which mission is currently active" can itself change) —
+  // refetches the same getCurrentActiveMission() the moment a row genuinely
+  // changes instead of on a fixed cadence.
+  const [activeMission, setActiveMission] = useState<CurrentActiveMission | null>(null);
+  const fetchActiveMission = useCallback(() => {
+    getCurrentActiveMission().then(setActiveMission);
+  }, []);
+  useEffect(() => {
+    fetchActiveMission();
+  }, [fetchActiveMission]);
+  useRealtimeRefetch(
+    [{ table: 'missions' }, { table: 'mission_tasks' }],
+    fetchActiveMission,
+  );
+  // Safety-net poll, deliberately slow (was 5s under M6-05). Realtime needs
+  // missions/mission_tasks added to the supabase_realtime publication (see
+  // 20260903120000_enable_realtime_mission_tables.sql) — until that
+  // migration is reviewed and applied live, this is what keeps this panel
+  // from silently freezing again; afterward it's an ordinary reconciliation
+  // fallback for a dropped Realtime connection.
+  useEffect(() => {
+    const interval = setInterval(fetchActiveMission, 30000);
+    return () => clearInterval(interval);
+  }, [fetchActiveMission]);
   const runningTasks = useMemo(
     () => activeMission?.tasks.filter((t) => t.status === 'running') ?? [],
     [activeMission],

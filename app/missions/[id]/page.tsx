@@ -7,6 +7,7 @@ import { AppShell } from '@/components/temo/app-shell';
 import { Button } from '@/components/ui/button';
 import { GlassPanel, ProgressBar, LoadingSpinner, EmptyState, SectionHeader } from '@/components/temo/primitives';
 import { authFetch } from '@/lib/api/authFetch';
+import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import type { Mission, MissionObjective, MissionTask, TimelineEntry, Lesson } from '@/lib/swarm/types';
@@ -76,25 +77,46 @@ export default function MissionDetailPage() {
     load();
   }, [load]);
 
-  // M7-06: this page fetched mission data exactly once on mount and never
-  // again — no polling, no live subscription, nothing. Objectives/Tasks/
-  // Timeline all rendered from that single snapshot, so a mission that
-  // kept executing (or completed) after the page loaded left the panel
-  // frozen at whatever status existed at mount time until a manual
-  // browser refresh — the root cause of the Objectives panel getting
-  // stuck on PENDING. The backend has no caching anywhere in this path
-  // (/api/missions/[id] is force-dynamic; missionService.ts's
-  // getFullMission() queries Supabase directly with no cache layer) —
-  // confirmed via trace before writing this fix. Polls the same
-  // known-correct fetch this page already uses, stopping automatically
-  // once the mission reaches a terminal status so it doesn't keep polling
-  // a finished mission forever.
+  // M7-06 fixed the immediate symptom (this page never refetched after
+  // mount) with a 3s poll. M7-02 replaces that fixed-interval poll with a
+  // real Supabase Realtime subscription on this mission's own rows across
+  // missions/mission_tasks/mission_objectives/mission_timeline — the same
+  // known-correct load(true) refetch still does the actual read (via
+  // /api/missions/[id], which already returns all four joined), this just
+  // decides *when* to call it: the moment a row genuinely changes, instead
+  // of every 3 seconds regardless of whether anything did. Still stops
+  // subscribing once the mission reaches a terminal status.
+  const missionId = params.id;
+  const status = data?.mission?.status;
+  const isLive = !!status && NON_TERMINAL_MISSION_STATUSES.includes(status);
+  useRealtimeRefetch(
+    isLive && missionId
+      ? [
+          { table: 'missions', filter: `id=eq.${missionId}` },
+          { table: 'mission_tasks', filter: `mission_id=eq.${missionId}` },
+          { table: 'mission_objectives', filter: `mission_id=eq.${missionId}` },
+          { table: 'mission_timeline', filter: `mission_id=eq.${missionId}` },
+        ]
+      : [],
+    () => load(true),
+  );
+
+  // Safety-net poll, deliberately slow (was 3s under M7-06; the fast path
+  // is now the Realtime subscription above). Realtime requires
+  // missions/mission_tasks/mission_objectives/mission_timeline to be added
+  // to the supabase_realtime publication (see this ticket's migration,
+  // 20260903120000_enable_realtime_mission_tables.sql) — until that
+  // migration is reviewed and applied to the live database, this is the
+  // only thing that would refetch this page. Kept intentionally (not
+  // removed) so this page degrades to "slow poll" rather than silently
+  // regressing to M7-06's original bug (frozen forever) in the window
+  // before/if that migration lands, and as an ordinary reconciliation
+  // fallback afterward for the rare dropped/failed Realtime connection.
   useEffect(() => {
-    const status = data?.mission?.status;
-    if (!status || !NON_TERMINAL_MISSION_STATUSES.includes(status)) return;
-    const interval = setInterval(() => load(true), 3000);
+    if (!isLive) return;
+    const interval = setInterval(() => load(true), 30000);
     return () => clearInterval(interval);
-  }, [data?.mission?.status, load]);
+  }, [isLive, load]);
 
   return (
     <AppShell>
