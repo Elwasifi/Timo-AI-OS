@@ -1933,6 +1933,16 @@ Two designs were considered:
 
 **Live verification performed** (not typecheck-only, real before/after numbers): measured the real network waterfall (`/rest/v1/mission_tasks` requests, wall time from first request to last response) on the actual Main Dashboard against the real current mission count. **Before** (sequential, `git stash`-reverted temporarily to measure the true baseline): 63 requests, 5.67s wall time. **After** (parallel): 72 requests, 1.12s wall time — roughly a 5x reduction, consistent with the change (request count differs slightly between the two runs because mission/task counts are live, real data that changes between test runs, not a measurement artifact). `npm run typecheck` clean after restoring the fix.
 
+## M7-07b — REMAINING plain fetch() CALLS AGAINST AUTH-REQUIRED ROUTES (2026-09-02)
+
+**Ticket**: follow-up to M7-07 (top-nav "UNKNOWN" health badge). Branch: `milestone-7-core-engine`.
+
+**Root cause**: same class as M7-07 — `lib/auth/apiAuth.ts`'s `requireUser()` reads the session only from the `Authorization` header, never cookies, so any client-side `fetch()` against an auth-gated route 401s regardless of a real signed-in session. 5 call sites still used plain `fetch()`: `components/crew/temo-core-ecosystem.tsx` (`/api/stats/memory`, `/api/stats/knowledge`, `/api/stats/tools`, `/api/missions/summary`) and `app/validation/page.tsx` (`/api/validation/run`). All 5 switched to `authFetch()` (`lib/api/authFetch.ts`).
+
+**Live verification**: 401 without a token, 200 with a real Bearer token, for all 5 routes; `npm run typecheck` clean, `npm run lint` no new issues, `npm test` 10/10 passing.
+
+**Known cleanup item logged, not fixed in this pass**: `components/crew/temo-core-ecosystem.tsx`'s `TemoCoreEcosystem` component has **zero import sites anywhere in the codebase** — confirmed via repo-wide search for both `TemoCoreEcosystem` and the file path. It is currently dead/unrendered code (this is why its fetch calls couldn't be live-verified via UI click-through, only via direct HTTP calls against the routes it uses). Left in place per this ticket's narrow scope; a future cleanup pass should either wire it into a real page or remove it.
+
 ## ARCHITECTURE DOCUMENT VERSION
 Version: 3.25
 Date: 2026-08-27
