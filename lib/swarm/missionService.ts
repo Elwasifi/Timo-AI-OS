@@ -75,6 +75,8 @@ interface TaskRow {
   updated_at: string;
   started_at: string | null;
   completed_at: string | null;
+  max_loop_steps: number | null;
+  loop_state: Record<string, unknown> | null;
 }
 
 interface TimelineRow {
@@ -155,6 +157,8 @@ function mapTask(row: TaskRow): MissionTask {
     updatedAt: row.updated_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+    maxLoopSteps: row.max_loop_steps,
+    loopState: row.loop_state as unknown as MissionTask['loopState'],
   };
 }
 
@@ -497,6 +501,8 @@ export async function updateTask(
     executionLog?: ExecutionLogEntry[];
     startedAt?: string;
     completedAt?: string;
+    /** M7-01: pass null to clear an in-progress checkpoint (loop finished or definitively failed). */
+    loopState?: MissionTask['loopState'];
   },
 ): Promise<MissionTask | null> {
   const update: Record<string, unknown> = {};
@@ -509,6 +515,7 @@ export async function updateTask(
   if (patch.executionLog !== undefined) update.execution_log = patch.executionLog;
   if (patch.startedAt !== undefined) update.started_at = patch.startedAt;
   if (patch.completedAt !== undefined) update.completed_at = patch.completedAt;
+  if (patch.loopState !== undefined) update.loop_state = patch.loopState;
 
   const { data, error } = await supabase
     .from('mission_tasks')

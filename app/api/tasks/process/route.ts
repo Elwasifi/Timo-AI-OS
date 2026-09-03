@@ -134,5 +134,7 @@ function mapClaimedTask(row: Record<string, unknown>): MissionTask {
     updatedAt: row.updated_at as string,
     startedAt: (row.started_at as string) ?? null,
     completedAt: (row.completed_at as string) ?? null,
+    maxLoopSteps: (row.max_loop_steps as number) ?? null,
+    loopState: (row.loop_state as MissionTask['loopState']) ?? null,
   };
 }

@@ -128,6 +128,15 @@ export interface MissionTask {
   updatedAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  /** M7-01: per-task override for the agent loop's max reasoning steps; null = use the code default. */
+  maxLoopSteps: number | null;
+  /** M7-01: in-progress agent-loop checkpoint, non-null only while a loop is genuinely mid-flight (interrupted, not finished/failed). */
+  loopState: AgentLoopState | null;
+}
+
+export interface AgentLoopState {
+  messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
+  stepsUsed: number;
 }
 
 export interface ExecutionLogEntry {

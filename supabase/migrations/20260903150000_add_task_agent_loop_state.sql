@@ -1,0 +1,33 @@
+-- M7-01: real agent loop with iteration limits + checkpointing.
+--
+-- Today executeTask() (lib/swarm/executionLayer.ts) makes exactly one
+-- chatWithFallback() call per task and returns — no multi-step reasoning,
+-- no tool-use loop, nothing to checkpoint (confirmed by repo-wide search:
+-- no "loop"/"iteration"/"checkpoint" concept exists anywhere in the
+-- execution path before this migration). This adds the two columns the
+-- new bounded think->act->observe loop (lib/swarm/agentLoop.ts) needs:
+--
+--   max_loop_steps: per-task override for how many reasoning steps one
+--   task's loop may take before it's treated as a failed attempt (falls
+--   back to a fixed default in code when null, same pattern as
+--   max_retries already uses via `task.maxRetries || 3` in
+--   executionLayer.ts).
+--
+--   loop_state: a checkpoint of the loop's in-progress conversation
+--   (messages so far + steps used), written after every completed step
+--   and cleared on both success and definitive failure (max steps
+--   exhausted). Only left populated if the process is interrupted
+--   mid-loop (crash, timeout, tab closed) — exactly the case the existing
+--   stale-task recovery (claim_ready_tasks(),
+--   20260822100000_fix_stale_running_task_recovery.sql) resets back to
+--   'ready' for re-claiming. When executeTask() picks the task back up,
+--   it resumes the reasoning from this saved state instead of starting
+--   over from message 1.
+--
+-- Additive only, nullable, no default data migration needed (existing
+-- rows simply have loop_state = NULL, meaning "no in-progress loop to
+-- resume from" — the correct behavior for every task that predates this
+-- column).
+
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS max_loop_steps integer;
+ALTER TABLE mission_tasks ADD COLUMN IF NOT EXISTS loop_state jsonb;

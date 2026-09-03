@@ -25,8 +25,8 @@
 //   whose output becomes the task's final result. No worker match falls
 //   back to direct manager execution, unchanged.
 
-import { chatWithFallback, type ChatMessage } from '@/lib/ai/ai-provider';
 import { route, classifyTask } from '@/lib/ai/router';
+import { runAgentLoop } from './agentLoop';
 import { loadSettings } from '@/lib/settings/settings-service';
 import { getAgentById } from '@/lib/agents/agentRegistryService';
 import { executeWorker, managerReview, type WorkerTask } from '@/lib/crew/manager-delegation';
@@ -325,6 +325,7 @@ export async function executeTask(
         // the worker turn, followed by a real manager review whose output
         // becomes the task's final result. Otherwise, fall back to direct
         // manager LLM execution (the existing behavior, unchanged).
+        let loopSteps: ExecutionStep[] = [];
         const llmStep = await trackStep(
           workerId ? 'Worker Execution' : 'LLM Execution',
           async () => {
@@ -336,13 +337,15 @@ export async function executeTask(
               // original single-call budget) rather than sharing one combined
               // budget here — two sequential LLM calls under one timeoutMs
               // would time out far more often than either call alone did.
+              // M7-01 scope note: the agent loop below only covers direct
+              // (non-delegated) manager execution — looping the
+              // worker/review pair in manager-delegation.ts is a separate,
+              // larger follow-up (that module is also shared with the live
+              // chat pipeline, a bigger blast radius than this ticket).
               return executeDelegatedTask(mission, task, managerId, managerName, managerRecord, workerRecord, ctxResult.value, timeoutMs);
             }
 
             const systemPrompt = ctxResult.value.systemPrompt;
-            const messages: ChatMessage[] = [
-              { role: 'user', content: ctxResult.value.userPrompt },
-            ];
 
             // Dynamic Model Router: classify this task and let the router pick
             // provider+model instead of always using whatever app_settings has
@@ -369,9 +372,15 @@ export async function executeTask(
                 : `Model: ${ctxResult.value.agent.model}`,
             });
 
-            const result = await withTimeout(
-              chatWithFallback(messages, {
-                systemPrompt,
+            // M7-01: bounded think->act->observe->repeat loop, replacing
+            // what used to be exactly one chatWithFallback() call here.
+            // Wrapped in the same withTimeout/timeoutMs this single call
+            // used before — now a multi-step budget rather than a
+            // single-call one, so a task expected to need several tool
+            // steps should raise its task_timeout_ms accordingly (existing
+            // per-task column, no new config needed).
+            const loopResult = await withTimeout(
+              runAgentLoop(task, mission, managerId, systemPrompt, ctxResult.value.userPrompt, {
                 temperature: settings.temperature,
                 maxTokens: settings.max_tokens,
                 candidates: decision.candidates,
@@ -388,10 +397,12 @@ export async function executeTask(
               timeoutMs,
             );
 
-            return result.content;
+            loopSteps = loopResult.steps;
+            return loopResult.output;
           },
         );
         steps.push(llmStep.step);
+        steps.push(...loopSteps);
         output = llmStep.value;
       }
 
