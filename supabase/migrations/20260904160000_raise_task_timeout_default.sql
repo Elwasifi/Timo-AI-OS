@@ -1,0 +1,30 @@
+-- M7-01 follow-up: raise mission_tasks.task_timeout_ms's default from
+-- 30000ms to 90000ms.
+--
+-- This session's own live E2E test of the new agent loop
+-- (lib/swarm/agentLoop.ts, M7-01) empirically hit the 30s default twice:
+-- a real multi-step task, resumed from a mid-flight checkpoint with
+-- several prior ACTION/OBSERVATION steps already in its message history,
+-- failed with "Task timed out after 30000ms" on 2 of its 4 whole-task
+-- retry attempts (real timestamps in the mission's execution_log). The
+-- loop itself was working correctly — it simply needed more wall-clock
+-- time per attempt than a single one-shot LLM call ever did before this
+-- ticket. 30000ms was a reasonable default for the old single-call
+-- execution model; it is not enough for a bounded multi-step reasoning
+-- loop (up to 8 steps by default, each step a full LLM round-trip plus a
+-- real tool execution).
+--
+-- Only changes the column DEFAULT — does not retroactively touch any
+-- existing row's stored task_timeout_ms value (existing tasks, whether
+-- terminal or still in flight, keep whatever value they already have;
+-- this only affects tasks created after this migration runs). Additive,
+-- idempotent (ALTER COLUMN ... SET DEFAULT is a plain metadata change,
+-- safe to re-run).
+--
+-- Kept in sync with the code-level fallback in
+-- lib/swarm/executionLayer.ts's executeTask() (`?? 90000`, previously
+-- `?? 30000`), used when a raw task row has no task_timeout_ms value at
+-- all (e.g. a row shape that predates the column, or claim_ready_tasks()
+-- returning a row before this migration's default backfills).
+
+ALTER TABLE mission_tasks ALTER COLUMN task_timeout_ms SET DEFAULT 90000;

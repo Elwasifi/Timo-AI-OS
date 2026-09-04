@@ -1943,6 +1943,22 @@ Two designs were considered:
 
 **Known cleanup item logged, not fixed in this pass**: `components/crew/temo-core-ecosystem.tsx`'s `TemoCoreEcosystem` component has **zero import sites anywhere in the codebase** — confirmed via repo-wide search for both `TemoCoreEcosystem` and the file path. It is currently dead/unrendered code (this is why its fetch calls couldn't be live-verified via UI click-through, only via direct HTTP calls against the routes it uses). Left in place per this ticket's narrow scope; a future cleanup pass should either wire it into a real page or remove it.
 
+## M7-01 — REAL AGENT LOOP WITH ITERATION LIMITS + CHECKPOINTING (2026-09-04)
+
+**Ticket**: `M7-01`. Branch: `milestone-7-core-engine`.
+
+**Greenfield finding (confirmed before implementing)**: no agent loop existed anywhere. `executeTask()` (`lib/swarm/executionLayer.ts`) made exactly one LLM call per task and returned. `maxRetries`/`task_timeout_ms` retry a whole failed attempt from scratch — nothing limited or checkpointed reasoning *within* one attempt, because there was no multi-step reasoning to limit.
+
+**What was built**: `lib/swarm/agentLoop.ts` — a bounded think→act→observe→repeat loop (`runAgentLoop`) for a task's direct (non-delegated) LLM execution, wired into `executeTask()`'s direct-manager branch only (delegated worker/review tasks via `lib/crew/manager-delegation.ts` are untouched — separate, larger follow-up given that module's shared blast radius with the live chat pipeline). Reuses the existing `toolExecutor.execute()` primitive via a prompted `ACTION:`/`FINAL:` text protocol rather than building provider-native function-calling. Checkpointing: `{messages, stepsUsed}` persisted to the new `mission_tasks.loop_state` (jsonb) after every completed step, cleared on both success and definitive failure (max steps exhausted); max-steps default 8, overridable per-task via new `max_loop_steps` (integer). Migration: `20260903150000_add_task_agent_loop_state.sql`.
+
+**Live E2E verification (real mission, real DB reads across dozens of polls, not typecheck-only)**:
+- Genuine multi-step reasoning confirmed: a real task self-corrected across 5 real ACTION/OBSERVATION steps (wrong `memory.store` enum values → corrected) before being interrupted (driving tab closed — missions execute synchronously in the triggering browser tab, a pre-existing constraint, not new to this ticket).
+- **Resume-from-checkpoint directly proven**: task reset to `ready` (preserving `loop_state`), re-claimed by the background queue processor — confirmed via direct DB reads that it resumed at `stepsUsed: 5` (not 0) with all 11 prior messages intact, then advanced to `stepsUsed: 6` with 13 messages. Not inferred — observed mid-transition.
+- **`loop_state` clears on both success and definitive failure**: confirmed for a 1-step success (`loopState: null` immediately after completion) and, from the resume run, for max-steps-exhausted failure too (`loopState: null` after the final "Agent loop exceeded max steps (8)").
+- **`task_timeout_ms` finding, empirically confirmed (not just extrapolated)**: the resumed task's outer whole-task retries hit the 30,000ms timeout twice before failing — real live proof that the pre-existing 30s default is too tight for genuinely multi-step tool-use tasks. See the `20260904160000_raise_task_timeout_default.sql` migration (below/same-day) for the fix.
+
+**Known limitation, tracked for M7-03 (unified tool execution framework)**: `agentLoop.ts`'s `ACTION_RE` regex is greedy and doesn't defend against a model emitting two `ACTION:` lines in one turn (against its own instructions) — live-observed once, causing a malformed-JSON parse failure that silently fell back to empty arguments for that step. The loop self-corrected via the resulting validation-error `OBSERVATION`, so it's a wasted step, not a hard failure — full detail and fix options in the code comment at `lib/swarm/agentLoop.ts`'s `ACTION_RE` definition.
+
 ## M7-02 — SUPABASE REALTIME REPLACING POLLING FOR G-BRAIN/OBJECTIVES/TIMELINE/TASK STATUS (2026-09-03)
 
 **Ticket**: `M7-02`. Branch: `milestone-7-core-engine`.

@@ -41,6 +41,21 @@ const DEFAULT_MAX_STEPS = 8;
 // may contain dots/dashes/underscores, args are a JSON object (possibly
 // empty/malformed — malformed args are handled as a failed tool call, not
 // a parse crash, since this is untrusted model output).
+//
+// KNOWN LIMITATION (found live during M7-01's own E2E test, tracked for
+// M7-03 — unified tool execution framework): the LOOP_PROTOCOL_INSTRUCTIONS
+// below tell the model to emit exactly one ACTION per turn, but nothing
+// enforces that. Live-observed: a real response contained two consecutive
+// "ACTION: tool(...)" lines in one turn. Because [\s\S]* is greedy, group 2
+// spanned from the first tool's opening paren all the way to the SECOND
+// tool's closing paren, producing a string that isn't valid JSON on its
+// own — JSON.parse() below then fails and silently falls back to `{}`,
+// so the first tool call ran with no arguments at all instead of the ones
+// the model actually intended. The loop still self-corrected via the
+// resulting validation-error OBSERVATION (confirmed live), so this isn't
+// currently a hard failure, just a wasted step — but it should be fixed
+// properly (bound the match to the first balanced `(...)`, or detect and
+// reject multi-ACTION responses with a clear error) as part of M7-03.
 const ACTION_RE = /ACTION:\s*([a-z0-9_.-]+)\s*\(([\s\S]*)\)\s*$/im;
 // Matches "FINAL: <answer text>" — everything after the marker to the end
 // of the response is the answer.

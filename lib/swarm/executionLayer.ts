@@ -199,7 +199,15 @@ export async function executeTask(
 
   let retries = 0;
   const maxRetries = task.maxRetries || 3;
-  const timeoutMs = (task as MissionTask & { task_timeout_ms?: number }).task_timeout_ms ?? 30000;
+  // M7-01 follow-up: raised from 30000 to 90000 after this session's own
+  // live E2E test empirically hit the 30s default twice on a genuinely
+  // multi-step agent-loop task (real timestamps: two of four whole-task
+  // retries failed with "Task timed out after 30000ms" mid-loop, not from
+  // a slow/broken call — the loop itself legitimately needed more wall
+  // time once resumed from a checkpoint with several prior steps already
+  // in context). Kept in sync with mission_tasks.task_timeout_ms's DB
+  // column default (see 20260904160000_raise_task_timeout_default.sql).
+  const timeoutMs = (task as MissionTask & { task_timeout_ms?: number }).task_timeout_ms ?? 90000;
 
   while (retries <= maxRetries) {
     try {
