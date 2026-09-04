@@ -1971,6 +1971,26 @@ Two designs were considered:
 
 **Live verification**: G-Brain and the mission detail page both load with zero console/page errors; the safety-net poll confirmed firing pre-migration (network tab, `/api/missions/[id]` requests at the expected cadence). Post-migration, real-mission live verification (Realtime events, not the safety-net poll, delivering the update) recorded separately once the migration was applied to the live database.
 
+## OPERATIONAL GAP — BACKGROUND TASK QUEUE HAS NO SCHEDULER (found during M7-01 live testing, 2026-09-04)
+
+**Not fixed in this pass — tracked here with real numbers, per explicit instruction not to leave this as a one-line chat mention.**
+
+**What's missing**: `/api/tasks/process` (`app/api/tasks/process/route.ts`) is the background task-queue processor — it atomically claims a batch of `'ready'` `mission_tasks` rows via `claim_ready_tasks()` (`FOR UPDATE SKIP LOCKED`) and executes each one through the same `executeTask()` the synchronous mission pipeline uses. Nothing calls this route on a schedule. It only ever runs when something POSTs to it manually (this session's M7-01 resume test did so directly, with a temporary `TASK_QUEUE_SECRET`). This means: **the M7-01 agent loop, and every other task, only executes for tasks reached via the synchronous in-browser-tab pipeline (a mission actively being watched in a live tab) — anything that falls through to the `'ready'` queue state sits there indefinitely.**
+
+**Real numbers, queried live on 2026-09-04**:
+- `mission_tasks` status distribution: 124 `completed`, **35 `ready`**, 34 `failed`, 13 `cancelled`, 4 `waiting`.
+- Oldest `ready` row: `2026-08-26 16:33:12 UTC` — **9 days old** as of this writing, never processed.
+- Newest `ready` row: `2026-09-04 12:24:02 UTC` (created during this session's own M7-01 testing).
+
+**The capability exists, nothing invokes it** — confirmed by direct query, not assumed:
+- `pg_cron` extension: installed, version `1.6.4`.
+- `pg_net` extension: installed, version `0.20.4`.
+- `cron.job` table: **empty** — zero scheduled jobs of any kind exist on this project.
+
+**Why it's still unscheduled (pre-existing, not new — see M3-08's original note)**: `pg_cron` + `pg_net` can only reach a stable HTTPS URL; this project's primary environment is a local dev server (`localhost:3000`), which Supabase's Postgres cannot call. The missing piece isn't `cron.schedule()` syntax — it's that there's no deployed, stable URL to schedule it against yet. Once the app is deployed somewhere with a real HTTPS endpoint, the fix is small: `cron.schedule('process-task-queue', '*/1 * * * *', $$ SELECT net.http_post(url := '<deployed-url>/api/tasks/process', headers := jsonb_build_object('x-queue-secret', '<TASK_QUEUE_SECRET>')) $$);` (or equivalent via an external scheduler hitting the same route, if `pg_cron`/`pg_net` egress is restricted on the hosting plan).
+
+**Consequence for M7-01 specifically**: the new checkpointing/resume mechanism is fully correct and live-verified (see the M7-01 section above), but it currently only gets exercised when a human (or this session's manual test) explicitly re-triggers a stuck task. In production-as-deployed-today, a task that gets interrupted mid-loop (the exact scenario checkpointing is for) will sit in `'running'` past its stale-recovery window and then `'ready'` forever, never actually resuming, until either a scheduler is wired up or someone calls the endpoint by hand.
+
 ## ARCHITECTURE DOCUMENT VERSION
 Version: 3.25
 Date: 2026-08-27
