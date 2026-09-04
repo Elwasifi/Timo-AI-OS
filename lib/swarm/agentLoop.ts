@@ -1,12 +1,14 @@
 // M7-01 — Real agent loop with iteration limits + checkpointing.
+// M7-03 — Unified tool execution framework: generalized off MissionTask/
+// Mission so the SAME loop mechanism can be reused by both mission tasks
+// and the chat pipeline, instead of chat having no multi-step fallback at
+// all. See the M7-03 section in docs/TEMO-ARCHITECTURE.md for the full
+// mechanism map that motivated this.
 //
-// Before this file, executeTask() (lib/swarm/executionLayer.ts) made
-// exactly one chatWithFallback() call per task and returned — no
-// multi-step reasoning, no tool-use loop. Confirmed via repo-wide search
-// before writing this: no "loop"/"iteration"/"checkpoint" concept existed
-// anywhere in the execution path. This adds a bounded
-// think -> act -> observe -> repeat loop for a single task's direct
-// (non-delegated) LLM execution.
+// Before M7-01, executeTask() (lib/swarm/executionLayer.ts) made exactly
+// one chatWithFallback() call per task and returned — no multi-step
+// reasoning, no tool-use loop. This file adds a bounded
+// think -> act -> observe -> repeat loop.
 //
 // Deliberately reuses the EXISTING tool-execution primitive
 // (toolExecutor.execute() — the same one lib/context/tool-decision.ts's
@@ -15,24 +17,25 @@
 // function-calling. chatWithFallback (lib/ai/ai-provider.ts) has never
 // supported a `tools` parameter for any of the providers it fans out to
 // — adding that across every provider is a materially larger, separate
-// piece of work than this ticket scopes, and this codebase's stated
+// piece of work than either ticket scopes, and this codebase's stated
 // principle is to extend existing working systems rather than build a
 // second execution mechanism alongside them.
 //
-// Scope note: this loop replaces the direct-manager LLM branch in
-// executeTask() only (no worker assigned). lib/crew/manager-delegation.ts
+// Scope note (still true after M7-03): lib/crew/manager-delegation.ts
 // (executeWorker/managerReview — used both by delegated mission tasks and
-// the live chat pipeline) is NOT touched here; looping those is a
-// separate, larger follow-up given the chat-path blast radius, flagged in
-// the M7-01 report rather than silently expanded into this ticket.
+// the live chat pipeline when a worker is assigned) is NOT touched here.
+// A delegated worker still has zero tool-calling capability. Confirmed a
+// deliberate, explicitly-scoped-out gap (not an oversight) — closing it
+// means touching the shared chat-pipeline file, a larger, separate
+// follow-up flagged in both the M7-01 and M7-03 reports rather than
+// silently expanded into either ticket.
 
 import { chatWithFallback, type ChatMessage, type ChatOptions } from '@/lib/ai/ai-provider';
 import { toolRegistry } from '@/lib/tools/registry';
 import { toolExecutor } from '@/lib/tools/executor';
 import { ensureBuiltinToolsRegistered } from '@/lib/tools/builtin-tools';
 import { permissionEngine } from '@/lib/tools/permissions';
-import { updateTask } from './missionService';
-import type { MissionTask, Mission, AgentLoopState } from './types';
+import type { AgentLoopState } from './types';
 import type { ExecutionStep } from './executionTypes';
 
 const DEFAULT_MAX_STEPS = 8;
@@ -42,21 +45,25 @@ const DEFAULT_MAX_STEPS = 8;
 // empty/malformed — malformed args are handled as a failed tool call, not
 // a parse crash, since this is untrusted model output).
 //
-// KNOWN LIMITATION (found live during M7-01's own E2E test, tracked for
-// M7-03 — unified tool execution framework): the LOOP_PROTOCOL_INSTRUCTIONS
-// below tell the model to emit exactly one ACTION per turn, but nothing
-// enforces that. Live-observed: a real response contained two consecutive
-// "ACTION: tool(...)" lines in one turn. Because [\s\S]* is greedy, group 2
-// spanned from the first tool's opening paren all the way to the SECOND
-// tool's closing paren, producing a string that isn't valid JSON on its
-// own — JSON.parse() below then fails and silently falls back to `{}`,
-// so the first tool call ran with no arguments at all instead of the ones
-// the model actually intended. The loop still self-corrected via the
-// resulting validation-error OBSERVATION (confirmed live), so this isn't
-// currently a hard failure, just a wasted step — but it should be fixed
-// properly (bound the match to the first balanced `(...)`, or detect and
-// reject multi-ACTION responses with a clear error) as part of M7-03.
-const ACTION_RE = /ACTION:\s*([a-z0-9_.-]+)\s*\(([\s\S]*)\)\s*$/im;
+// M7-03 fix (was a known limitation tracked from M7-01's own E2E test):
+// the LOOP_PROTOCOL_INSTRUCTIONS below tell the model to emit exactly one
+// ACTION per turn, formatted on a single line — but the previous version
+// of this regex used `[\s\S]*` for the args group, which spans newlines.
+// A real live response once contained two consecutive "ACTION: tool(...)"
+// lines in one turn; the greedy `[\s\S]*` spanned from the first tool's
+// opening paren all the way to the SECOND tool's closing paren, producing
+// a string that isn't valid JSON on its own, which silently fell back to
+// empty arguments for the first (intended) call. Using `.` instead of
+// `[\s\S]` keeps the args capture on a single line (JavaScript's `.`
+// never matches `\n` without the `s`/dotAll flag, which is intentionally
+// NOT set here) — for the same two-line input, this now correctly
+// isolates just the first line's arguments instead of spanning into the
+// second. Still relies on the model following the "single ACTION per
+// turn" instruction for anything AFTER the first — a second ACTION line
+// is simply never inspected, matching the protocol's "respond with
+// EXACTLY ONE" instruction rather than accepting or silently mangling
+// extras.
+const ACTION_RE = /ACTION:\s*([a-z0-9_.-]+)\s*\((.*)\)\s*$/im;
 // Matches "FINAL: <answer text>" — everything after the marker to the end
 // of the response is the answer.
 const FINAL_RE = /FINAL:\s*([\s\S]*)/im;
@@ -65,7 +72,7 @@ const LOOP_PROTOCOL_INSTRUCTIONS = `
 You may need more than one step to complete this task. On each turn, respond with EXACTLY ONE of:
 
 ACTION: tool.id({"argName": "value"})
-  — to call one of the tools listed below. Wait for its OBSERVATION before deciding your next step.
+  — to call one of the tools listed below. Put the entire call on one line. Wait for its OBSERVATION before deciding your next step.
 
 FINAL: <your complete answer>
   — once you have everything needed to answer. This ends the task.
@@ -91,9 +98,7 @@ function buildToolsCatalog(agentId: string): string {
 async function runToolStep(
   toolId: string,
   args: Record<string, unknown>,
-  agentId: string,
-  mission: Mission,
-  task: MissionTask,
+  ctx: AgentLoopContext,
 ): Promise<string> {
   ensureBuiltinToolsRegistered();
   const registered = toolRegistry.get(toolId);
@@ -102,14 +107,14 @@ async function runToolStep(
   }
 
   const result = await toolExecutor.execute({
-    id: `loop-${task.id}-${Date.now()}`,
+    id: `loop-${ctx.taskId ?? ctx.agentId}-${Date.now()}`,
     toolId,
-    agentId,
+    agentId: ctx.agentId,
     arguments: args,
-    tenantId: mission.tenantId,
-    isSimulation: mission.isSimulation,
-    missionId: mission.id,
-    taskId: task.id,
+    tenantId: ctx.tenantId,
+    isSimulation: ctx.isSimulation,
+    missionId: ctx.missionId,
+    taskId: ctx.taskId,
   });
 
   if (!result.ok) {
@@ -118,12 +123,24 @@ async function runToolStep(
   return typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
 }
 
-async function checkpoint(taskId: string, state: AgentLoopState): Promise<void> {
-  await updateTask(taskId, { loopState: state });
-}
-
-async function clearCheckpoint(taskId: string): Promise<void> {
-  await updateTask(taskId, { loopState: null });
+// M7-03: generalized off MissionTask/Mission — a mission task supplies
+// its real ids plus checkpoint persistence (onCheckpoint/onClearCheckpoint
+// wired to mission_tasks.loop_state by executionLayer.ts); the chat
+// pipeline supplies just the identity/attribution fields and leaves the
+// checkpoint callbacks unset (chat has nowhere to persist mid-conversation
+// loop state today — an honest limitation, not a silent gap: a chat-path
+// loop interrupted mid-flight simply cannot resume, same as chat's
+// existing behavior for any other interrupted request).
+export interface AgentLoopContext {
+  agentId: string;
+  tenantId?: string | null;
+  isSimulation?: boolean;
+  missionId?: string | null;
+  taskId?: string | null;
+  maxSteps?: number | null;
+  initialLoopState?: AgentLoopState | null;
+  onCheckpoint?: (state: AgentLoopState) => Promise<void>;
+  onClearCheckpoint?: () => Promise<void>;
 }
 
 export interface AgentLoopResult {
@@ -133,27 +150,27 @@ export interface AgentLoopResult {
 }
 
 export async function runAgentLoop(
-  task: MissionTask,
-  mission: Mission,
-  agentId: string,
   systemPrompt: string,
   userPrompt: string,
+  ctx: AgentLoopContext,
   chatOptions: Omit<ChatOptions, 'systemPrompt'>,
 ): Promise<AgentLoopResult> {
-  const maxSteps = task.maxLoopSteps || DEFAULT_MAX_STEPS;
+  const maxSteps = ctx.maxSteps || DEFAULT_MAX_STEPS;
   const steps: ExecutionStep[] = [];
-  const fullSystemPrompt = `${systemPrompt}\n\n${LOOP_PROTOCOL_INSTRUCTIONS}\n\nAvailable tools:\n${buildToolsCatalog(agentId)}`;
+  const fullSystemPrompt = `${systemPrompt}\n\n${LOOP_PROTOCOL_INSTRUCTIONS}\n\nAvailable tools:\n${buildToolsCatalog(ctx.agentId)}`;
 
   // Resume from a checkpoint left by an interrupted prior attempt (crash,
   // timeout, tab closed mid-loop) instead of restarting the reasoning
   // trace from message 1. A checkpoint is only ever present here if the
   // process never got the chance to clear it — see clearCheckpoint() call
-  // sites below for every normal (success/failure) exit path.
+  // sites below for every normal (success/failure) exit path. Only
+  // possible when the caller supplies initialLoopState (mission tasks) —
+  // chat callers never do, so this branch is simply unreachable for chat.
   let messages: ChatMessage[];
   let stepsUsed: number;
-  if (task.loopState && task.loopState.messages.length > 0) {
-    messages = [...task.loopState.messages];
-    stepsUsed = task.loopState.stepsUsed;
+  if (ctx.initialLoopState && ctx.initialLoopState.messages.length > 0) {
+    messages = [...ctx.initialLoopState.messages];
+    stepsUsed = ctx.initialLoopState.stepsUsed;
     steps.push({
       step: 'Agent Loop Resume',
       status: 'completed',
@@ -193,7 +210,7 @@ export async function runAgentLoop(
         args = {};
       }
 
-      const observation = await runToolStep(toolId, args, agentId, mission, task);
+      const observation = await runToolStep(toolId, args, ctx);
       messages.push({ role: 'user', content: `OBSERVATION: ${observation}` });
 
       steps.push({
@@ -204,8 +221,9 @@ export async function runAgentLoop(
       });
 
       // Checkpoint progress after every completed step so an interruption
-      // partway through the NEXT step can resume from here.
-      await checkpoint(task.id, { messages, stepsUsed });
+      // partway through the NEXT step can resume from here. No-op for
+      // callers (chat) that didn't supply onCheckpoint.
+      if (ctx.onCheckpoint) await ctx.onCheckpoint({ messages, stepsUsed });
       continue;
     }
 
@@ -213,7 +231,7 @@ export async function runAgentLoop(
     // directly — matches how a plain one-shot response behaved before
     // this ticket; not every task needs multiple steps).
     const output = finalMatch ? finalMatch[1].trim() : result.content;
-    await clearCheckpoint(task.id);
+    if (ctx.onClearCheckpoint) await ctx.onClearCheckpoint();
     steps.push({
       step: `Agent Loop Step ${stepsUsed}`,
       status: 'completed',
@@ -229,6 +247,6 @@ export async function runAgentLoop(
   // maxRetries loop in executeTask()) would reload a checkpoint that's
   // already at the step cap and fail again instantly, burning every retry
   // attempt with zero further work done.
-  await clearCheckpoint(task.id);
+  if (ctx.onClearCheckpoint) await ctx.onClearCheckpoint();
   throw new Error(`Agent loop exceeded max steps (${maxSteps}) without producing a final answer.`);
 }

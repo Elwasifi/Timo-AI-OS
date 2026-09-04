@@ -252,6 +252,27 @@ export async function executeTask(
       steps.push(toolStep.step);
       const toolResult = toolStep.value;
 
+      // M7-03: make the tri-state tool-decision outcome ('handled' /
+      // 'declined_no_match' / 'attempted_failed' — lib/context/tool-decision.ts)
+      // explicit and observable here, closing part of the "silent seam"
+      // M7-01's own E2E test exposed (a request could be intercepted by
+      // this upfront gate with no visible signal for why). Behavior is
+      // unchanged by this log line — 'attempted_failed' still throws below
+      // (a real tool failure must propagate for a mission task, unlike
+      // chat's more lenient degrade-to-loop-then-LLM behavior — see
+      // lib/context/context-manager.ts's M7-03 comment for the contrast);
+      // 'declined_no_match' still falls through to the agent loop.
+      await recordEvent(mission.id, 'tool_decision_outcome', {
+        entityType: 'task',
+        entityId: task.id,
+        title: `Tool decision: ${toolResult.outcome}`,
+        detail: toolResult.outcome === 'declined_no_match'
+          ? 'No tool category matched — proceeding to agent loop'
+          : toolResult.outcome === 'attempted_failed'
+            ? 'Tool category matched but did not fully resolve — failing this attempt'
+            : 'Tool fully answered the task',
+      });
+
       if (toolResult.shouldUseTool) {
         await recordEvent(mission.id, 'tool_selected', {
           entityType: 'task',
@@ -387,8 +408,25 @@ export async function executeTask(
             // single-call one, so a task expected to need several tool
             // steps should raise its task_timeout_ms accordingly (existing
             // per-task column, no new config needed).
+            //
+            // M7-03: runAgentLoop() was generalized off MissionTask/Mission
+            // so the chat pipeline could reuse the same mechanism (see
+            // lib/context/context-manager.ts) — this call site now passes
+            // the equivalent fields explicitly, plus the checkpoint
+            // callbacks wired to mission_tasks.loop_state (only mission
+            // tasks get real checkpointing; chat's calls leave these unset).
             const loopResult = await withTimeout(
-              runAgentLoop(task, mission, managerId, systemPrompt, ctxResult.value.userPrompt, {
+              runAgentLoop(systemPrompt, ctxResult.value.userPrompt, {
+                agentId: managerId,
+                tenantId: mission.tenantId,
+                isSimulation: mission.isSimulation,
+                missionId: mission.id,
+                taskId: task.id,
+                maxSteps: task.maxLoopSteps,
+                initialLoopState: task.loopState,
+                onCheckpoint: async (state) => { await updateTask(task.id, { loopState: state }); },
+                onClearCheckpoint: async () => { await updateTask(task.id, { loopState: null }); },
+              }, {
                 temperature: settings.temperature,
                 maxTokens: settings.max_tokens,
                 candidates: decision.candidates,

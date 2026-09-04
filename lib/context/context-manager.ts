@@ -14,6 +14,8 @@ import { detectIntent } from './intent-detector';
 import { decideMemory } from './memory-decision';
 import { decideTools } from './tool-decision';
 import { buildContext } from './context-builder';
+import { runAgentLoop } from '@/lib/swarm/agentLoop';
+import { getAgentById } from '@/lib/agents/agentRegistryService';
 import { ConversationService, type ChatMessage } from '@/lib/ai/conversation-service';
 import type {
   DetectedIntent, ContextDecisions, ContextManagerResult,
@@ -262,6 +264,7 @@ export async function runContextManager(
       toolAnswer: null,
       success: false,
       error: e instanceof Error ? e.message : 'Unknown error',
+      outcome: 'attempted_failed' as const,
     };
   }
 
@@ -309,6 +312,82 @@ export async function runContextManager(
       toolAnswer: toolResult.toolAnswer,
       shouldCallLLM: false,
     };
+  }
+
+  // M7-03: the upfront gate matched a tool category but couldn't produce a
+  // full answer in one shot (outcome === 'attempted_failed') — before this
+  // ticket, chat had no fallback for this case at all and just proceeded
+  // straight to a plain one-shot LLM call below, silently discarding the
+  // fact that a tool was actually relevant. Mission tasks already got a
+  // bounded multi-step fallback in M7-01 (lib/swarm/agentLoop.ts); this
+  // reuses the SAME mechanism here instead of chat having none. Requests
+  // where no tool category matched at all (outcome === 'declined_no_match')
+  // skip this entirely and fall through to the existing plain-LLM path
+  // unchanged — preserving the near-zero-cost shortcut for ordinary
+  // conversation, not paying reasoning-loop overhead on every message.
+  //
+  // Uses a simpler system prompt (registry role/description/capabilities)
+  // than the primary chat response path's full persona pipeline
+  // (buildSystemPrompt/buildTemoCoordinatorPrompt + identity directive in
+  // crew-coordinator.ts) — a deliberate, honest simplification for what is
+  // a fallback path, not the main chat experience. If the loop itself
+  // fails (throws — e.g. max steps exceeded), this falls through to the
+  // exact same plain-LLM path chat already had before this ticket, so a
+  // failed loop attempt never makes chat worse than its pre-M7-03 behavior.
+  if (toolResult.outcome === 'attempted_failed') {
+    try {
+      const loopAgentId = toolDecisionAgentId ?? agentId;
+      const agentRecord = await getAgentById(loopAgentId);
+      const loopSystemPrompt = agentRecord
+        ? `You are ${agentRecord.displayName}, ${agentRecord.role}. ${agentRecord.description}\n\nCapabilities: ${agentRecord.capabilities.join(', ')}.`
+        : `You are ${loopAgentId}, an AI agent assisting the user.`;
+
+      const loopResult = await runAgentLoop(
+        loopSystemPrompt,
+        input,
+        { agentId: loopAgentId, tenantId, isSimulation },
+        { usageContext: { operation: 'chat_tool_loop', agentId: loopAgentId, tenantId } },
+      );
+
+      const step4 = makeStep('RAG Retrieval', 'Skipped — agent loop produced an answer', 3, 'skipped');
+      reasoningSteps.push(step4);
+      const step5 = makeStep('Context Builder', 'Building context from agent loop result...', 4, 'completed');
+      reasoningSteps.push(step5);
+
+      const context = buildContext({
+        userInput: input,
+        intent: routingIntent,
+        detectedIntent,
+        decisions,
+        memories: memoryResult.memories,
+        memoryConfidence: memoryResult.confidence,
+        memoryClassification: null,
+        memoryDecisionReason: 'Memory did not fully answer; proceeding to tools.',
+        toolDecisionReason: `Tool category '${detectedIntent.toolCategoryHint}' matched but the one-shot planner couldn't fully resolve it; agent loop ran ${loopResult.stepsUsed} step(s).`,
+        llmSkipReason: 'Agent loop produced a complete answer; no further LLM call needed.',
+        timelineEvents: memoryResult.timelineEvents,
+        ragContext: memoryResult.ragContext,
+        toolExecutions: toolResult.executions,
+        knowledgeGraphRelations: [],
+        activeAgent: agentId,
+        conversationId,
+        agentCount,
+        reasoningSteps,
+        source: 'tool',
+        conversationHistory,
+      });
+
+      return {
+        context,
+        decisions,
+        directAnswer: null,
+        toolAnswer: loopResult.output,
+        shouldCallLLM: false,
+      };
+    } catch {
+      // Loop failed (e.g. max steps exceeded) — fall through to the
+      // existing plain-LLM path below, unchanged.
+    }
   }
 
   // ---- Step 4: RAG Retrieval (Priority 3) ----

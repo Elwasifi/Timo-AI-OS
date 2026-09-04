@@ -62,6 +62,7 @@ export type TimelineEventType =
   | 'pipeline_selected'
   | 'execution_started'
   | 'tool_selected'
+  | 'tool_decision_outcome'
   | 'workflow_executed'
   | 'memory_retrieved'
   | 'knowledge_retrieved'

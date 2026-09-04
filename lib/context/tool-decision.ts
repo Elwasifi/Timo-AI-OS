@@ -12,6 +12,21 @@ import type { ToolResultEnvelope, ToolRequest } from '@/lib/tools/types';
 import type { ChainResult } from '@/lib/tools/chain';
 import type { DetectedIntent, ToolExecutionRecord } from './types';
 
+// M7-03: explicit tri-state outcome, added to close a real seam a live
+// E2E test exposed — callers used to each re-derive "did this actually
+// resolve the request" from the shouldUseTool/success/toolAnswer
+// combination themselves, inconsistently. lib/swarm/executionLayer.ts's
+// executeTask() already fell through to the agent loop (M7-01) correctly
+// on any non-'handled' outcome; lib/context/context-manager.ts (chat)
+// had no fallback at all and just proceeded straight to a plain LLM call
+// regardless of *why* the tool gate didn't resolve things. This field
+// makes that reason explicit and shared, so both callers can coordinate
+// on it instead of quietly diverging.
+export type ToolDecisionOutcome =
+  | 'handled' // a tool fully answered the request — no further reasoning needed
+  | 'declined_no_match' // no tool category matched this input at all — the fast-path shortcut
+  | 'attempted_failed'; // a tool category matched, but planning/execution didn't produce a full answer
+
 export interface ToolDecisionResult {
   shouldUseTool: boolean;
   selectedToolIds: string[];
@@ -19,6 +34,7 @@ export interface ToolDecisionResult {
   toolAnswer: string | null;
   success: boolean;
   error: string | null;
+  outcome: ToolDecisionOutcome;
 }
 
 export async function decideTools(
@@ -46,6 +62,7 @@ export async function decideTools(
       toolAnswer: null,
       success: false,
       error: null,
+      outcome: 'declined_no_match',
     };
   }
 
@@ -60,6 +77,7 @@ export async function decideTools(
       toolAnswer: null,
       success: false,
       error: null,
+      outcome: 'declined_no_match',
     };
   }
 
@@ -191,6 +209,7 @@ export async function decideTools(
     toolAnswer,
     success: anySuccess,
     error,
+    outcome: toolAnswer && anySuccess ? 'handled' : 'attempted_failed',
   };
 }
 
