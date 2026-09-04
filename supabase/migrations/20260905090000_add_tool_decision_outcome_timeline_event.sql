@@ -1,0 +1,25 @@
+-- M7-03 bugfix (found during M7-04 scoping, 2026-09-05): the M7-03 commit
+-- added recordEvent(mission.id, 'tool_decision_outcome', ...) to
+-- executionLayer.ts, unconditionally on every mission task's tool-decision
+-- step — but only updated the TypeScript TimelineEventType union
+-- (lib/swarm/types.ts). mission_timeline.event_type is a real Postgres
+-- ENUM (mission_timeline_event), not a plain-text column with no DB-level
+-- check as previously assumed when this event type was added — confirmed
+-- live: 'tool_decision_outcome' was never added to the enum.
+--
+-- Actual impact (verified before writing this fix, not assumed): NOT a
+-- mission-execution-breaking bug. lib/swarm/missionService.ts's
+-- addTimelineEntry() catches the resulting Supabase insert error
+-- internally (console.error + return null, no throw) — every mission
+-- task's tool-decision step has been silently failing to record this one
+-- observability event since M7-03 merged, logging a server-side error
+-- each time, but never affecting task/mission success or failure. The
+-- exact feature M7-03 built ("make the tool-decision outcome explicit and
+-- observable") has been non-functional since merge — this migration fixes
+-- that.
+--
+-- Additive only (adds an enum value, no data touched), idempotent
+-- (IF NOT EXISTS), matches the exact precedent this project already used
+-- for the same class of fix (20260728072715_add_execution_timeline_events.sql).
+
+ALTER TYPE mission_timeline_event ADD VALUE IF NOT EXISTS 'tool_decision_outcome';
