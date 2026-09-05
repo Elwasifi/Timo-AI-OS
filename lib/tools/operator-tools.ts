@@ -44,6 +44,8 @@ const operatorCreateWorkflowTool: ToolDefinition = {
   version: '1.0.0',
   supportedAgents: ['temo'],
   requiresApproval: true,
+  riskLevel: 'reversible',
+  blastRadius: 'external',
 };
 
 // Deliberately constrained to a small, safe node vocabulary for this first

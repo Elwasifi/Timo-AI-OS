@@ -4,6 +4,17 @@
 // and the chat pipeline, instead of chat having no multi-step fallback at
 // all. See the M7-03 section in docs/TEMO-ARCHITECTURE.md for the full
 // mechanism map that motivated this.
+// M7-04 — General confirmation/approval gate: when a tool call inside the
+// loop is flagged requiresApproval (lib/tools/types.ts), the loop no
+// longer treats the resulting pending-approval envelope as a plain tool
+// failure. It pauses — checkpoints exactly which tool call is waiting and
+// returns a distinct 'awaiting_approval' status instead of an answer —
+// and, for mission tasks, genuinely resumes from that exact point once a
+// human approves it (reusing the same checkpoint/resume mechanism M7-01
+// built and live-verified for interruption recovery). Chat has no
+// turn-state to resume into (see AgentLoopContext's comment below), so a
+// chat-path pause is completed differently — see
+// lib/context/context-manager.ts's M7-04 comment.
 //
 // Before M7-01, executeTask() (lib/swarm/executionLayer.ts) made exactly
 // one chatWithFallback() call per task and returned — no multi-step
@@ -21,14 +32,14 @@
 // principle is to extend existing working systems rather than build a
 // second execution mechanism alongside them.
 //
-// Scope note (still true after M7-03): lib/crew/manager-delegation.ts
+// Scope note (still true after M7-03/M7-04): lib/crew/manager-delegation.ts
 // (executeWorker/managerReview — used both by delegated mission tasks and
 // the live chat pipeline when a worker is assigned) is NOT touched here.
-// A delegated worker still has zero tool-calling capability. Confirmed a
-// deliberate, explicitly-scoped-out gap (not an oversight) — closing it
-// means touching the shared chat-pipeline file, a larger, separate
-// follow-up flagged in both the M7-01 and M7-03 reports rather than
-// silently expanded into either ticket.
+// A delegated worker still has zero tool-calling capability, so it has no
+// approval gate to hit either. Confirmed a deliberate, explicitly-scoped-
+// out gap (not an oversight) — closing it means touching the shared
+// chat-pipeline file, a larger, separate follow-up flagged in the M7-01,
+// M7-03, and M7-04 reports rather than silently expanded into any of them.
 
 import { chatWithFallback, type ChatMessage, type ChatOptions } from '@/lib/ai/ai-provider';
 import { toolRegistry } from '@/lib/tools/registry';
@@ -95,15 +106,24 @@ function buildToolsCatalog(agentId: string): string {
     .join('\n');
 }
 
+interface ToolStepResult {
+  observation: string;
+  /** M7-04: set when this call was gated and is now a real pending approval_requests row instead of having run. */
+  pendingApprovalId?: string;
+}
+
 async function runToolStep(
   toolId: string,
   args: Record<string, unknown>,
   ctx: AgentLoopContext,
-): Promise<string> {
+  approvedApprovalId?: string,
+): Promise<ToolStepResult> {
   ensureBuiltinToolsRegistered();
   const registered = toolRegistry.get(toolId);
   if (!registered) {
-    return `Error: tool "${toolId}" does not exist. Pick one from the list you were given, or respond with FINAL: if you have enough information already.`;
+    return {
+      observation: `Error: tool "${toolId}" does not exist. Pick one from the list you were given, or respond with FINAL: if you have enough information already.`,
+    };
   }
 
   const result = await toolExecutor.execute({
@@ -115,12 +135,20 @@ async function runToolStep(
     isSimulation: ctx.isSimulation,
     missionId: ctx.missionId,
     taskId: ctx.taskId,
+    approvedApprovalId,
   });
 
   if (!result.ok) {
-    return `Error: ${result.error ?? 'tool execution failed'}`;
+    // M7-04: a gated call with no approvedApprovalId yet — this is a
+    // pause signal, not a plain failure. The caller (runAgentLoop) checks
+    // pendingApprovalId and branches before ever turning this into an
+    // "Error: ..." OBSERVATION.
+    if (result.pendingApprovalId) {
+      return { observation: '', pendingApprovalId: result.pendingApprovalId };
+    }
+    return { observation: `Error: ${result.error ?? 'tool execution failed'}` };
   }
-  return typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+  return { observation: typeof result.data === 'string' ? result.data : JSON.stringify(result.data) };
 }
 
 // M7-03: generalized off MissionTask/Mission — a mission task supplies
@@ -130,7 +158,9 @@ async function runToolStep(
 // checkpoint callbacks unset (chat has nowhere to persist mid-conversation
 // loop state today — an honest limitation, not a silent gap: a chat-path
 // loop interrupted mid-flight simply cannot resume, same as chat's
-// existing behavior for any other interrupted request).
+// existing behavior for any other interrupted request. M7-04's approval
+// pause is exactly this kind of interruption for chat — see
+// context-manager.ts for how chat completes it differently instead).
 export interface AgentLoopContext {
   agentId: string;
   tenantId?: string | null;
@@ -147,6 +177,10 @@ export interface AgentLoopResult {
   output: string;
   stepsUsed: number;
   steps: ExecutionStep[];
+  /** M7-04: 'awaiting_approval' means this attempt paused on a gated tool call — output is empty, not a real answer. Default 'completed' for every pre-M7-04 return path. */
+  status: 'completed' | 'awaiting_approval';
+  /** M7-04: set only when status === 'awaiting_approval'. */
+  pendingApprovalId?: string;
 }
 
 export async function runAgentLoop(
@@ -177,6 +211,30 @@ export async function runAgentLoop(
       detail: `Resumed from checkpoint at step ${stepsUsed}`,
       durationMs: 0,
     });
+
+    // M7-04: this specific resume is for a tool call that was left
+    // pending approval — the only way this task's status ever flips back
+    // to 'ready' (making it eligible to be picked up and re-enter this
+    // function) is resolveApproval() doing so on an *approved* decision
+    // (lib/governance/approvals.ts); a rejection fails the task directly
+    // instead, so reaching this branch at all already means "approved."
+    // Retry the exact same call with approvedApprovalId set (skips
+    // re-gating in toolExecutor.execute()) instead of asking the model to
+    // decide all over again — it already decided, a human just needed to
+    // sign off.
+    if (ctx.initialLoopState.pendingApproval) {
+      const { approvalId, toolId, args } = ctx.initialLoopState.pendingApproval;
+      const stepStart = Date.now();
+      const toolResult = await runToolStep(toolId, args, ctx, approvalId);
+      messages.push({ role: 'user', content: `OBSERVATION: ${toolResult.observation}` });
+      steps.push({
+        step: `Agent Loop Step ${stepsUsed} (resumed after approval)`,
+        status: 'completed',
+        detail: `Tool: ${toolId}`,
+        durationMs: Date.now() - stepStart,
+      });
+      if (ctx.onCheckpoint) await ctx.onCheckpoint({ messages, stepsUsed, pendingApproval: null });
+    }
   } else {
     messages = [{ role: 'user', content: userPrompt }];
     stepsUsed = 0;
@@ -210,8 +268,31 @@ export async function runAgentLoop(
         args = {};
       }
 
-      const observation = await runToolStep(toolId, args, ctx);
-      messages.push({ role: 'user', content: `OBSERVATION: ${observation}` });
+      const toolResult = await runToolStep(toolId, args, ctx);
+
+      // M7-04: gated, not yet approved — pause instead of treating this
+      // as a failed step. messages already has this turn's ACTION
+      // assistant-message pushed above; deliberately does NOT push an
+      // OBSERVATION yet (there isn't a real one), so resume picks up
+      // exactly where a real tool result would have landed.
+      if (toolResult.pendingApprovalId) {
+        if (ctx.onCheckpoint) {
+          await ctx.onCheckpoint({
+            messages,
+            stepsUsed,
+            pendingApproval: { approvalId: toolResult.pendingApprovalId, toolId, args },
+          });
+        }
+        steps.push({
+          step: `Agent Loop Step ${stepsUsed}`,
+          status: 'completed',
+          detail: `Tool: ${toolId} — awaiting approval`,
+          durationMs: Date.now() - stepStart,
+        });
+        return { output: '', stepsUsed, steps, status: 'awaiting_approval', pendingApprovalId: toolResult.pendingApprovalId };
+      }
+
+      messages.push({ role: 'user', content: `OBSERVATION: ${toolResult.observation}` });
 
       steps.push({
         step: `Agent Loop Step ${stepsUsed}`,
@@ -223,7 +304,7 @@ export async function runAgentLoop(
       // Checkpoint progress after every completed step so an interruption
       // partway through the NEXT step can resume from here. No-op for
       // callers (chat) that didn't supply onCheckpoint.
-      if (ctx.onCheckpoint) await ctx.onCheckpoint({ messages, stepsUsed });
+      if (ctx.onCheckpoint) await ctx.onCheckpoint({ messages, stepsUsed, pendingApproval: null });
       continue;
     }
 
@@ -238,7 +319,7 @@ export async function runAgentLoop(
       detail: finalMatch ? 'Final answer produced' : 'Unstructured final response',
       durationMs: Date.now() - stepStart,
     });
-    return { output, stepsUsed, steps };
+    return { output, stepsUsed, steps, status: 'completed' };
   }
 
   // Max steps exhausted without a final answer. This is a definitive

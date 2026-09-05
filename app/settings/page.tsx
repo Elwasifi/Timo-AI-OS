@@ -285,10 +285,22 @@ function ApprovalsSection() {
     load();
   }, [currentTenantId]);
 
+  // M7-04: routed through the same unified confirm endpoint the new
+  // inline approval banner uses (app/api/approvals/[id]/confirm),
+  // instead of calling resolveApproval() directly from the browser — a
+  // chat-originated approval resolved from here now actually executes
+  // its tool call too (that step requires running server-side, which a
+  // direct client-side resolveApproval() call could never do). Also
+  // fixes resolvedBy being hardcoded to the literal string 'owner'
+  // regardless of who actually clicked Approve/Reject — requireUser() on
+  // the route attributes it to the real signed-in user instead.
   const resolve = async (id: string, decision: 'approved' | 'rejected') => {
     setResolvingId(id);
-    const { resolveApproval } = await import('@/lib/governance/approvals');
-    await resolveApproval(id, decision, 'owner');
+    await authFetch(`/api/approvals/${id}/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    });
     await load();
     setResolvingId(null);
   };

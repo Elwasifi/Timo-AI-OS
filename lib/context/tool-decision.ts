@@ -25,7 +25,31 @@ import type { DetectedIntent, ToolExecutionRecord } from './types';
 export type ToolDecisionOutcome =
   | 'handled' // a tool fully answered the request — no further reasoning needed
   | 'declined_no_match' // no tool category matched this input at all — the fast-path shortcut
-  | 'attempted_failed'; // a tool category matched, but planning/execution didn't produce a full answer
+  | 'attempted_failed' // a tool category matched, but planning/execution didn't produce a full answer
+  // M7-04 bugfix (found live during M7-04's own E2E test, same day):
+  // distinct from BOTH of the above on purpose. The planner can plan
+  // MULTIPLE tool calls in one batch (e.g. memory.recall + memory.forget
+  // for "show me X, then delete it") — before this fix, if even one
+  // planned call succeeded, `anySuccess` was true and the whole batch was
+  // marked 'handled', with buildToolAnswer() silently filtering the
+  // gated/pending call out of the answer entirely. Live-confirmed: a task
+  // reported status:'completed' with "memory.forget succeeded" in its own
+  // result text while the target memory was still there, deleted_at:
+  // null — the approval_requests row sat orphaned, pending forever,
+  // because the task already looked finished and nothing would ever
+  // think to check it. This value can never be produced alongside
+  // 'handled' or silently coerced into 'attempted_failed' — callers must
+  // handle it explicitly (pause, don't complete and don't fail).
+  //
+  // KNOWN SCOPE BOUNDARY (M7-04b, deliberate, not an oversight): this
+  // outcome guarantees a gated call from THIS path never auto-executes
+  // without a real approval — but a mission-task-originated approval
+  // created here does not yet genuinely auto-resume once approved (see
+  // the full explanation at its handling site in
+  // lib/swarm/executionLayer.ts). Chat-originated approvals are
+  // unaffected — those complete via direct execution in
+  // app/api/approvals/[id]/confirm/route.ts, not this task-resume path.
+  | 'pending_approval';
 
 export interface ToolDecisionResult {
   shouldUseTool: boolean;
@@ -35,6 +59,8 @@ export interface ToolDecisionResult {
   success: boolean;
   error: string | null;
   outcome: ToolDecisionOutcome;
+  /** M7-04 bugfix: set only when outcome === 'pending_approval'. */
+  pendingApprovalId?: string;
 }
 
 export async function decideTools(
@@ -180,6 +206,30 @@ export async function decideTools(
   }
 
   const selectedToolIds = executions.map((e) => e.toolId);
+
+  // M7-04 bugfix: check for a gated/pending call FIRST, before anySuccess
+  // is even computed from the batch — a pending approval must never be
+  // eligible to be masked by a co-planned success, and must never be
+  // eligible to fall into the plain allFailed/'attempted_failed' path
+  // either. 'result' is ToolResultEnvelope | ChainResult; only the former
+  // ever carries pendingApprovalId.
+  const pendingExecution = executions.find(
+    (e) => 'pendingApprovalId' in e.result && (e.result as ToolResultEnvelope).pendingApprovalId,
+  );
+  if (pendingExecution) {
+    const pendingApprovalId = (pendingExecution.result as ToolResultEnvelope).pendingApprovalId;
+    return {
+      shouldUseTool: true,
+      selectedToolIds,
+      executions,
+      toolAnswer: null,
+      success: false,
+      error: null,
+      outcome: 'pending_approval',
+      pendingApprovalId,
+    };
+  }
+
   const anySuccess = executions.some((e) => e.success);
   const allFailed = executions.length > 0 && !anySuccess;
 

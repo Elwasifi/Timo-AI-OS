@@ -270,8 +270,74 @@ export async function executeTask(
           ? 'No tool category matched — proceeding to agent loop'
           : toolResult.outcome === 'attempted_failed'
             ? 'Tool category matched but did not fully resolve — failing this attempt'
-            : 'Tool fully answered the task',
+            : toolResult.outcome === 'pending_approval'
+              ? 'A planned tool call is gated — pausing for human approval'
+              : 'Tool fully answered the task',
       });
+
+      // M7-04 bugfix (found live during this ticket's own E2E test, same
+      // day): the upfront decideTools() planner can plan several tool
+      // calls in one batch (e.g. "show me X, then delete it" ->
+      // memory.recall + memory.forget). Before this fix, neither branch
+      // below knew about a gated call: if a co-planned call succeeded,
+      // 'handled' masked the gated one out of the answer entirely
+      // (live-confirmed: a task reported "memory.forget succeeded" while
+      // the memory was still there, deleted_at: null, and its real
+      // approval_requests row sat orphaned forever); if the gated call was
+      // the only one planned, the 'attempted_failed'-style branch below
+      // would throw and fail the whole task instead of pausing it. Handle
+      // 'pending_approval' explicitly, first, before either of those —
+      // same pause semantics as the agent loop's own gated-call handling
+      // further down (not a completion, not a failure, no retry consumed).
+      //
+      // KNOWN SCOPE BOUNDARY (deliberate, not an oversight — tracked as
+      // M7-04b): pausing here is fully safe — this path never auto-executes
+      // a gated call without a real approval, same guarantee as the agent
+      // loop. But it does NOT genuinely resume the way the agent loop
+      // does. Approving a mission-task-originated approval created HERE
+      // (via this upfront gate, not the loop) flips the task back to
+      // 'ready' (lib/governance/approvals.ts's resolveApproval()), and the
+      // next attempt re-invokes decideTools() completely fresh — this
+      // branch has no equivalent of the agent loop's loop_state.pendingApproval
+      // checkpoint to retry the SAME call with approvedApprovalId set.
+      // decideTools()'s own execution loop never threads approvedApprovalId
+      // through to toolExecutor.execute() at all. So if the planner plans
+      // the same gated call again (likely, same task text), it hits the
+      // gate again and pauses again on a BRAND NEW approval_requests row —
+      // repeatable indefinitely, not an auto-resume. Building real resume
+      // for this path means giving it its own checkpoint state and
+      // threading approvedApprovalId through decideTools(), a real design
+      // decision deferred to M7-04b rather than bolted on here. Does NOT
+      // apply to chat-originated approvals — those resolve via direct
+      // tool execution in app/api/approvals/[id]/confirm/route.ts,
+      // independent of this task-resume mechanism entirely.
+      if (toolResult.outcome === 'pending_approval' && toolResult.pendingApprovalId) {
+        await updateTask(task.id, { status: 'awaiting_approval' });
+        await recordEvent(mission.id, 'tool_decision_outcome', {
+          entityType: 'task',
+          entityId: task.id,
+          title: 'Task paused: awaiting approval',
+          detail: `A gated tool call needs a human decision before this task can continue (approval ${toolResult.pendingApprovalId}).`,
+          metadata: { pendingApprovalId: toolResult.pendingApprovalId },
+        });
+        return {
+          taskId: task.id,
+          missionId: mission.id,
+          managerId,
+          managerName,
+          managerRoleId,
+          workerId,
+          workerRoleId,
+          delegated: false,
+          status: 'awaiting_approval',
+          output: '',
+          result: {},
+          error: null,
+          retries,
+          durationMs: Date.now() - startTime,
+          steps,
+        };
+      }
 
       if (toolResult.shouldUseTool) {
         await recordEvent(mission.id, 'tool_selected', {
@@ -355,6 +421,11 @@ export async function executeTask(
         // becomes the task's final result. Otherwise, fall back to direct
         // manager LLM execution (the existing behavior, unchanged).
         let loopSteps: ExecutionStep[] = [];
+        // M7-04: set when the agent loop paused on a gated tool call
+        // instead of producing an answer — checked right after this
+        // trackStep resolves, before the fake-success guard below (which
+        // would otherwise reject the empty output this branch returns).
+        let awaitingApprovalId: string | null = null;
         const llmStep = await trackStep(
           workerId ? 'Worker Execution' : 'LLM Execution',
           async () => {
@@ -444,12 +515,51 @@ export async function executeTask(
             );
 
             loopSteps = loopResult.steps;
+            if (loopResult.status === 'awaiting_approval') {
+              awaitingApprovalId = loopResult.pendingApprovalId ?? null;
+            }
             return loopResult.output;
           },
         );
         steps.push(llmStep.step);
         steps.push(...loopSteps);
         output = llmStep.value;
+
+        // M7-04: the loop paused on a gated tool call — this is not a
+        // completion and not a failure. Stop here: mark the task
+        // 'awaiting_approval' (excluded from claim_ready_tasks() until a
+        // human resolves the approval; recalculateProgress() treats it as
+        // non-terminal, same as 'ready'/'running'), record it on the
+        // timeline, and return without consuming a retry or touching
+        // task.retries at all — a real approval decision resumes or fails
+        // this task next, not the whole-task retry/backoff loop below.
+        if (awaitingApprovalId) {
+          await updateTask(task.id, { status: 'awaiting_approval' });
+          await recordEvent(mission.id, 'tool_decision_outcome', {
+            entityType: 'task',
+            entityId: task.id,
+            title: 'Task paused: awaiting approval',
+            detail: `A gated tool call needs a human decision before this task can continue (approval ${awaitingApprovalId}).`,
+            metadata: { pendingApprovalId: awaitingApprovalId },
+          });
+          return {
+            taskId: task.id,
+            missionId: mission.id,
+            managerId,
+            managerName,
+            managerRoleId,
+            workerId,
+            workerRoleId,
+            delegated: workerId !== null,
+            status: 'awaiting_approval',
+            output: '',
+            result: {},
+            error: null,
+            retries,
+            durationMs: Date.now() - startTime,
+            steps,
+          };
+        }
       }
 
       // M5-02: same class of bug as M1-04/M4-01/M4-02 (fake success reported

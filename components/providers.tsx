@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { initToolEngine } from '@/lib/tools/init';
 import { AuthGate } from '@/components/auth/auth-gate';
+import { ApprovalBanner } from '@/components/temo/approval-banner';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [client] = useState(
@@ -23,7 +24,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <QueryClientProvider client={client}>
       <TooltipProvider delayDuration={200}>
-        <AuthGate>{children}</AuthGate>
+        <AuthGate>
+          {children}
+          <ApprovalBanner />
+        </AuthGate>
       </TooltipProvider>
     </QueryClientProvider>
   );

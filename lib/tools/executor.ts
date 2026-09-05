@@ -66,37 +66,13 @@ class ToolExecutorImpl {
       return this.fail(request, start, 0, false, validationError.message);
     }
 
-    // V1 approval gate (Section 8): a tool flagged requiresApproval stops
-    // here and creates a pending request instead of running, UNLESS the
-    // caller already has an approved approval id for this exact action.
-    if (registered.definition.requiresApproval && !request.approvedApprovalId) {
-      const approval = await requestApproval({
-        tenantId: request.tenantId ?? null,
-        type: 'tool_execution',
-        title: `Approve: ${registered.definition.name}`,
-        detail: `${agentId} requested "${toolId}" with arguments: ${JSON.stringify(args).slice(0, 300)}`,
-        payload: { toolId, agentId, arguments: args },
-        requestedBy: agentId,
-        missionId: request.missionId ?? null,
-        taskId: request.taskId ?? null,
-      });
-      const envelope: ToolResultEnvelope = {
-        ok: false,
-        toolId,
-        requestId: request.id,
-        agentId,
-        error: 'This action requires approval before it can run.',
-        durationMs: Date.now() - start,
-        retries: 0,
-        streaming: false,
-        timestamp: Date.now(),
-        pendingApprovalId: approval?.id,
-      };
-      this.emit({ type: 'error', toolId, requestId: request.id, agentId, detail: 'Pending approval', timestamp: Date.now() });
-      logger.n8nWarn(`Tool gated pending approval: ${toolId}`, { approvalId: approval?.id });
-      return envelope;
-    }
-
+    // M7-04: simulation is checked BEFORE the approval gate (was after —
+    // a simulated call to a gated tool used to create a real pending
+    // approval_requests row for an action that would never actually run,
+    // cluttering the approval queue with noise nobody needed to act on).
+    // Nothing real happens in simulation mode, so there is nothing to
+    // approve.
+    //
     // V1 simulation mode (Section 12): missions marked isSimulation never
     // trigger real external side effects. The handler is skipped entirely
     // and a clearly-labeled simulated result is returned instead, so R&D
@@ -116,6 +92,47 @@ class ToolExecutorImpl {
         simulated: true,
       };
       this.emit({ type: 'success', toolId, requestId: request.id, agentId, detail: 'Simulated (no real side effect)', timestamp: Date.now() });
+      return envelope;
+    }
+
+    // V1 approval gate (Section 8): a tool flagged requiresApproval stops
+    // here and creates a pending request instead of running, UNLESS the
+    // caller already has an approved approval id for this exact action.
+    // M7-04: payload now carries the tool's static riskLevel/blastRadius
+    // (lib/tools/types.ts) so the confirmation UI can render real "what
+    // will happen if confirmed" context instead of just a title/detail
+    // string.
+    if (registered.definition.requiresApproval && !request.approvedApprovalId) {
+      const approval = await requestApproval({
+        tenantId: request.tenantId ?? null,
+        type: 'tool_execution',
+        title: `Approve: ${registered.definition.name}`,
+        detail: `${agentId} requested "${toolId}" with arguments: ${JSON.stringify(args).slice(0, 300)}`,
+        payload: {
+          toolId,
+          agentId,
+          arguments: args,
+          riskLevel: registered.definition.riskLevel ?? null,
+          blastRadius: registered.definition.blastRadius ?? null,
+        },
+        requestedBy: agentId,
+        missionId: request.missionId ?? null,
+        taskId: request.taskId ?? null,
+      });
+      const envelope: ToolResultEnvelope = {
+        ok: false,
+        toolId,
+        requestId: request.id,
+        agentId,
+        error: 'This action requires approval before it can run.',
+        durationMs: Date.now() - start,
+        retries: 0,
+        streaming: false,
+        timestamp: Date.now(),
+        pendingApprovalId: approval?.id,
+      };
+      this.emit({ type: 'error', toolId, requestId: request.id, agentId, detail: 'Pending approval', timestamp: Date.now() });
+      logger.n8nWarn(`Tool gated pending approval: ${toolId}`, { approvalId: approval?.id });
       return envelope;
     }
 

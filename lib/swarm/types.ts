@@ -39,7 +39,9 @@ export type TaskQueueStatus =
   | 'running'
   | 'completed'
   | 'failed'
-  | 'cancelled';
+  | 'cancelled'
+  /** M7-04: paused mid-loop on a gated tool call, waiting on a human decision in approval_requests. Not a retry-consuming failure — claim_ready_tasks() naturally excludes it until approval flips it back to 'ready'. */
+  | 'awaiting_approval';
 
 export type TimelineEventType =
   | 'mission_created'
@@ -138,6 +140,14 @@ export interface MissionTask {
 export interface AgentLoopState {
   messages: { role: 'user' | 'assistant' | 'system'; content: string }[];
   stepsUsed: number;
+  /**
+   * M7-04: set only while the loop is paused on a gated tool call awaiting
+   * a human decision — the exact tool + arguments it was about to run, so
+   * resume can retry that SAME call (with approvedApprovalId set to skip
+   * re-gating) instead of asking the model to decide all over again.
+   * Cleared the moment that call is actually retried, approved or not.
+   */
+  pendingApproval?: { approvalId: string; toolId: string; args: Record<string, unknown> } | null;
 }
 
 export interface ExecutionLogEntry {

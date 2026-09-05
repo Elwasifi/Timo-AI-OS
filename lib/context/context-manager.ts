@@ -12,15 +12,17 @@ import { knowledgeGraph } from '@/lib/memory/knowledgeGraph';
 import { knowledge } from '@/lib/knowledge/engine';
 import { detectIntent } from './intent-detector';
 import { decideMemory } from './memory-decision';
-import { decideTools } from './tool-decision';
+import { decideTools, type ToolDecisionResult } from './tool-decision';
 import { buildContext } from './context-builder';
 import { runAgentLoop } from '@/lib/swarm/agentLoop';
 import { getAgentById } from '@/lib/agents/agentRegistryService';
+import { getApproval } from '@/lib/governance/approvals';
 import { ConversationService, type ChatMessage } from '@/lib/ai/conversation-service';
 import type {
   DetectedIntent, ContextDecisions, ContextManagerResult,
   AssembledContext, ReasoningStep, ContextMetadata, ReasoningPriorityLevel,
 } from './types';
+import type { MemoryDecisionResult } from './memory-decision';
 import type { Intent } from '@/types';
 
 let stepCounter = 0;
@@ -314,6 +316,29 @@ export async function runContextManager(
     };
   }
 
+  // M7-04 bugfix (found live during this ticket's own E2E test, same day):
+  // the upfront decideTools() planner can plan several tool calls in one
+  // batch (e.g. "show me X, then delete it" -> memory.recall +
+  // memory.forget). A gated call among them now comes back tagged
+  // outcome: 'pending_approval' instead of ever reaching 'attempted_failed'
+  // (see tool-decision.ts's ToolDecisionOutcome for the full incident this
+  // fixes) — handled HERE, first, before the 'attempted_failed' fallback
+  // below ever gets a chance to run. Deliberately does NOT fall through to
+  // attempt the agent loop for this same request: the loop would very
+  // likely re-plan and hit the identical gated call again, creating a
+  // SECOND, redundant pending approval for what the user experiences as
+  // one request. Same message-building as the loop's own awaiting_approval
+  // pause further below — chat has no turn-state to resume into either
+  // way, so both cases are completed identically (tell the user plainly,
+  // approving it executes that one call directly via
+  // /api/approvals/[id]/confirm, not "ask me again").
+  if (toolResult.outcome === 'pending_approval' && toolResult.pendingApprovalId) {
+    return await buildAwaitingApprovalResult(toolResult.pendingApprovalId, {
+      input, routingIntent, detectedIntent, decisions, memoryResult, toolResult,
+      agentId, conversationId, agentCount, reasoningSteps, conversationHistory,
+    });
+  }
+
   // M7-03: the upfront gate matched a tool category but couldn't produce a
   // full answer in one shot (outcome === 'attempted_failed') — before this
   // ticket, chat had no fallback for this case at all and just proceeded
@@ -348,6 +373,24 @@ export async function runContextManager(
         { agentId: loopAgentId, tenantId, isSimulation },
         { usageContext: { operation: 'chat_tool_loop', agentId: loopAgentId, tenantId } },
       );
+
+      // M7-04: the loop paused on a gated tool call. Chat has no
+      // turn-state to resume into (agentLoop.ts's AgentLoopContext
+      // comment) — mission tasks get a real checkpoint-resume once
+      // approved (lib/governance/approvals.ts), but a chat conversation
+      // has already moved on by the time a human gets to the approval.
+      // So this does NOT silently fall through to a plain LLM call (that
+      // would fabricate an answer for an action that never actually ran,
+      // defeating the entire point of gating it) — it tells the user
+      // plainly what's pending, via the same shared helper the upfront
+      // gate's 'pending_approval' outcome uses further above (both cases
+      // are completed identically for chat).
+      if (loopResult.status === 'awaiting_approval' && loopResult.pendingApprovalId) {
+        return await buildAwaitingApprovalResult(loopResult.pendingApprovalId, {
+          input, routingIntent, detectedIntent, decisions, memoryResult, toolResult,
+          agentId, conversationId, agentCount, reasoningSteps, conversationHistory,
+        });
+      }
 
       const step4 = makeStep('RAG Retrieval', 'Skipped — agent loop produced an answer', 3, 'skipped');
       reasoningSteps.push(step4);
@@ -467,4 +510,63 @@ export async function runContextManager(
     toolAnswer: null,
     shouldCallLLM: true,
   };
+}
+
+// M7-04: shared by both places chat can hit a gated tool call — the
+// upfront decideTools() gate's own 'pending_approval' outcome, and the
+// agent-loop fallback's 'awaiting_approval' pause. Both are completed
+// identically for chat: there's no turn-state to resume into either way
+// (see agentLoop.ts's AgentLoopContext comment), so this just tells the
+// user plainly what's pending, without ever fabricating an answer for an
+// action that never actually ran.
+async function buildAwaitingApprovalResult(
+  pendingApprovalId: string,
+  ctx: {
+    input: string;
+    routingIntent: Intent;
+    detectedIntent: DetectedIntent;
+    decisions: ContextDecisions;
+    memoryResult: MemoryDecisionResult;
+    toolResult: ToolDecisionResult;
+    agentId: string;
+    conversationId: string | null;
+    agentCount: number;
+    reasoningSteps: ReasoningStep[];
+    conversationHistory: ChatMessage[];
+  },
+): Promise<ContextManagerResult> {
+  const approval = await getApproval(pendingApprovalId);
+  const risk = approval?.payload as { riskLevel?: string; blastRadius?: string } | undefined;
+  const riskNote = risk?.riskLevel || risk?.blastRadius
+    ? ` (${[risk.riskLevel, risk.blastRadius].filter(Boolean).join(', ')})`
+    : '';
+  const message = approval
+    ? `This requires your confirmation before I can continue: ${approval.title}${riskNote}. ${approval.detail} Please review and approve or reject it, and I'll take care of the rest — no need to ask me again.`
+    : 'This requires your confirmation before I can continue. Please review the pending approval and respond with your decision.';
+
+  const step = makeStep('RAG Retrieval', 'Skipped — awaiting approval', 3, 'skipped');
+  ctx.reasoningSteps.push(step);
+  const context = buildContext({
+    userInput: ctx.input,
+    intent: ctx.routingIntent,
+    detectedIntent: ctx.detectedIntent,
+    decisions: ctx.decisions,
+    memories: ctx.memoryResult.memories,
+    memoryConfidence: ctx.memoryResult.confidence,
+    memoryClassification: null,
+    memoryDecisionReason: 'Memory did not fully answer; proceeding to tools.',
+    toolDecisionReason: `Tool category '${ctx.detectedIntent.toolCategoryHint}' matched a gated tool — paused pending human approval.`,
+    llmSkipReason: 'Action requires approval; no answer to give until it is resolved.',
+    timelineEvents: ctx.memoryResult.timelineEvents,
+    ragContext: ctx.memoryResult.ragContext,
+    toolExecutions: ctx.toolResult.executions,
+    knowledgeGraphRelations: [],
+    activeAgent: ctx.agentId,
+    conversationId: ctx.conversationId,
+    agentCount: ctx.agentCount,
+    reasoningSteps: ctx.reasoningSteps,
+    source: 'tool',
+    conversationHistory: ctx.conversationHistory,
+  });
+  return { context, decisions: ctx.decisions, directAnswer: null, toolAnswer: message, shouldCallLLM: false };
 }

@@ -63,7 +63,8 @@ export interface ExecutionResult {
   workerId: string | null;
   workerRoleId: string | null;
   delegated: boolean;
-  status: 'completed' | 'failed' | 'partial' | 'cancelled';
+  /** M7-04: 'awaiting_approval' — the loop paused on a gated tool call, not a failure; see mission_tasks.status. */
+  status: 'completed' | 'failed' | 'partial' | 'cancelled' | 'awaiting_approval';
   output: string;
   result: Record<string, unknown>;
   error: string | null;

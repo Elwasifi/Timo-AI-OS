@@ -6,6 +6,7 @@
 // never executes anything itself — it only records the decision.
 
 import { supabase } from '@/lib/supabase/client';
+import { updateTask } from '@/lib/swarm/missionService';
 
 export type ApprovalType = 'tool_execution' | 'spend' | 'publish' | 'destructive_action';
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
@@ -106,7 +107,42 @@ export async function resolveApproval(
     .maybeSingle();
 
   if (error || !data) return null;
-  return mapRow(data as ApprovalRow);
+  const approval = mapRow(data as ApprovalRow);
+
+  // M7-04: a mission task whose agent loop paused on this exact approval
+  // (lib/swarm/agentLoop.ts, lib/swarm/executionLayer.ts) is sitting at
+  // status:'awaiting_approval' with its pending call checkpointed in
+  // loop_state. Resolve the decision here for BOTH outcomes so no caller
+  // of resolveApproval() has to remember to do this separately (this is
+  // the only place a mission-task approval's decision is ever recorded):
+  //   - approved -> flip back to 'ready'. claim_ready_tasks() (the
+  //     background queue processor) picks it up like any other ready
+  //     task; executeTask() re-enters runAgentLoop(), sees loop_state's
+  //     pendingApproval, and resumes from that exact step instead of
+  //     restarting the reasoning trace.
+  //   - rejected -> fail the task directly. There is nothing to resume —
+  //     a human explicitly said no — so this does NOT go through the
+  //     ordinary retry/backoff loop in executeTask(); it's a definitive,
+  //     immediate failure, checkpoint cleared same as any other
+  //     definitive failure exit path in agentLoop.ts.
+  // No-op for every other approval type (agent deletion's hand-rolled
+  // integration, spend/publish approvals, or a tool_execution approval
+  // with no taskId at all — chat-originated, completed differently, see
+  // context-manager.ts) since those never have a taskId to begin with.
+  if (approval.taskId) {
+    if (decision === 'approved') {
+      await updateTask(approval.taskId, { status: 'ready' });
+    } else {
+      await updateTask(approval.taskId, {
+        status: 'failed',
+        errorMessage: 'Rejected: a human declined the gated tool call this task was waiting on.',
+        completedAt: new Date().toISOString(),
+        loopState: null,
+      });
+    }
+  }
+
+  return approval;
 }
 
 export async function getApproval(id: string): Promise<ApprovalRequest | null> {

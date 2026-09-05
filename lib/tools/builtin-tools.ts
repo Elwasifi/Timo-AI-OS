@@ -102,6 +102,8 @@ const n8nDeleteTool: ToolDefinition = {
   version: '1.0.0',
   supportedAgents: ['flow', 'temo'],
   requiresApproval: true,
+  riskLevel: 'irreversible',
+  blastRadius: 'external',
 };
 
 const n8nDeleteHandler: ToolHandler = async (args) => {
@@ -472,6 +474,8 @@ function registerMemoryTools(): void {
     version: '1.0.0',
     supportedAgents: ['temo', 'flow', 'atlas', 'nova', 'luna', 'echo'],
     requiresApproval: true,
+    riskLevel: 'irreversible',
+    blastRadius: 'tenant',
   };
 
   const memoryTimelineTool: ToolDefinition = {

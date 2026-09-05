@@ -56,6 +56,16 @@ export interface ToolDefinition {
   streaming?: boolean;
   /** V1 (Section 8): destructive/costly/irreversible tools must be approved before execution. */
   requiresApproval?: boolean;
+  /**
+   * M7-04: static, author-declared risk metadata — feeds the confirmation
+   * UI's "what will happen if confirmed" messaging. Declarative, not a
+   * runtime classifier: a tool's identity determines its risk, not the
+   * specific arguments of one call. Optional — most tools carry no risk
+   * metadata at all and are simply not gated (requiresApproval unset).
+   */
+  riskLevel?: 'reversible' | 'irreversible';
+  /** M7-04: how far this tool's effect reaches if it runs. */
+  blastRadius?: 'self' | 'tenant' | 'external';
 }
 
 export interface ToolRequest {
