@@ -6,6 +6,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { initToolEngine } from '@/lib/tools/init';
 import { AuthGate } from '@/components/auth/auth-gate';
 import { ApprovalBanner } from '@/components/temo/approval-banner';
+import { ByokGateBanner } from '@/components/settings/byok-gate-banner';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [client] = useState(
@@ -27,6 +28,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
         <AuthGate>
           {children}
           <ApprovalBanner />
+          <ByokGateBanner />
         </AuthGate>
       </TooltipProvider>
     </QueryClientProvider>

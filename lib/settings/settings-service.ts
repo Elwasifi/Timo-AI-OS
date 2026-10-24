@@ -63,6 +63,8 @@ export interface ModelInfo {
 export type ProviderValidationStatus =
   | 'connected'
   | 'not_configured'
+  /** M7-09 (BYOK): no key configured for a BYOK tenant specifically — distinct from not_configured, which stays meaning "the shared admin/internal key is empty." */
+  | 'no_byok_configured'
   | 'invalid_api_key'
   | 'unauthorized'
   | 'unsupported'

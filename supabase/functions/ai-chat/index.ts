@@ -29,24 +29,39 @@ interface ChatRequest {
   model?: string;
   stream?: boolean;
   tools?: ChatContext['tools'];
+  /**
+   * M7-09 (BYOK): the calling tenant, trusted from the caller — every real
+   * call site already resolved this server-side via requireUser()/
+   * isTenantMember() (or toolExecutor's own tenantId) before reaching
+   * here, same trust boundary toolExecutor.execute() already relies on.
+   * Omit, or pass the internal tenant id, to keep reading app_settings
+   * exactly as before (the grandfathered admin/internal path) — anything
+   * else resolves keys from tenant_provider_keys instead.
+   */
+  tenantId?: string | null;
 }
 
 interface ValidateRequest {
   action: 'validate';
   provider: ProviderId;
   /**
-   * Omit to validate the currently-saved key from app_settings. Pass an
-   * explicit value (including '') to validate a key the user has typed but
-   * not saved yet — this is why the key travels in the request body rather
-   * than always being read server-side: there's nothing saved to read yet.
+   * Omit to validate the currently-saved key (app_settings for the
+   * internal tenant, tenant_provider_keys otherwise — see tenantId).
+   * Pass an explicit value (including '') to validate a key the user has
+   * typed but not saved yet — this is why the key travels in the request
+   * body rather than always being read server-side: there's nothing saved
+   * to read yet.
    */
   apiKey?: string;
   baseUrl?: string;
+  /** M7-09 (BYOK): see ChatRequest.tenantId. */
+  tenantId?: string | null;
 }
 
 type ValidationStatus =
   | 'connected'
   | 'not_configured'
+  | 'no_byok_configured'
   | 'invalid_api_key'
   | 'unauthorized'
   | 'unsupported'
@@ -107,38 +122,97 @@ interface SettingsRow {
   ollama_model: string | null;
 }
 
-/** Read the full provider configuration map from app_settings (singleton row). */
-async function loadProviderConfigs(): Promise<{
+// M7-09 (BYOK): the internal/admin tenant is the one deliberate grandfathered
+// exception that keeps reading the shared app_settings singleton — it
+// predates this ticket and already performs real actions today. Every
+// other tenant must configure its own keys; there is no shared fallback.
+const INTERNAL_TENANT_ID = '00000000-0000-0000-0000-000000000001';
+
+const BYOK_PROVIDERS = ['gemini', 'groq', 'nvidia', 'openrouter'] as const;
+
+interface TenantProviderKeyRow {
+  provider: ProviderId;
+  api_key: string;
+  model: string | null;
+}
+
+function emptyConfig(id: ProviderId): ProviderConfig {
+  return { apiKey: null, model: REGISTRY[id].defaultModel, baseUrl: null };
+}
+
+/**
+ * Read the full provider configuration map — from app_settings for the
+ * internal/admin tenant (unchanged, grandfathered), or from
+ * tenant_provider_keys for every other tenant (M7-09, BYOK). A missing row
+ * for a provider resolves to a null apiKey, which the existing
+ * `adapter.requiresKey && !apiKey` check downstream already turns into an
+ * honest 401 — no new gate needed, no silent fallback to a shared key.
+ */
+async function loadProviderConfigs(tenantId?: string | null): Promise<{
   configs: ProviderConfigMap;
   activeProvider: ProviderId;
 }> {
   const supabase = getSupabaseAdmin();
+
+  if (!tenantId || tenantId === INTERNAL_TENANT_ID) {
+    const { data, error } = await supabase
+      .from("app_settings")
+      .select("*")
+      .eq("id", 1)
+      .maybeSingle();
+
+    if (error) throw new Error(`Failed to read provider settings: ${error.message}`);
+    const row = (data ?? {}) as Partial<SettingsRow>;
+
+    const cfg = (id: ProviderId, apiKey: string | null, model: string | null, baseUrl?: string | null): ProviderConfig => ({
+      apiKey: apiKey ?? null,
+      model: model || REGISTRY[id].defaultModel,
+      baseUrl: baseUrl ?? null,
+    });
+
+    const configs: ProviderConfigMap = {
+      gemini: cfg('gemini', row.gemini_api_key, row.gemini_model),
+      groq: cfg('groq', row.groq_api_key, row.groq_model),
+      nvidia: cfg('nvidia', row.nvidia_api_key, row.nvidia_model),
+      openrouter: cfg('openrouter', row.openrouter_api_key, row.openrouter_model),
+      ollama: cfg('ollama', row.ollama_api_key ?? null, row.ollama_model, row.ollama_base_url),
+    };
+
+    const rawActive = row.active_provider ?? 'gemini';
+    const activeProvider: ProviderId = isProviderId(rawActive) ? rawActive : 'gemini';
+    return { configs, activeProvider };
+  }
+
+  // BYOK path — service role is still required here (this edge function
+  // never holds the caller's own session), but the trust check already
+  // happened one layer up (the Next.js route/caller that resolved this
+  // tenantId via requireUser()/isTenantMember()).
   const { data, error } = await supabase
-    .from("app_settings")
-    .select("*")
-    .eq("id", 1)
-    .maybeSingle();
+    .from("tenant_provider_keys")
+    .select("provider, api_key, model")
+    .eq("tenant_id", tenantId);
 
-  if (error) throw new Error(`Failed to read provider settings: ${error.message}`);
-  const row = (data ?? {}) as Partial<SettingsRow>;
-
-  const cfg = (id: ProviderId, apiKey: string | null, model: string | null, baseUrl?: string | null): ProviderConfig => ({
-    apiKey: apiKey ?? null,
-    model: model || REGISTRY[id].defaultModel,
-    baseUrl: baseUrl ?? null,
-  });
+  if (error) throw new Error(`Failed to read tenant provider keys: ${error.message}`);
+  const rows = (data ?? []) as TenantProviderKeyRow[];
+  const byProvider = new Map(rows.map((r) => [r.provider, r]));
 
   const configs: ProviderConfigMap = {
-    gemini: cfg('gemini', row.gemini_api_key, row.gemini_model),
-    groq: cfg('groq', row.groq_api_key, row.groq_model),
-    nvidia: cfg('nvidia', row.nvidia_api_key, row.nvidia_model),
-    openrouter: cfg('openrouter', row.openrouter_api_key, row.openrouter_model),
-    ollama: cfg('ollama', row.ollama_api_key ?? null, row.ollama_model, row.ollama_base_url),
+    gemini: emptyConfig('gemini'),
+    groq: emptyConfig('groq'),
+    nvidia: emptyConfig('nvidia'),
+    openrouter: emptyConfig('openrouter'),
+    // Ollama is self-hosted/local — not a BYOK provider (M7-09 scoping),
+    // never resolvable per-tenant from this server.
+    ollama: emptyConfig('ollama'),
   };
+  for (const id of BYOK_PROVIDERS) {
+    const row = byProvider.get(id);
+    if (row) {
+      configs[id] = { apiKey: row.api_key, model: row.model || REGISTRY[id].defaultModel, baseUrl: null };
+    }
+  }
 
-  const rawActive = row.active_provider ?? 'gemini';
-  const activeProvider: ProviderId = isProviderId(rawActive) ? rawActive : 'gemini';
-  return { configs, activeProvider };
+  return { configs, activeProvider: 'gemini' };
 }
 
 /**
@@ -195,12 +269,13 @@ function resolveProviderConfig(
  * echoes the API key back; the response carries only status/message/models.
  */
 async function handleValidate(body: ValidateRequest): Promise<Response> {
-  const { provider, baseUrl: requestBaseUrl } = body;
+  const { provider, baseUrl: requestBaseUrl, tenantId } = body;
   if (!provider || !isProviderId(provider)) {
     return jsonValidation('configuration_error', `Unsupported provider: ${provider}`);
   }
 
   const adapter = getAdapter(provider)!;
+  const isByokTenant = !!tenantId && tenantId !== INTERNAL_TENANT_ID;
 
   // Resolve the key to test: an explicit (possibly unsaved) value from the
   // request takes priority; otherwise fall back to what's already saved.
@@ -208,7 +283,7 @@ async function handleValidate(body: ValidateRequest): Promise<Response> {
   let baseUrl = requestBaseUrl;
   if (apiKey === undefined) {
     try {
-      const { configs } = await loadProviderConfigs();
+      const { configs } = await loadProviderConfigs(tenantId);
       const resolved = resolveProviderConfig(provider, configs);
       apiKey = resolved.apiKey ?? undefined;
       baseUrl = baseUrl ?? resolved.baseUrl ?? undefined;
@@ -221,6 +296,12 @@ async function handleValidate(body: ValidateRequest): Promise<Response> {
   }
 
   if (adapter.requiresKey && !apiKey) {
+    // M7-09 (BYOK): distinguish "this tenant has never configured a key
+    // of its own" from the admin/internal tenant's plain not_configured —
+    // same underlying condition, different, more actionable message.
+    if (isByokTenant) {
+      return jsonValidation('no_byok_configured', FRIENDLY_VALIDATION_MESSAGES.no_byok_configured(adapter.label));
+    }
     return jsonValidation('not_configured', `No API key configured for ${adapter.label}. Enter one above and click Validate.`);
   }
 
@@ -259,6 +340,11 @@ async function handleValidate(body: ValidateRequest): Promise<Response> {
 const FRIENDLY_VALIDATION_MESSAGES: Record<ValidationStatus, (label: string) => string> = {
   connected: (l) => `${l} connection successful.`,
   not_configured: (l) => `No API key configured for ${l}.`,
+  // M7-09 (BYOK): distinct from not_configured (which still means "the
+  // admin/internal tenant's shared app_settings key is empty") so the
+  // Settings UI can tell a BYOK tenant "add your own key" rather than a
+  // generic failure.
+  no_byok_configured: (l) => `No ${l} API key configured for this workspace. Add your own key in Settings.`,
   invalid_api_key: (l) => `Invalid ${l} API key.`,
   unauthorized: (l) => `${l} rejected this key (unauthorized).`,
   unsupported: (l) => `${l} does not support model discovery at this endpoint.`,
@@ -344,6 +430,7 @@ Deno.serve(async (req: Request) => {
       model,
       stream = false,
       tools,
+      tenantId,
     } = body as ChatRequest;
 
     if (!provider || !messages || !Array.isArray(messages)) {
@@ -353,12 +440,20 @@ Deno.serve(async (req: Request) => {
       return jsonError(400, `Unsupported provider: ${provider}. Supported: gemini, groq, nvidia, openrouter, ollama`);
     }
 
-    const { configs } = await loadProviderConfigs();
+    const { configs } = await loadProviderConfigs(tenantId);
     const { apiKey, model: effectiveModel, baseUrl } = resolveProviderConfig(provider, configs, model);
 
     const adapter = getAdapter(provider)!;
     if (adapter.requiresKey && !apiKey) {
-      return jsonError(401, `No API key configured for provider "${provider}". Add it in Settings.`);
+      // M7-09 (BYOK): same honest-failure path as before, message now
+      // reflects whose key is missing — this tenant's own, not a shared one.
+      const isByokTenant = !!tenantId && tenantId !== INTERNAL_TENANT_ID;
+      return jsonError(
+        401,
+        isByokTenant
+          ? `No ${provider} API key configured for this workspace. Add your own key in Settings.`
+          : `No API key configured for provider "${provider}". Add it in Settings.`,
+      );
     }
 
     const ctx: ChatContext = {

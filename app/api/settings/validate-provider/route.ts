@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireUser } from '@/lib/auth/apiAuth';
+import { requireUser, getCallerTenantId } from '@/lib/auth/apiAuth';
 import { fail, ok, rateLimited } from '@/lib/api/response';
 import { checkRateLimit, getClientIp } from '@/lib/api/rateLimit';
 import type { ProviderId } from '@/lib/settings/settings-service';
@@ -16,6 +16,8 @@ interface ValidateBody {
   provider: ProviderId;
   apiKey?: string;
   baseUrl?: string;
+  /** M7-09 (BYOK): which tenant's saved key to validate against when apiKey is omitted. Verified via getCallerTenantId(), never trusted as-is. */
+  tenantId?: string;
 }
 
 /**
@@ -57,6 +59,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(fail('BAD_REQUEST', 'A valid provider is required', start), { status: 400 });
     }
 
+    // M7-09 (BYOK): only resolved/verified when apiKey is omitted (i.e. the
+    // caller wants to validate whatever is already saved) — an explicit
+    // apiKey in the body never needs a tenant lookup at all.
+    let tenantId: string | null = null;
+    if (body.apiKey === undefined) {
+      const resolved = await getCallerTenantId(user.id, body.tenantId);
+      if (resolved.forbidden || resolved.ambiguous) {
+        return NextResponse.json(fail('BAD_REQUEST', 'Could not resolve a single workspace for this request', start), { status: 400 });
+      }
+      tenantId = resolved.tenantId;
+    }
+
     const res = await fetch(EDGE_FUNCTION_URL, {
       method: 'POST',
       headers: {
@@ -69,6 +83,7 @@ export async function POST(req: NextRequest) {
         provider: body.provider,
         apiKey: body.apiKey,
         baseUrl: body.baseUrl,
+        tenantId,
       }),
     });
 

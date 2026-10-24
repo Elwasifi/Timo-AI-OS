@@ -102,6 +102,9 @@ class AIProviderImpl implements AIProvider {
           maxTokens: options.maxTokens ?? 2048,
           model: options.model,
           stream: false,
+          // M7-09 (BYOK): trusted tenantId, already resolved server-side by
+          // every real caller before it ever reaches usageContext.
+          tenantId: options.usageContext?.tenantId ?? null,
         };
 
         logger.aiDebug(`${this.id} chat attempt ${attempt + 1}/3`);
@@ -165,6 +168,7 @@ class AIProviderImpl implements AIProvider {
           maxTokens: options.maxTokens ?? 2048,
           model: options.model,
           stream: true,
+          tenantId: options.usageContext?.tenantId ?? null,
         };
 
         logger.aiDebug(`${this.id} stream attempt ${attempt + 1}/3`);

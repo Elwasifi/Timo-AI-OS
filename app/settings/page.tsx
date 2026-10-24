@@ -27,6 +27,8 @@ import { Label } from '@/components/ui/label';
 import { toast } from '@/hooks/use-toast';
 import { authFetch } from '@/lib/api/authFetch';
 import type { TaskType } from '@/lib/ai/router';
+import { requiresByok } from '@/lib/settings/tenantProviderKeys';
+import { TenantByokSection } from '@/components/settings/tenant-byok-section';
 
 const ROUTING_TASK_TYPES: TaskType[] = [
   'VOICE', 'FAST_CHAT', 'NORMAL_CHAT', 'AGENT_TO_AGENT', 'SMALL_TASK', 'CODING',
@@ -60,6 +62,7 @@ const VALIDATION_STATUS_META: Record<
   validating: { label: 'Validating…', className: 'text-primary' },
   connected: { label: 'Connected', className: 'text-success' },
   not_configured: { label: 'Not Configured', className: 'text-muted-foreground' },
+  no_byok_configured: { label: 'No Key Configured', className: 'text-muted-foreground' },
   invalid_api_key: { label: 'Invalid API Key', className: 'text-destructive' },
   unauthorized: { label: 'Unauthorized', className: 'text-destructive' },
   unsupported: { label: 'Unsupported', className: 'text-amber-400' },
@@ -88,6 +91,13 @@ export default function SettingsPage() {
   const providers = useDashboardStore((s) => s.providers);
   const currentId = useDashboardStore((s) => s.currentProviderId);
   const setCurrentProvider = useDashboardStore((s) => s.setCurrentProvider);
+  // M7-09 (BYOK): the internal/admin tenant is the one grandfathered
+  // exception that still edits the shared app_settings singleton
+  // (ProvidersSection, unchanged); every other tenant gets its own
+  // tenant-scoped key entry (TenantByokSection) instead — app_settings'
+  // RLS no longer even permits a non-internal tenant to read/write it.
+  const currentTenantId = useAuthStore((s) => s.currentTenantId);
+  const tenantNeedsByok = requiresByok(currentTenantId);
 
   return (
     <AppShell>
@@ -131,11 +141,15 @@ export default function SettingsPage() {
               {active === 'approvals' && <ApprovalsSection />}
               {active === 'agents' && <AgentsSection />}
               {active === 'providers' && (
-                <ProvidersSection
-                  providers={providers}
-                  currentId={currentId}
-                  onSelect={setCurrentProvider}
-                />
+                tenantNeedsByok ? (
+                  <TenantByokSection />
+                ) : (
+                  <ProvidersSection
+                    providers={providers}
+                    currentId={currentId}
+                    onSelect={setCurrentProvider}
+                  />
+                )
               )}
               {active === 'notifications' && <NotificationsSection />}
               {active === 'memory' && <MemorySection />}
