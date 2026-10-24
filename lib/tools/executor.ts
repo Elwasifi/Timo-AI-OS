@@ -20,6 +20,7 @@ import { ensureBuiltinToolsRegistered } from './builtin-tools';
 import { permissionEngine } from './permissions';
 import { logger } from '@/lib/utils/logger';
 import { requestApproval } from '@/lib/governance/approvals';
+import { getTenantExecutionMode, categoryHasRealSandboxIsolation, SANDBOX_TENANT_ID } from '@/lib/governance/executionMode';
 
 export class ToolValidationError extends Error {
   constructor(toolId: string, param: string, message: string) {
@@ -66,6 +67,24 @@ class ToolExecutorImpl {
       return this.fail(request, start, 0, false, validationError.message);
     }
 
+    // M7-05: resolve the effective execution mode for this specific call.
+    // isSimulation (V1, whole-mission opt-in) always wins outright — kept
+    // completely untouched from its pre-M7-05 behavior. Otherwise an
+    // explicit per-call override wins, falling back to the tenant's
+    // configured default (tenants.execution_mode, 'sandbox' if unset/
+    // unreadable — fail-closed, never fail-open to 'live').
+    const effectiveMode = request.isSimulation
+      ? 'simulation'
+      : request.executionMode ?? (await getTenantExecutionMode(request.tenantId));
+
+    // M7-05: sandbox mode degrades to simulation-equivalent behavior for
+    // any tool category with no real isolated environment to route to
+    // (confirmed decision — see executionMode.ts's
+    // categoryHasRealSandboxIsolation comment for which categories do/
+    // don't have one today).
+    const sandboxDegradesToSimulation =
+      effectiveMode === 'sandbox' && !categoryHasRealSandboxIsolation(registered.definition.category);
+
     // M7-04: simulation is checked BEFORE the approval gate (was after —
     // a simulated call to a gated tool used to create a real pending
     // approval_requests row for an action that would never actually run,
@@ -78,7 +97,12 @@ class ToolExecutorImpl {
     // and a clearly-labeled simulated result is returned instead, so R&D
     // missions can exercise the full pipeline without touching production
     // systems (n8n workflows, memory writes with real consequences, etc).
-    if (request.isSimulation) {
+    //
+    // M7-05: this same path now also covers effectiveMode === 'simulation'
+    // (per-call/tenant-resolved, not just the legacy isSimulation flag) and
+    // a degraded sandbox call — same real-world guarantee either way: zero
+    // external state change.
+    if (request.isSimulation || effectiveMode === 'simulation' || sandboxDegradesToSimulation) {
       const envelope: ToolResultEnvelope = {
         ok: true,
         toolId,
@@ -90,6 +114,7 @@ class ToolExecutorImpl {
         streaming: false,
         timestamp: Date.now(),
         simulated: true,
+        executionMode: 'simulation',
       };
       this.emit({ type: 'success', toolId, requestId: request.id, agentId, detail: 'Simulated (no real side effect)', timestamp: Date.now() });
       return envelope;
@@ -102,6 +127,11 @@ class ToolExecutorImpl {
     // (lib/tools/types.ts) so the confirmation UI can render real "what
     // will happen if confirmed" context instead of just a title/detail
     // string.
+    // M7-05: applies for BOTH 'live' and real-isolation 'sandbox' — a
+    // gated tool is still gated when running against isolated sandbox
+    // state, it is only simulation (no execution at all) that skips the
+    // gate (confirmed design: "should Simulation ever require approval at
+    // all?" — no; sandbox still can and does).
     if (registered.definition.requiresApproval && !request.approvedApprovalId) {
       const approval = await requestApproval({
         tenantId: request.tenantId ?? null,
@@ -114,6 +144,7 @@ class ToolExecutorImpl {
           arguments: args,
           riskLevel: registered.definition.riskLevel ?? null,
           blastRadius: registered.definition.blastRadius ?? null,
+          executionMode: effectiveMode,
         },
         requestedBy: agentId,
         missionId: request.missionId ?? null,
@@ -141,14 +172,26 @@ class ToolExecutorImpl {
     this.activeExecutions.set(request.id, controller);
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
+    // M7-05: sandbox mode, for a category with real isolation (memory
+    // today), transparently rewrites the tenant a handler writes to —
+    // the handler itself (e.g. lib/memory's tenant-scoped writes) is
+    // completely unaware anything special is happening; it just sees a
+    // different tenantId in context, same as any other call.
+    const effectiveTenantId =
+      effectiveMode === 'sandbox' && categoryHasRealSandboxIsolation(registered.definition.category)
+        ? SANDBOX_TENANT_ID
+        : request.tenantId ?? null;
+
     const context: ToolExecutionContext = {
       agentId,
       requestId: request.id,
       signal: controller.signal,
-      tenantId: request.tenantId ?? null,
+      tenantId: effectiveTenantId,
       missionId: request.missionId ?? null,
       taskId: request.taskId ?? null,
       isSimulation: request.isSimulation ?? false,
+      executionMode: effectiveMode,
+      approvedApprovalId: request.approvedApprovalId,
       onProgress: (detail, data) => {
         this.emit({ type: 'progress', toolId, requestId: request.id, agentId, detail, timestamp: Date.now(), data });
       },
@@ -177,6 +220,7 @@ class ToolExecutorImpl {
           retries: attempt,
           streaming: registered.definition.streaming ?? false,
           timestamp: Date.now(),
+          executionMode: effectiveMode,
         };
 
         this.emit({ type: 'success', toolId, requestId: request.id, agentId, detail: `Completed in ${envelope.durationMs}ms`, timestamp: Date.now(), data });

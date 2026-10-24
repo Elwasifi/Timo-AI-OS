@@ -68,6 +68,22 @@ export interface ToolDefinition {
   blastRadius?: 'self' | 'tenant' | 'external';
 }
 
+// M7-05 — Live / Sandbox / Simulation execution mode.
+//
+// Deliberately orthogonal to the pre-existing `isSimulation` flag rather
+// than replacing it: `isSimulation` is a whole-MISSION opt-in ("this
+// entire mission is a dry run", set once per mission, unchanged since
+// V1). `executionMode` is a new, finer-grained, TENANT-configurable
+// layer beneath it — a per-tenant default (tenants.execution_mode) that
+// any call can override, resolved in toolExecutor.execute() as:
+// `request.isSimulation ? 'simulation' : (request.executionMode ??
+// tenantDefault)`. Keeping the two flags separate means the existing,
+// already-working isSimulation behavior is completely untouched (zero
+// regression risk) — this ticket adds a new layer underneath it rather
+// than generalizing/renaming a boolean that's threaded through a dozen
+// call sites already.
+export type ExecutionMode = 'live' | 'sandbox' | 'simulation';
+
 export interface ToolRequest {
   id: string;
   toolId: string;
@@ -80,6 +96,8 @@ export interface ToolRequest {
   missionId?: string | null;
   taskId?: string | null;
   isSimulation?: boolean;
+  /** M7-05: explicit per-call override. Omit to use the tenant's configured default (tenants.execution_mode). */
+  executionMode?: ExecutionMode;
   approvedApprovalId?: string;
 }
 
@@ -98,6 +116,8 @@ export interface ToolResultEnvelope {
   pendingApprovalId?: string;
   /** V1: set when this call ran in a simulation mission — no real external side effect occurred. */
   simulated?: boolean;
+  /** M7-05: the execution mode this specific call actually ran under, after resolving isSimulation/per-call override/tenant default and any category-specific degradation (e.g. sandbox -> simulation for tools with no real isolated environment). */
+  executionMode?: ExecutionMode;
 }
 
 export interface ToolExecutionEvent {
@@ -126,6 +146,8 @@ export interface ToolExecutionContext {
   missionId?: string | null;
   taskId?: string | null;
   isSimulation?: boolean;
+  /** M7-05: the resolved effective mode for this call — set by toolExecutor.execute() before invoking the handler, so a handler that cares (e.g. memory.* tools routing to a sandbox tenant) can read it. */
+  executionMode?: ExecutionMode;
   /** V1: set once a gated tool's pending approval has actually been approved, to bypass the gate on retry. */
   approvedApprovalId?: string;
 }

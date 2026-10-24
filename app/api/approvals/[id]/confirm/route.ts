@@ -31,6 +31,7 @@ import { requireUser, isTenantMember } from '@/lib/auth/apiAuth';
 import { ok, fail, notFound, badRequest, internalError } from '@/lib/api/response';
 import { getApproval, resolveApproval } from '@/lib/governance/approvals';
 import { toolExecutor } from '@/lib/tools/executor';
+import { setTenantExecutionMode } from '@/lib/governance/executionMode';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -83,6 +84,18 @@ export async function POST(req: Request, { params }: { params: { id: string } })
           approvedApprovalId: resolved.id,
         });
         return NextResponse.json(ok({ approval: resolved, toolResult }, start));
+      }
+    }
+
+    // M7-05: mode_change — the only place tenants.execution_mode is ever
+    // actually written on approval (see request-mode-change/route.ts's
+    // comment). Rejection is a no-op: the tenant simply stays on its
+    // current mode, nothing to undo.
+    if (decision === 'approved' && resolved.type === 'mode_change') {
+      const { tenantId, newMode } = resolved.payload as { tenantId?: string; newMode?: string };
+      if (tenantId && newMode === 'live') {
+        const applied = await setTenantExecutionMode(tenantId, 'live');
+        return NextResponse.json(ok({ approval: resolved, modeApplied: applied }, start));
       }
     }
 

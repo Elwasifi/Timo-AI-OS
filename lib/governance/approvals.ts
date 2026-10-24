@@ -8,7 +8,12 @@
 import { supabase } from '@/lib/supabase/client';
 import { updateTask } from '@/lib/swarm/missionService';
 
-export type ApprovalType = 'tool_execution' | 'spend' | 'publish' | 'destructive_action';
+// M7-05: 'mode_change' is a tenant switching its execution_mode default to
+// 'live' — reuses this same approval_requests mechanism rather than a new
+// one (per the ticket's request), gated the same way any other approval
+// is: created pending, applied only in app/api/approvals/[id]/confirm's
+// mode_change branch on 'approved', a no-op on 'rejected'.
+export type ApprovalType = 'tool_execution' | 'spend' | 'publish' | 'destructive_action' | 'mode_change';
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
 
 export interface ApprovalRequest {
