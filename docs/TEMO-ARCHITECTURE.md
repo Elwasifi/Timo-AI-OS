@@ -2017,11 +2017,11 @@ Approved by Cowork and Amro.
 
 ---
 
-## M7-05 — LIVE / SANDBOX / SIMULATION EXECUTION MODE (IN PROGRESS — PENDING FINAL SIGN-OFF, NOT YET COMMITTED)
+## M7-05 — LIVE / SANDBOX / SIMULATION EXECUTION MODE (2026-09-05, shipped)
 
-**Ticket**: `M7-05`. Branch: `milestone-7-core-engine`. Builds on M7-03's unified tool execution framework and M7-04's approval gate.
+**Ticket**: `M7-05`. Branch: `milestone-7-core-engine`. Commit `2f28ebf`. Builds on M7-03's unified tool execution framework and M7-04's approval gate.
 
-**Status: implementation complete locally, fully dry-run/live-tested, but not committed, not pushed, and the migration has not been applied to the live database.** This section is written up now (per the standing rule that this document must stay current) but must not be read as "shipped" — it documents an open, in-review ticket, not a merged one. Update this section to drop the "in progress" framing only once Cowork/Amro sign-off lands and the commit referenced here actually exists.
+**Status: fully shipped — migration applied live, code committed and pushed.** (This section originally read "in progress, pending sign-off" — updated here once sign-off landed and the commit above actually exists, per the standing rule that this document must stay current, not frozen at the moment a section was first drafted.)
 
 **Problem addressed**: previously no separation existed between real execution and test/simulated execution — every tool call either executed for real or was an explicit "not implemented" placeholder.
 
@@ -2062,7 +2062,79 @@ Approved by Cowork and Amro.
 
 **Consequence for M7-01 specifically**: the new checkpointing/resume mechanism is fully correct and live-verified (see the M7-01 section above), but it currently only gets exercised when a human (or this session's manual test) explicitly re-triggers a stuck task. In production-as-deployed-today, a task that gets interrupted mid-loop (the exact scenario checkpointing is for) will sit in `'running'` past its stale-recovery window and then `'ready'` forever, never actually resuming, until either a scheduler is wired up or someone calls the endpoint by hand.
 
-## KNOWN ARCHITECTURAL GAPS (documented, intentional, non-blocking — not oversights)
+---
+
+## M7-09 — BYOK (BRING YOUR OWN KEY) + APP_SETTINGS RLS EXPOSURE FIX (2026-10-24, shipped)
+
+**Ticket**: `M7-09`. Branch: `milestone-7-core-engine`. Commit `b6ec2e6`.
+
+**Product decision driving this**: every tenant — including personal-network beta testers — must configure its own AI provider keys at launch; there is no shared fallback key for anyone but the grandfathered internal/admin tenant. Built now, before real client tenant data exists, rather than retrofitted later.
+
+**Also fixes a live credential-exposure gap found while scoping this ticket**: `app_settings`' RLS (tightened to `authenticated`-only by the S0-03 containment pass, `20260829120000`) was never scoped to a specific tenant — any signed-in user, not just the internal/admin one, could read and write the shared provider-key singleton row. Confirmed live via `pg_policies` before fixing it.
+
+**Data layer**: new `tenant_provider_keys` table (`tenant_id`, `provider`, `api_key`, `model`), one row per `(tenant, provider)`, RLS via `is_tenant_member(tenant_id)` — same pattern every other tenant-scoped table uses. Covers `gemini`/`groq`/`nvidia`/`openrouter` only; `ollama` excluded (self-hosted, unreachable per-tenant from this server). `app_settings` RLS tightened to internal-tenant membership only (`is_tenant_member('00000000-0000-0000-0000-000000000001')`).
+
+**Routing**: `ChatRequest`/`ValidateRequest` (the `ai-chat` edge function) now carry a trusted `tenantId`, threaded from `lib/ai/ai-provider.ts`'s `options.usageContext` — every real caller already resolved this server-side via `requireUser()`/`isTenantMember()` before it reaches here, same trust boundary `toolExecutor.execute()` already relies on. `loadProviderConfigs(tenantId)`: the internal tenant (or no `tenantId`) keeps reading `app_settings` exactly as before (grandfathered); every other tenant resolves from `tenant_provider_keys` instead. A missing key resolves to `null`, which the existing `adapter.requiresKey && !apiKey` check already turns into an honest 401 — no silent fallback to a shared key. New `no_byok_configured` validation status, distinct from the admin tenant's `not_configured`.
+
+**UI**: new `<TenantByokSection>` replaces the admin-only `ProvidersSection` in Settings for any non-internal tenant. New `<ByokGateBanner>`, mounted globally: a persistent (not a hard page block) prompt when the current tenant has zero keys configured.
+
+**Live end-to-end verification, real throwaway tenant+user** (not simulated): (1) internal tenant still resolves via `app_settings` (status: `connected`, real Gemini model list); (2) a non-internal tenant with no key gets `no_byok_configured`, not a generic error; (3) a non-internal tenant with its own (deliberately invalid, for a distinguishable failure signature) key gets a provider-specific `invalid_api_key` rejection — proof it reached the provider using *that tenant's own* key, not `app_settings`' real one; (4) that tenant's own session, via a real RLS-scoped client, gets zero rows reading `app_settings` and its update affects zero rows (verified via a service-role re-read immediately after — the real admin row was untouched), while the same session can read/write its own `tenant_provider_keys` row freely (positive control). All 5 assertions passed on the real run; throwaway tenant/user/keys fully cleaned up afterward, 0 leftover rows confirmed.
+
+---
+
+## M7-10 — AUTH READINESS FOR PRIVATE BETA (2026-10-24, shipped)
+
+**Ticket**: `M7-10`. Branch: `milestone-7-core-engine`. Commit `d5ee8c6` (same commit as M7-10b, combined per explicit instruction).
+
+**Root cause this addresses**: manual testing during M7-09 found there was no reachable login page, no logout, no profile editing, and no account-deletion option anywhere in the running app — Amro landed directly in the dashboard as a hardcoded "Alex Rivera" placeholder with no auth screen ever appearing. Investigation (full raw findings sent separately, summarized here) found the real auth system was **already correct and complete** — it was just unreachable:
+
+- `app/login/page.tsx` — a real, fully-wired sign-in/sign-up page (real `supabase.auth.signInWithPassword()`/`signUp()` calls) existed the whole time, just never linked from anywhere in the UI.
+- `components/auth/auth-gate.tsx` — the client-side route guard was already correct (redirects to `/login` when there's no session); it just never saw "no session," because of the next point.
+- `stores/authStore.ts`'s `init()` had a dev-only auto-login bypass (`NEXT_PUBLIC_DEV_AUTO_LOGIN=true` in `.env.local`), silently signing every local session in as a fixed dev account (`dev-tester@temo.local`) before `AuthGate` ever got to check for a missing session.
+- "Alex Rivera" / `alex@temo.ai` was **not a real account at all** — 100% hardcoded static JSX in `ProfileSection` (`app/settings/page.tsx`), completely disconnected from the real session. Confirmed live: exactly one real row in `auth.users` existed in the entire project (`dev-tester@temo.local`).
+- `signOut()` already existed correctly in `authStore.ts` — zero call sites anywhere in the UI.
+- `provision_tenant_for_new_user()` (the `auth.users` signup trigger, `20260819150000`) was already correct — confirmed via a real live signup in this ticket's own verification (below) — it had just never been exercised by a real human signup before.
+- No `middleware.ts` exists anywhere in the project; the auth gate is entirely client-side (`AuthGate`), a lower-severity, separate observation from the main gap.
+
+**What was built**:
+1. **Dev auto-login gated + disabled by default.** `stores/authStore.ts` now requires **both** `NEXT_PUBLIC_DEV_AUTO_LOGIN=true` **and** `NODE_ENV !== 'production'` before the bypass can take effect, plus loud `console.warn`s in both the active and the "ignored because production" cases — so this can never silently take effect in a deployed/beta build even if the flag leaks into one by mistake. `.env.local`'s flag flipped to `false` (gitignored, not part of the commit — documented in the file's own comment and here).
+2. **Real logout.** A user menu (email shown, "Log out" item) added to `TopNav`, calling the existing `signOut()` and routing to `/login`.
+3. **`ProfileSection` fixed.** Real email from `useAuthStore().user`. Display name has no real field captured anywhere (`signUp()` only ever collects `company_name`, for the tenant, not a personal name) — falls back to the email's local part until M7-10b's real display-name field (below). Time zone/Plan were explicit placeholders at the time, labeled honestly in the UI rather than silently looking real (Plan became real data in the same cycle via M7-10b).
+4. **Real end-to-end signup verification** — not an Admin-API shortcut. Blocked initially by Supabase's GoTrue email-send rate limit (`rate_limit_email_sent: 2`, confirmed via the Management API's `GET /v1/projects/{ref}/config/auth`); resolved with Amro's explicit approval by temporarily `PATCH`ing `mailer_autoconfirm: true` (confirmed exact field/value from the real API response, not guessed), running a real signup through the actual `/login` form via Playwright, verifying the trigger fired correctly (a genuine new `client`-kind tenant, owner membership, `client_profiles` row, `free` entitlement with 20 credits — all confirmed via live DB reads), then `PATCH`ing `mailer_autoconfirm` back to `false` and confirming via a fresh `GET` that the full auth config matched the original byte-for-byte. Throwaway user/tenant/entitlement rows fully cleaned up afterward (0 leftover rows across all 5 touched tables, confirmed).
+
+**Credential-handling note for future sessions**: the Management API `PATCH` required a scoped personal access token with `project_admin_write` (a narrower "auth-config-write-only" scope does not exist as a token permission) — the token was never pasted into chat; it was written to a local untracked file, read once, and used only inline, then deleted after use. Raw credential extraction from the Windows Credential Manager (an alternative path considered) was blocked outright by the harness's own permission classifier, independent of any user approval — documented here in case a future session hits the same wall.
+
+---
+
+## M7-10b — ACCOUNT & BILLING FOUNDATION (STRUCTURE ONLY, NO LIVE PAYMENTS) (2026-10-24, shipped)
+
+**Ticket**: `M7-10b`. Branch: `milestone-7-core-engine`. Commit `d5ee8c6` (same commit as M7-10, combined per explicit instruction) + migration `20261024140000_billing_plans_real_tiers.sql`.
+
+**Scope, explicit**: schema + UI only. Private Beta stays completely free, no payment, no extra signup friction. Amro has a Stripe account but deliberately has not activated real payments — **no live Stripe API calls, no Stripe keys anywhere, no real payment processing.**
+
+**Key finding that shaped the design**: a real `packages` table already existed (`20260819140000`, Section 14) — `id`, `name`, `project_limit`, `credit_limit`, `features jsonb`, `price_cents` (nullable = "not yet priced"), `sort_order` — already referenced by `tenant_entitlements.package_id`, already RLS-open to any authenticated user. **No new `plans` table was built** — a second parallel table would have duplicated an existing, correctly-shaped one. The real gap was just placeholder names (`"Package 1/2/3"`) and no feature/marketing copy.
+
+**What was built**:
+1. **Real display name + change password.** `auth.users.user_metadata.display_name` — same mechanism `signUp()` already uses for `company_name`, no new table. `stores/authStore.ts` gained `updateDisplayName()`/`updatePassword()` (the latter via `supabase.auth.updateUser({ password })` — confirmed live that `security_update_password_require_current_password: false`, so no current-password re-entry needed). `ProfileSection` now has working inline edit forms for both.
+2. **Real plan tiers**, via migration `20261024140000_billing_plans_real_tiers.sql` (plain `UPDATE`s on existing primary keys — zero FK/data-migration risk):
+
+   | id (unchanged) | Name | Price | Project limit | Credit limit |
+   |---|---|---|---|---|
+   | `free` | **Free** | `$0/mo` | 1 | 20 |
+   | `package1` | **Starter** | TBD | 3 | 100 |
+   | `package2` | **Pro** | TBD | 3 | 250 |
+   | `package3` | **Business** | TBD | 10 | 1000 |
+   | `custom` | Custom (unchanged) | — | unlimited | unlimited |
+
+   `project_limit`/`credit_limit` values are unchanged from the original seed — not invented, just named. `price_cents` stays `NULL` (= TBD, already-nullable semantics) for every paid tier; Free is genuinely `$0`, not TBD.
+3. **Billing & Plan page** — new Settings tab (`BillingSection`), real data from `packages` + the tenant's real `tenant_entitlements` row: current plan highlighted, price shown as `$X/mo` or `TBD`, feature bullets, **disabled** "Coming Soon"/"Current plan" buttons — no checkout flow anywhere.
+4. **Beta stays unrestricted — one flag, not scattered logic.** `BETA_UNRESTRICTED_ACCESS = true` in `lib/governance/entitlements.ts`, short-circuiting `checkEntitlement()` — the single real enforcement choke point (`lib/swarm/missionEngine.ts`'s `launchMission()`). Every tenant gets `allowed: true` unconditionally while this is `true`. Flipping it to `false` is the entire "turn billing on" switch for usage limits.
+
+**Bug found and fixed by live testing, same pass**: the first real render of the Billing page threw `TypeError: ...map is not a function` — `packages.features` was `{}` (the column's pre-migration JSON-object default) in the live DB at that point, not an array, and `pkg.features ?? []` doesn't catch "truthy but not an array." Fixed to `Array.isArray(pkg.features) ? pkg.features : []`; re-verified live both pre- and post-migration.
+
+**Live verification, post-migration-apply** (real sign-in, Playwright + screenshots): Billing & Plan page renders the real tier names/features/pricing correctly (`Free $0/mo`, `Starter/Pro/Business TBD`, real feature bullets, no more `"Package 1/2/3"`); Profile page's Plan field correctly resolves `Custom` for the internal tenant; zero console errors across the full login → dashboard → settings → billing → profile flow.
+
+---
 
 These are real, currently-open gaps, each deliberately scoped out of the ticket that found it, with an explicit decision recorded (not silently deferred and not silently fixed beyond agreed scope).
 
@@ -2086,6 +2158,6 @@ High-level direction only; each milestone below gets its own scoping pass (desig
 ---
 
 ## ARCHITECTURE DOCUMENT VERSION
-Version: 3.26
+Version: 3.27
 Date: 2026-10-24
-Status: Milestone 7 (Core Engine) in progress on `milestone-7-core-engine`. M7-01 (real agent loop + checkpointing), M7-02 (Realtime replacing polling), M7-03 (unified tool execution framework + its same-day enum bugfix), and M7-04 (general confirmation/approval gate, including the batch-masking incident found and fixed before merge) are all merged. M7-05 (Live/Sandbox/Simulation execution mode) is implemented and fully dry-run/live-tested locally but **not yet committed, not pushed, and its migration has not been applied live** — pending Cowork/Amro final sign-off; see the M7-05 section above, which must be the first thing updated once that sign-off lands. Two gaps are tracked as deliberate, non-blocking scope boundaries rather than oversights: M7-03b (delegated workers have no real tool access) and M7-04b (no genuine resume for the upfront `decideTools()` gate path) — see "Known architectural gaps" above. The background task-queue scheduler gap (found during M7-01 live testing) remains open, tracked with real numbers in its own section above. Future direction beyond Milestone 7 is summarized in "Future roadmap" above: M8 (real channels), M9 (commercial integrations), M10 (cinematic UI polish), and the Trading Company Master Mission (deferred until after M8, Demo/Paper mode only). Predecessor milestones: the Dynamic Model Router (`lib/ai/router/`, 2026-08-20) sits between every real AI call site and `chatWithFallback`/`streamWithFallback` — see the "DYNAMIC MODEL ROUTER" section above for full detail. Full prior-version history remains in the dated sections above this footer, in order.
+Status: Milestone 7 (Core Engine) in progress on `milestone-7-core-engine`. M7-01 through M7-05 are merged (M7-05's section above updated to reflect its real shipped status — migration applied live, commit `2f28ebf`). M7-09 (BYOK — per-tenant AI provider keys, plus closing a live `app_settings` RLS credential-exposure gap, commit `b6ec2e6`) and M7-10 (Auth Readiness for Private Beta — dev-auth-bypass hardened and disabled by default, real logout wired up, real signup end-to-end verified) are merged, the latter in commit `d5ee8c6`. M7-10b (Account & Billing foundation — real display name/password, real plan tiers on the existing `packages` table, a Billing & Plan page, and the single `BETA_UNRESTRICTED_ACCESS` flag keeping the beta fully unrestricted) is merged in that same commit, migration `20261024140000_billing_plans_real_tiers.sql` applied live. Two gaps are tracked as deliberate, non-blocking scope boundaries rather than oversights: M7-03b (delegated workers have no real tool access) and M7-04b (no genuine resume for the upfront `decideTools()` gate path) — see "Known architectural gaps" above. The background task-queue scheduler gap (found during M7-01 live testing) remains open, tracked with real numbers in its own section above. Future direction beyond Milestone 7 is summarized in "Future roadmap" above: M8 (real channels), M9 (commercial integrations), M10 (cinematic UI polish), and the Trading Company Master Mission (deferred until after M8, Demo/Paper mode only). Predecessor milestones: the Dynamic Model Router (`lib/ai/router/`, 2026-08-20) sits between every real AI call site and `chatWithFallback`/`streamWithFallback` — see the "DYNAMIC MODEL ROUTER" section above for full detail. Full prior-version history remains in the dated sections above this footer, in order.
