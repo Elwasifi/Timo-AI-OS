@@ -33,6 +33,9 @@ interface AuthState {
   signOut: () => Promise<void>;
   setCurrentTenant: (tenantId: string) => void;
   refreshTenants: () => Promise<void>;
+  /** M7-10b: the only place a user's real display name lives — auth.users.user_metadata.display_name, same mechanism signUp() already uses for company_name. No new table. */
+  updateDisplayName: (name: string) => Promise<{ error: string | null }>;
+  updatePassword: (newPassword: string) => Promise<{ error: string | null }>;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -51,11 +54,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const { data } = await supabase.auth.getSession();
     set({ session: data.session, user: data.session?.user ?? null });
 
-    // TEMPORARY (testing only, see .env.local comment): auto-login as a
-    // dedicated dev account instead of requiring a manual sign-in. Real
-    // auth + RLS are unaffected — this just supplies a real session
-    // automatically. Never runs unless NEXT_PUBLIC_DEV_AUTO_LOGIN=true.
-    if (!data.session && process.env.NEXT_PUBLIC_DEV_AUTO_LOGIN === 'true') {
+    // TEMPORARY (local dev convenience only, see .env.local comment):
+    // auto-login as a dedicated dev account instead of requiring a manual
+    // sign-in. Real auth + RLS are unaffected — this just supplies a real
+    // session automatically.
+    //
+    // M7-10: gated on NODE_ENV !== 'production' in addition to the flag
+    // itself, so this can never silently take effect in a deployed/beta
+    // build even if NEXT_PUBLIC_DEV_AUTO_LOGIN=true ends up baked into a
+    // production .env by mistake — a real login screen must always be
+    // what a deployed environment shows. The explicit console.warn below
+    // is a second, loud signal during local dev (so it's never mistaken
+    // for "just working" and left on by accident), not a substitute for
+    // the NODE_ENV gate itself.
+    const devAutoLoginRequested = process.env.NEXT_PUBLIC_DEV_AUTO_LOGIN === 'true';
+    const devAutoLoginAllowed = process.env.NODE_ENV !== 'production';
+    if (!data.session && devAutoLoginRequested && devAutoLoginAllowed) {
+      console.warn('[authStore] DEV AUTO-LOGIN is active — real /login is bypassed. Local dev only; see .env.local.');
       const email = process.env.NEXT_PUBLIC_DEV_LOGIN_EMAIL;
       const password = process.env.NEXT_PUBLIC_DEV_LOGIN_PASSWORD;
       if (email && password) {
@@ -67,6 +82,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
           console.warn('[authStore] Dev auto-login failed:', error.message);
         }
       }
+    } else if (!data.session && devAutoLoginRequested && !devAutoLoginAllowed) {
+      // Should be structurally unreachable (NEXT_PUBLIC_DEV_AUTO_LOGIN
+      // belongs only in a local .env.local, never a deployed build's
+      // env), but if it somehow does happen, fail loudly rather than
+      // silently bypassing auth in what could be a real environment.
+      console.warn('[authStore] NEXT_PUBLIC_DEV_AUTO_LOGIN=true was set but NODE_ENV=production — ignoring it. Dev auto-login never applies outside local development.');
     }
 
     if (get().session) await get().refreshTenants();
@@ -147,4 +168,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   setCurrentTenant: (tenantId) => set({ currentTenantId: tenantId }),
+
+  updateDisplayName: async (name) => {
+    const { data, error } = await supabase.auth.updateUser({ data: { display_name: name } });
+    if (error) return { error: error.message };
+    set({ user: data.user });
+    return { error: null };
+  },
+
+  updatePassword: async (newPassword) => {
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    return { error: error?.message ?? null };
+  },
 }));

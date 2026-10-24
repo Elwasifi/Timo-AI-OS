@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { User, Bell, Shield, Palette, Volume2, Sparkles, Check, Loader2, Eye, EyeOff, Save, Workflow, Wifi, AlertCircle, Brain, Users, UserPlus, Trash2, Pencil, Globe, ShieldAlert, X as XIcon, CheckCircle2, XCircle, AlertTriangle, Clock, Settings as SettingsIcon, Play } from 'lucide-react';
+import { User, Bell, Shield, Palette, Volume2, Sparkles, Check, Loader2, Eye, EyeOff, Save, Workflow, Wifi, AlertCircle, Brain, Users, UserPlus, Trash2, Pencil, Globe, ShieldAlert, X as XIcon, CheckCircle2, XCircle, AlertTriangle, Clock, Settings as SettingsIcon, Play, CreditCard } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useVoiceStore } from '@/stores/voiceStore';
@@ -44,6 +44,7 @@ const SECTIONS = [
   { id: 'approvals', label: 'Approvals', icon: ShieldAlert },
   { id: 'agents', label: 'Agent Management', icon: Users },
   { id: 'providers', label: 'AI Providers', icon: Sparkles },
+  { id: 'billing', label: 'Billing & Plan', icon: CreditCard },
   { id: 'memory', label: 'Memory Engine', icon: Brain },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'appearance', label: 'Appearance', icon: Palette },
@@ -151,6 +152,7 @@ export default function SettingsPage() {
                   />
                 )
               )}
+              {active === 'billing' && <BillingSection />}
               {active === 'notifications' && <NotificationsSection />}
               {active === 'memory' && <MemorySection />}
               {active === 'appearance' && <AppearanceSection />}
@@ -175,24 +177,234 @@ function Field({ label, value }: { label: string; value: string }) {
 }
 
 function ProfileSection() {
+  // M7-10 / M7-10b — real data from the actual signed-in session,
+  // replacing the hardcoded "Alex Rivera" placeholder that was never
+  // wired to auth at all.
+  //
+  // Display name (M7-10b): stored in auth.users.user_metadata.display_name
+  // — the same mechanism signUp() already uses for company_name, so no
+  // new table. Falls back to the email's local part until a real name is
+  // set. Editable here via stores/authStore.ts's updateDisplayName().
+  //
+  // Plan (M7-10b): now real — reads the tenant's actual package from
+  // tenant_entitlements/packages (see "Billing & Plan" section for the
+  // full picture). Time zone still has no real data source (no per-user
+  // timezone setting anywhere) and stays an explicit placeholder rather
+  // than silently showing fake-but-real-looking data.
+  const user = useAuthStore((s) => s.user);
+  const currentTenantId = useAuthStore((s) => s.currentTenantId);
+  const updateDisplayName = useAuthStore((s) => s.updateDisplayName);
+  const updatePassword = useAuthStore((s) => s.updatePassword);
+
+  const email = user?.email ?? null;
+  const savedDisplayName = (user?.user_metadata?.display_name as string | undefined) || (email ? email.split('@')[0] : 'Unknown');
+  const initial = savedDisplayName.charAt(0).toUpperCase();
+
+  const [nameInput, setNameInput] = useState(savedDisplayName);
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameSaved, setNameSaved] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
+
+  const [planName, setPlanName] = useState<string | null>(null);
+  const [planLoading, setPlanLoading] = useState(true);
+
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordSaved, setPasswordSaved] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+
+  useEffect(() => { setNameInput(savedDisplayName); }, [savedDisplayName]);
+
+  useEffect(() => {
+    if (!currentTenantId) { setPlanLoading(false); return; }
+    let ignore = false;
+    supabase
+      .from('tenant_entitlements')
+      .select('package_id, packages ( name )')
+      .eq('tenant_id', currentTenantId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (ignore) return;
+        const pkg = data?.packages as unknown as { name: string } | null;
+        setPlanName(pkg?.name ?? data?.package_id ?? null);
+        setPlanLoading(false);
+      });
+    return () => { ignore = true; };
+  }, [currentTenantId]);
+
+  const saveName = async () => {
+    const trimmed = nameInput.trim();
+    if (!trimmed || trimmed === savedDisplayName) return;
+    setNameSaving(true);
+    setNameError(null);
+    const { error } = await updateDisplayName(trimmed);
+    setNameSaving(false);
+    if (error) { setNameError(error); return; }
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 2000);
+  };
+
+  const savePassword = async () => {
+    setPasswordError(null);
+    if (newPassword.length < 6) { setPasswordError('Password must be at least 6 characters.'); return; }
+    if (newPassword !== confirmPassword) { setPasswordError('Passwords do not match.'); return; }
+    setPasswordSaving(true);
+    const { error } = await updatePassword(newPassword);
+    setPasswordSaving(false);
+    if (error) { setPasswordError(error); return; }
+    setNewPassword('');
+    setConfirmPassword('');
+    setPasswordSaved(true);
+    setTimeout(() => setPasswordSaved(false), 2000);
+  };
+
   return (
     <div>
       <h2 className="font-grotesk text-lg font-semibold">Profile</h2>
       <p className="mt-1 text-sm text-muted-foreground">Your account information</p>
       <div className="mt-4 flex items-center gap-4">
         <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-primary/30 to-secondary/30 text-2xl font-bold text-primary">
-          A
+          {initial}
         </div>
         <div>
-          <div className="text-base font-semibold">Alex Rivera</div>
-          <div className="text-sm text-muted-foreground">alex@temo.ai</div>
+          <div className="text-base font-semibold">{savedDisplayName}</div>
+          <div className="text-sm text-muted-foreground">{email ?? 'Not signed in'}</div>
         </div>
       </div>
+
       <div className="mt-6">
-        <Field label="Display name" value="Alex Rivera" />
-        <Field label="Email" value="alex@temo.ai" />
-        <Field label="Time zone" value="Pacific (UTC-8)" />
-        <Field label="Plan" value="Pro" />
+        <Field label="Email" value={email ?? '—'} />
+        <Field label="Time zone" value="Pacific (UTC-8) — placeholder, no real source yet" />
+        <Field label="Plan" value={planLoading ? 'Loading…' : (planName ?? '—')} />
+      </div>
+
+      <div className="mt-6 border-t border-border/40 pt-6">
+        <Label className="text-xs text-muted-foreground">Display name</Label>
+        <div className="mt-2 flex items-center gap-2">
+          <Input value={nameInput} onChange={(e) => setNameInput(e.target.value)} className="max-w-xs" />
+          <Button onClick={saveName} disabled={nameSaving || !nameInput.trim() || nameInput.trim() === savedDisplayName} size="sm">
+            {nameSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : nameSaved ? <Check className="h-4 w-4" /> : 'Save'}
+          </Button>
+        </div>
+        {nameError && <p className="mt-1 text-xs text-destructive">{nameError}</p>}
+      </div>
+
+      <div className="mt-6 border-t border-border/40 pt-6">
+        <Label className="text-xs text-muted-foreground">Change password</Label>
+        <div className="mt-2 grid max-w-xs gap-2">
+          <Input type="password" placeholder="New password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+          <Input type="password" placeholder="Confirm new password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
+          <Button onClick={savePassword} disabled={passwordSaving || !newPassword || !confirmPassword} size="sm" className="w-fit">
+            {passwordSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : passwordSaved ? <Check className="h-4 w-4" /> : 'Update password'}
+          </Button>
+        </div>
+        {passwordError && <p className="mt-1 text-xs text-destructive">{passwordError}</p>}
+      </div>
+    </div>
+  );
+}
+
+interface BillingPackage {
+  id: string;
+  name: string;
+  project_limit: number | null;
+  credit_limit: number | null;
+  features: string[];
+  price_cents: number | null;
+  sort_order: number;
+}
+
+function formatPriceCents(cents: number | null): string {
+  if (cents === null) return 'TBD';
+  if (cents === 0) return '$0/mo';
+  return `$${(cents / 100).toFixed(0)}/mo`;
+}
+
+function BillingSection() {
+  // M7-10b — Account & Billing foundation (schema + UI only, no live
+  // payments). Reads the real packages table and the tenant's real
+  // tenant_entitlements row — both already exist (20260819140000). No
+  // Stripe integration, no checkout flow: Upgrade buttons are visibly
+  // disabled/"Coming Soon" per the ticket's explicit scope. Beta-wide
+  // unrestricted access is enforced in exactly one place
+  // (lib/governance/entitlements.ts's BETA_UNRESTRICTED_ACCESS,
+  // checkEntitlement()) — this page shows the real plan a tenant is
+  // nominally on, it does not itself gate anything.
+  const currentTenantId = useAuthStore((s) => s.currentTenantId);
+  const [packages, setPackages] = useState<BillingPackage[]>([]);
+  const [currentPackageId, setCurrentPackageId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let ignore = false;
+    void Promise.all([
+      supabase.from('packages').select('*').order('sort_order'),
+      currentTenantId
+        ? supabase.from('tenant_entitlements').select('package_id').eq('tenant_id', currentTenantId).maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]).then(([pkgRes, entRes]) => {
+      if (ignore) return;
+      setPackages((pkgRes.data as BillingPackage[]) ?? []);
+      setCurrentPackageId((entRes.data as { package_id: string } | null)?.package_id ?? null);
+      setLoading(false);
+    });
+    return () => { ignore = true; };
+  }, [currentTenantId]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-3 py-8 text-muted-foreground">
+        <Loader2 className="h-5 w-5 animate-spin" /> Loading plans...
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h2 className="font-grotesk text-lg font-semibold">Billing & Plan</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Private Beta: every workspace has full, unrestricted access regardless of plan shown below — nothing here is enforced yet.
+      </p>
+
+      <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {packages.filter((p) => p.id !== 'custom').map((pkg) => {
+          const isCurrent = pkg.id === currentPackageId;
+          return (
+            <div
+              key={pkg.id}
+              className={cn(
+                'rounded-xl border p-4',
+                isCurrent ? 'border-primary/50 bg-primary/5' : 'border-border/60',
+              )}
+            >
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold">{pkg.name}</span>
+                {isCurrent && (
+                  <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary">
+                    Current plan
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-lg font-bold">{formatPriceCents(pkg.price_cents)}</div>
+              <ul className="mt-3 space-y-1.5 text-xs text-muted-foreground">
+                {(Array.isArray(pkg.features) ? pkg.features : []).map((f, i) => (
+                  <li key={i} className="flex items-center gap-1.5">
+                    <Check className="h-3 w-3 shrink-0 text-success" /> {f}
+                  </li>
+                ))}
+              </ul>
+              <Button
+                size="sm"
+                disabled
+                className="mt-4 w-full"
+                variant={isCurrent ? 'secondary' : 'outline'}
+              >
+                {isCurrent ? 'Current plan' : 'Coming Soon'}
+              </Button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

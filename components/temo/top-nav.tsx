@@ -2,12 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Search, Bell, Settings, Activity } from 'lucide-react';
+import { Search, Bell, Settings, Activity, LogOut } from 'lucide-react';
 import { useUIStore } from '@/stores/uiStore';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useSystemStore, startSystemHealthPolling } from '@/stores/systemStore';
 import { useVoiceStore } from '@/stores/voiceStore';
+import { useAuthStore } from '@/stores/authStore';
 import { cn } from '@/lib/utils';
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuLabel, DropdownMenuSeparator,
+} from '@/components/ui/dropdown-menu';
 
 export function TopNav() {
   const router = useRouter();
@@ -16,7 +21,16 @@ export function TopNav() {
   const agents = useDashboardStore((s) => s.agents);
   const orbState = useVoiceStore((s) => s.orbState);
   const isSleeping = useVoiceStore((s) => s.isSleeping);
+  const userEmail = useAuthStore((s) => s.user?.email ?? null);
+  const signOut = useAuthStore((s) => s.signOut);
   const [time, setTime] = useState('');
+
+  // M7-10 — real, visible logout. signOut() already existed correctly in
+  // authStore but had zero call sites anywhere in the UI.
+  const handleLogout = async () => {
+    await signOut();
+    router.push('/login');
+  };
 
   useEffect(() => {
     const update = () => setTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
@@ -98,6 +112,27 @@ export function TopNav() {
 
         {/* Time */}
         <span className="hidden font-mono text-[11px] text-temo-titanium lg:inline">{time}</span>
+
+        {/* User menu / logout (M7-10) */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              title="Account"
+              aria-label="Account menu"
+              className="flex h-8 w-8 items-center justify-center rounded-full border border-temo-cyan/20 bg-white/[0.03] text-xs font-semibold uppercase text-temo-cyan transition-colors hover:border-temo-cyan/40"
+            >
+              {userEmail ? userEmail[0] : '?'}
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel className="truncate font-mono text-xs">{userEmail ?? 'Not signed in'}</DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={handleLogout}>
+              <LogOut className="mr-2 h-4 w-4" />
+              Log out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </header>
   );

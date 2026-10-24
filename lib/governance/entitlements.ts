@@ -7,6 +7,20 @@
 
 import { supabase } from '@/lib/supabase/client';
 
+/**
+ * M7-10b (Private Beta) — the single switch for whether plan/package
+ * limits actually restrict anyone. Every current and new tenant gets
+ * full, unrestricted access during the beta regardless of which package
+ * it's nominally on (packages table, Settings -> Billing & Plan) — the
+ * plan data model and this enforcement logic both already exist and are
+ * correct underneath, they're just short-circuited here. Flip this one
+ * constant (and nothing else) to turn real plan enforcement back on when
+ * billing actually goes live — do not scatter additional "is this beta"
+ * checks anywhere else; checkEntitlement() is the single real enforcement
+ * choke point (lib/swarm/missionEngine.ts's launchMission()).
+ */
+export const BETA_UNRESTRICTED_ACCESS = true;
+
 export interface EntitlementCheck {
   allowed: boolean;
   reason?: string;
@@ -24,6 +38,10 @@ interface EntitlementRow {
 
 /** Check whether a tenant may start a new mission (project) right now. */
 export async function checkEntitlement(tenantId: string): Promise<EntitlementCheck> {
+  if (BETA_UNRESTRICTED_ACCESS) {
+    return { allowed: true, creditsRemaining: null, projectsUsed: 0, projectLimit: null };
+  }
+
   const { data, error } = await supabase
     .from('tenant_entitlements')
     .select('package_id, credits_remaining, projects_used, packages ( project_limit, credit_limit )')
