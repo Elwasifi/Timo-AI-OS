@@ -444,6 +444,32 @@ export async function getTasks(missionId: string): Promise<MissionTask[]> {
   return (data as TaskRow[]).map(mapTask);
 }
 
+/**
+ * M7-12: batched replacement for Promise.all(missionIds.map(getTasks)) —
+ * one query instead of up to 200 (dashboardService.ts's getExecutionStats/
+ * getSystemStats, confirmed live as the single largest source of
+ * background request volume on the two most-visited pages: 211 requests
+ * in a 20s idle window on /dashboard, M7-11's performance diagnosis).
+ * limit(5000) is a deliberate safety margin (not a correctness guarantee
+ * for an arbitrarily large project) — matches the same pattern already
+ * used elsewhere for bulk reads (e.g. structured_facts's 5000 limit) —
+ * since Supabase's PostgREST default caps any single response at 1000
+ * rows regardless of query shape; flagged here rather than silently
+ * assumed sufficient forever.
+ */
+export async function getTasksForMissions(missionIds: string[]): Promise<MissionTask[]> {
+  if (missionIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from('mission_tasks')
+    .select('*')
+    .in('mission_id', missionIds)
+    .order('created_at', { ascending: true })
+    .limit(5000);
+
+  if (error || !data) return [];
+  return (data as TaskRow[]).map(mapTask);
+}
+
 /** Recent tasks assigned to a given manager — used by the G-Brain agent
  * detail view to show "what has this agent been working on" without
  * requiring a dedicated per-agent activity table. */

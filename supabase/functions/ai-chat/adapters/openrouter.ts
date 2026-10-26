@@ -33,13 +33,17 @@ function parseOpenRouterModel(raw: Record<string, unknown>): ModelInfo {
 export const openrouterAdapter = createOpenAICompat({
   id: 'openrouter',
   label: 'OpenRouter',
-  // M6-02 side-check: google/gemini-2.0-flash-001 confirmed dead live
-  // (404 "No endpoints found"); google/gemini-flash-1.5 confirmed absent
-  // from OpenRouter's own /models catalog. google/gemini-3.6-flash
-  // confirmed to resolve (a real model-not-found 404 became a 402
-  // insufficient-credits response instead, which only happens once the
-  // model itself is recognized).
-  defaultModel: 'google/gemini-3.6-flash',
+  // M7-12 side-check: google/gemini-3.6-flash (the previous default) is
+  // now confirmed broken live — OpenRouter resolves that specific model
+  // to an Nvidia-hosted backend Function that no longer exists for this
+  // account ("Function '...': Not found for account '...'", the same
+  // error signature NVIDIA's own direct API returns for its own models
+  // right now — see docs/TEMO-ARCHITECTURE.md's M7-12 section for the
+  // account-level NVIDIA investigation, left open rather than
+  // rabbit-holed). meta-llama/llama-3.3-70b-instruct confirmed
+  // live-working (routes via SambaNova, not Nvidia) — a real 200 with
+  // real generated content.
+  defaultModel: 'meta-llama/llama-3.3-70b-instruct',
   models: [
     'google/gemini-3.6-flash',
     'openai/gpt-4o-mini',

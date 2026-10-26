@@ -19,7 +19,12 @@ export const REGISTRY: Record<ProviderId, AIProviderAdapter> = {
 
 export const PROVIDER_IDS: ProviderId[] = ['gemini', 'groq', 'nvidia', 'openrouter', 'ollama'];
 
-export const FALLBACK_ORDER: ProviderId[] = ['gemini', 'groq', 'nvidia', 'openrouter', 'ollama'];
+// M7-12: kept in sync with lib/settings/settings-service.ts's FALLBACK_ORDER
+// for consistency, though this copy is currently unused at runtime —
+// the edge function processes whichever provider the client's request
+// body names; it doesn't do its own fallback walk (that logic lives
+// entirely client-side in lib/ai/ai-provider.ts).
+export const FALLBACK_ORDER: ProviderId[] = ['groq', 'gemini', 'nvidia', 'openrouter', 'ollama'];
 
 export function getAdapter(id: string): AIProviderAdapter | null {
   return REGISTRY[id as ProviderId] ?? null;

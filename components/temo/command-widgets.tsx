@@ -59,7 +59,10 @@ function GroupLabel({ children }: { children: ReactNode }) {
 
 function ActiveTasksWidget() {
   const router = useRouter();
-  const summary = usePolled(getTaskQueueSummary);
+  // M7-12: mission_tasks is the table this actually reads (via getTasks);
+  // runtime_state changes whenever a new mission becomes current, which
+  // also changes which tasks this summary should reflect.
+  const summary = usePolled(getTaskQueueSummary, undefined, [{ table: 'mission_tasks' }, { table: 'runtime_state' }]);
 
   return (
     <Panel title="Active Tasks" className="widget">
@@ -83,7 +86,14 @@ function ActiveTasksWidget() {
 
 function RuntimeSummaryWidget() {
   const router = useRouter();
-  const active = usePolled(getCurrentActiveMission);
+  // M7-12: getFullMission() reads missions/mission_objectives/mission_tasks/
+  // mission_timeline for the current mission; runtime_state drives which
+  // mission is "current" and its progress/executionState fields directly.
+  const active = usePolled(getCurrentActiveMission, undefined, [
+    { table: 'runtime_state' },
+    { table: 'mission_tasks' },
+    { table: 'mission_timeline' },
+  ]);
 
   return (
     <Panel title="Runtime Summary" className="widget">
@@ -113,7 +123,8 @@ function RuntimeSummaryWidget() {
 const getRecentActivity = () => getRuntimeActivity(6);
 
 function LiveActivityWidget() {
-  const items = usePolled(getRecentActivity);
+  // M7-12: getRuntimeActivity() reads runtime_activity directly.
+  const items = usePolled(getRecentActivity, undefined, [{ table: 'runtime_activity' }]);
 
   return (
     <Panel title="Live Activity" className="widget">
@@ -139,6 +150,13 @@ function LiveActivityWidget() {
 // ---- System Health ----
 
 function SystemHealthWidget() {
+  // M7-12: NOT converted to Realtime — getSystemHealth() is an aggregate
+  // of 8 independent subsystem checks (provider config, workflow_registry,
+  // memory/knowledge tables, tool registry, missions, the in-memory agent
+  // registry, runtime_state) with no single natural DB-change trigger;
+  // watching all of their tables would mean resubscribing to nearly every
+  // table in the schema for a widget that's explicitly a periodic health
+  // probe, not a live feed. Left on the original 15s poll by design.
   const health = usePolled(getSystemHealth);
   const agents = useDashboardStore((s) => s.agents);
 
@@ -172,7 +190,9 @@ function SystemHealthWidget() {
 // ---- API Calls / Provider Activity ----
 
 function ApiCallsWidget() {
-  const stats = usePolled(getProviderStats);
+  // M7-12: usage_ledger is the real per-call data this reads; app_settings
+  // changes whenever active_provider/BYOK keys are updated (M7-09).
+  const stats = usePolled(getProviderStats, undefined, [{ table: 'usage_ledger' }, { table: 'app_settings' }]);
 
   const withUsage = (stats ?? []).filter((p) => p.usageCount > 0).sort((a, b) => b.usageCount - a.usageCount);
 
@@ -200,7 +220,13 @@ function ApiCallsWidget() {
 
 function MemoryWidget() {
   const router = useRouter();
-  const stats = usePolled(getMemoryStats);
+  // M7-12: memory.stats() reads memories/memory_embeddings/memory_links/memory_events.
+  const stats = usePolled(getMemoryStats, undefined, [
+    { table: 'memories' },
+    { table: 'memory_embeddings' },
+    { table: 'memory_links' },
+    { table: 'memory_events' },
+  ]);
 
   return (
     <Panel title="Memory" className="widget">
@@ -224,7 +250,8 @@ function MemoryWidget() {
 
 function KnowledgeWidget() {
   const router = useRouter();
-  const stats = usePolled(getKnowledgeStats);
+  // M7-12: getKnowledgeStats() reads structured_facts.
+  const stats = usePolled(getKnowledgeStats, undefined, [{ table: 'structured_facts' }]);
 
   return (
     <Panel title="Knowledge" className="widget">
@@ -248,10 +275,11 @@ function KnowledgeWidget() {
 
 function AnalyticsWidget() {
   const router = useRouter();
-  // M4-07 will parallelize getExecutionStats()'s per-mission N+1 fetch — a
-  // longer interval here keeps this widget live without hammering that
-  // still-sequential query every 15s in the meantime.
-  const stats = usePolled(getExecutionStats, 60_000);
+  // M7-12: getExecutionStats() now runs one batched query over mission_tasks
+  // (missionService.getTasksForMissions) instead of up to 200 per-mission
+  // requests — real-time-driven via mission_tasks, with the explicit 60s
+  // interval kept as the safety-net cadence for this heavier aggregate.
+  const stats = usePolled(getExecutionStats, 60_000, [{ table: 'mission_tasks' }]);
 
   return (
     <Panel title="Analytics" className="widget">
@@ -275,7 +303,9 @@ function AnalyticsWidget() {
 
 function WorkflowsWidget() {
   const router = useRouter();
-  const stats = usePolled(getWorkflowStats);
+  // M7-12: workflow_registry + mission_timeline (recentExecutions counts
+  // 'workflow_executed' events there).
+  const stats = usePolled(getWorkflowStats, undefined, [{ table: 'workflow_registry' }, { table: 'mission_timeline' }]);
 
   return (
     <Panel title="Workflows" className="widget">

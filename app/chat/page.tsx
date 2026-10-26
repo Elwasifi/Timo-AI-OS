@@ -115,6 +115,12 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [simulationMode, setSimulationMode] = useState(false);
+  // M7-12: real, incremental mission progress (orchestrate()'s new
+  // onMissionProgress callback) — a small transient status line shown
+  // above the composer while a mission-classified request is in flight,
+  // instead of nothing until it fully completes. Grounded in the mission
+  // pipeline's own real step/progress events, not fabricated.
+  const [missionProgress, setMissionProgress] = useState<{ title: string; detail: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -406,7 +412,11 @@ export default function ChatPage() {
             },
           ]);
         },
+        onMissionProgress: (title, detail) => {
+          setMissionProgress({ title, detail });
+        },
       });
+      setMissionProgress(null);
       const routing = result.routing;
       const response = result.response;
 
@@ -536,6 +546,7 @@ export default function ChatPage() {
       );
       setIsStreaming(false);
       setRoutingInProgress(false);
+      setMissionProgress(null);
     }
   };
 
@@ -680,6 +691,13 @@ export default function ChatPage() {
                   {p}
                 </button>
               ))}
+            </div>
+          )}
+          {missionProgress && (
+            <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              <span className="font-medium text-foreground">{missionProgress.title}</span>
+              <span>&mdash; {missionProgress.detail}</span>
             </div>
           )}
           <InputBar

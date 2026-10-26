@@ -761,6 +761,8 @@ export async function executeMissionTasks(
   mission: Mission,
   tasks: MissionTask[],
   objectives: MissionObjective[],
+  /** M7-12: real, incremental progress — see OrchestrateOptions.onMissionProgress's comment (unifiedOrchestrator.ts) for why this is a direct callback rather than a Realtime subscription. */
+  onProgress?: (title: string, detail: string) => void,
 ): Promise<ExecutionResult[]> {
   const results: ExecutionResult[] = [];
   const priorResults: PriorTaskResult[] = [];
@@ -770,6 +772,13 @@ export async function executeMissionTasks(
     if (task.status === 'completed' || task.status === 'cancelled') {
       continue;
     }
+
+    // M7-12: real "step N of M" signal — tasks.indexOf/length are the
+    // actual execution plan, not a fabricated estimate.
+    onProgress?.(
+      `Step ${results.length + 1} of ${tasks.length}`,
+      `${task.assignedManager ?? 'Agent'} working on: ${task.title}`,
+    );
 
     const objective = objectives.find((o) => o.id === task.objectiveId) ?? null;
     const result = await executeTask(task, mission, objective, [...priorResults]);
@@ -816,6 +825,7 @@ export async function executeMissionTasks(
       detail: `${completedCount}/${totalCount} tasks completed`,
       metadata: { progress, completed: completedCount, total: totalCount },
     });
+    onProgress?.(`Mission progress: ${progress}%`, `${completedCount}/${totalCount} tasks completed`);
 
     // Roll the mission's own status to a terminal value once every task has
     // resolved — this loop only ever wrote progress, never status, so a

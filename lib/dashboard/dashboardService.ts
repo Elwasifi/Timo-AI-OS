@@ -26,6 +26,7 @@ import {
   listMissions,
   getMission,
   getTasks,
+  getTasksForMissions,
   getTimeline,
   getFullMission,
 } from '@/lib/swarm/missionService';
@@ -254,12 +255,13 @@ function formatDepartmentName(id: string): string {
 
 export async function getExecutionStats(tenantId?: string | null): Promise<ExecutionStats> {
   const missions = await listMissions(200, undefined, tenantId ?? undefined);
-  // M4-07: was a sequential await-in-a-loop across up to 200 missions — a
-  // real, worsening N+1 that ran on every Main Dashboard mount via
-  // AnalyticsWidget. Fetching all missions' tasks in parallel doesn't
-  // change what's returned, just how long it takes to get there.
-  const perMissionTasks = await Promise.all(missions.map((m) => getTasks(m.id)));
-  const allTasks: MissionTask[] = perMissionTasks.flat();
+  // M7-12: was Promise.all(missions.map(getTasks)) — M4-07 made the up-to-
+  // 200 per-mission requests parallel instead of sequential, but it was
+  // still up to 200 separate HTTP requests every time this ran (confirmed
+  // live as the single largest source of background request volume on
+  // the two most-visited pages, M7-11's performance diagnosis). One
+  // batched `IN (...)` query instead.
+  const allTasks: MissionTask[] = await getTasksForMissions(missions.map((m) => m.id));
 
   const completed = allTasks.filter((t) => t.status === 'completed');
   const failed = allTasks.filter((t) => t.status === 'failed');
@@ -483,12 +485,12 @@ export async function getToolUsageStats(): Promise<ToolUsageStats> {
 // on its own, unlike the activity feed's titles/details).
 export async function getSystemStats(tenantId?: string | null): Promise<SystemStats> {
   const missions = await listMissions(200, undefined, tenantId ?? undefined);
-  // M4-07: same sequential N+1 as getExecutionStats() above. Currently
+  // M7-12: same batched-query fix as getExecutionStats() above. Currently
   // dead in practice (only reachable via the orphaned /api/stats/dashboard
   // route — Operational Integrity Audit section 7) but fixed anyway rather
   // than left as a landmine for whenever that route gets wired up.
-  const perMissionTasks = await Promise.all(missions.map((m) => getTasks(m.id)));
-  const totalTasks = perMissionTasks.reduce((sum, tasks) => sum + tasks.length, 0);
+  const allTasks = await getTasksForMissions(missions.map((m) => m.id));
+  const totalTasks = allTasks.length;
 
   const agents = AGENT_DEFINITIONS.filter((a) => a.isActive);
   const managers = agents.filter((a) => a.level === 'manager');

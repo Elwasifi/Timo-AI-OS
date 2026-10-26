@@ -80,12 +80,20 @@ export interface ProviderValidationResult {
   models?: ModelInfo[];
 }
 
-/** Fallback priority: Gemini → Groq → NVIDIA → OpenRouter → Ollama */
-export const FALLBACK_ORDER: ProviderId[] = ['gemini', 'groq', 'nvidia', 'openrouter', 'ollama'];
+// M7-12: Groq promoted ahead of Gemini — real measured latency (M7-11's
+// performance diagnosis): Gemini 3-16s TTFB with frequent truncated
+// output (spends its token budget on invisible reasoning tokens even at
+// maxTokens:300), vs Groq consistently ~1s with complete, correct
+// output, same account, same test. NVIDIA/OpenRouter's default models
+// are both currently broken live (see adapters/openrouter.ts and
+// docs/TEMO-ARCHITECTURE.md's M7-12 section) — this ordering reflects
+// what's actually fast and working today, not a permanent ranking.
+/** Fallback priority: Groq → Gemini → NVIDIA → OpenRouter → Ollama */
+export const FALLBACK_ORDER: ProviderId[] = ['groq', 'gemini', 'nvidia', 'openrouter', 'ollama'];
 
 export const DEFAULT_SETTINGS: AppSettings = {
   id: 1,
-  active_provider: 'gemini',
+  active_provider: 'groq',
   temperature: 0.7,
   max_tokens: 2048,
   gemini_api_key: null,
@@ -100,12 +108,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   nvidia_api_key: null,
   nvidia_model: 'meta/llama-3.1-405b-instruct',
   openrouter_api_key: null,
-  // M6-02 side-check: google/gemini-2.0-flash-001 is confirmed dead on
-  // OpenRouter too (live 404: "No endpoints found") — not just Google's
-  // direct API. google/gemini-3.6-flash confirmed to resolve (a real
-  // model-not-found 404 became a 402 insufficient-credits response,
-  // which only happens once the model itself is recognized).
-  openrouter_model: 'google/gemini-3.6-flash',
+  // M7-12: google/gemini-3.6-flash (the previous default) is now
+  // confirmed broken live — see adapters/openrouter.ts's matching
+  // comment. meta-llama/llama-3.3-70b-instruct confirmed live-working.
+  openrouter_model: 'meta-llama/llama-3.3-70b-instruct',
   ollama_base_url: null,
   ollama_api_key: null,
   ollama_model: 'llama3',

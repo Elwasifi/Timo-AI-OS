@@ -1,0 +1,25 @@
+-- M7-12 — Beta Readiness: new tenants default to 'live' execution mode.
+--
+-- M7-05/M7-09 deliberately defaulted every new tenant to 'sandbox'
+-- (correct for a general product launch with unknown signups). For the
+-- current Private Beta specifically, every signup is personally known
+-- and trusted by Amro (not the general public) — defaulting them into
+-- sandbox/degraded-simulation behavior for every tool with no real
+-- isolated environment (confirmed in M7-05: everything except memory.*)
+-- just means real beta testers see fake "simulated" results for most of
+-- what they try, with no natural trigger to ever leave sandbox unless
+-- they separately discover and go through the mode_change approval flow.
+--
+-- Decision (ticket asked for a judgment call, explained here): change
+-- the column DEFAULT rather than auto-switching on BYOK key save. A
+-- schema-level default is simpler, is the single place to find and flip
+-- back post-beta (ALTER COLUMN ... SET DEFAULT 'sandbox'), and covers
+-- every new tenant uniformly — including ones that never configure a
+-- BYOK key at all, who'd otherwise stay stuck in degraded sandbox mode
+-- forever under an auto-switch-on-key-save approach. This does NOT
+-- retroactively change any existing tenant's execution_mode (a DEFAULT
+-- only applies to new rows) — only future signups are affected.
+--
+-- Idempotent: ALTER COLUMN ... SET DEFAULT is safe to re-run.
+
+ALTER TABLE tenants ALTER COLUMN execution_mode SET DEFAULT 'live';

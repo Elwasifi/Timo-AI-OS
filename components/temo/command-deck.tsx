@@ -20,6 +20,7 @@ import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { VoiceTrigger } from './voice-trigger';
 import { loadAgents, loadBusinessUnitsWithDepartments } from '@/lib/agents/agentRegistryService';
 import { listMissions } from '@/lib/swarm/missionService';
+import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import {
   recordToUI,
   TEMO_UI,
@@ -304,42 +305,49 @@ export function CommandDeck() {
     crewCoordinator.init(dashboardAgents);
   }, [dashboardAgents]);
 
-  useEffect(() => {
-    // M4-06: previously fetched once on mount only (confirmed in the
-    // Operational Integrity Audit as one of two real causes of Mission
-    // Control disagreeing with /missions until a manual refresh) and had
-    // no failure path at all — a rejected promise here left `data` null
-    // forever, stuck on the "Initializing..." screen. Now polls and keeps
-    // whatever snapshot it already has on a failed refresh instead of
-    // wedging.
-    const load = () => {
-      Promise.all([loadAgents(), listMissions(10)])
-        .then(([records, missions]) => {
-          const managers = records
-            .filter((r) => r.level === 'manager' && r.isActive)
-            .map((r) => recordToUI(r, records));
-          setData({
-            agents: managers,
-            missions,
-            metrics: {
-              activeAgents: managers.filter((a) => a.status === 'online').length,
-              missions: missions.length,
-              completion:
-                missions.length > 0
-                  ? missions.reduce((s, m) => s + m.progress, 0) / missions.length
-                  : 0,
-              uptime: '99.98%',
-            },
-          });
-        })
-        .catch((err) => {
-          logger.error('Mission Control snapshot refresh failed', err instanceof Error ? err.message : err);
+  // M4-06: previously fetched once on mount only (confirmed in the
+  // Operational Integrity Audit as one of two real causes of Mission
+  // Control disagreeing with /missions until a manual refresh) and had
+  // no failure path at all — a rejected promise here left `data` null
+  // forever, stuck on the "Initializing..." screen. Keeps whatever
+  // snapshot it already has on a failed refresh instead of wedging.
+  // M7-12: Realtime on missions is now the primary refresh trigger (see
+  // useRealtimeRefetch below); the interval widened to a 60s safety net.
+  // agent_registry (loadAgents()) has no natural per-row change trigger
+  // worth subscribing to here — managers are effectively static config,
+  // not live-changing state — so it still rides the same timer.
+  const loadSnapshot = useCallback(() => {
+    Promise.all([loadAgents(), listMissions(10)])
+      .then(([records, missions]) => {
+        const managers = records
+          .filter((r) => r.level === 'manager' && r.isActive)
+          .map((r) => recordToUI(r, records));
+        setData({
+          agents: managers,
+          missions,
+          metrics: {
+            activeAgents: managers.filter((a) => a.status === 'online').length,
+            missions: missions.length,
+            completion:
+              missions.length > 0
+                ? missions.reduce((s, m) => s + m.progress, 0) / missions.length
+                : 0,
+            uptime: '99.98%',
+          },
         });
-    };
-    load();
-    const t = setInterval(load, 15_000);
-    return () => clearInterval(t);
+      })
+      .catch((err) => {
+        logger.error('Mission Control snapshot refresh failed', err instanceof Error ? err.message : err);
+      });
   }, []);
+
+  useEffect(() => {
+    loadSnapshot();
+    const t = setInterval(loadSnapshot, 60_000);
+    return () => clearInterval(t);
+  }, [loadSnapshot]);
+
+  useRealtimeRefetch([{ table: 'missions' }], loadSnapshot);
 
   if (!data)
     return (

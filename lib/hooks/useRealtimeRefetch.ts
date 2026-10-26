@@ -20,6 +20,16 @@ export interface RealtimeTableWatch {
 // *when* to call it. Multiple changes arriving in a burst (e.g. several
 // mission_tasks rows updating within the same tick) are coalesced into one
 // refetch via a short debounce rather than one refetch per row event.
+//
+// `watches` is intentionally safe to pass as a fresh array literal on
+// every render — the subscribe/unsubscribe effect below depends on
+// `watchKey`, a string derived from `watches`' *contents*, not on the
+// array's identity. A new literal with the same table/filter values
+// produces the same watchKey and does not tear down or recreate the
+// channel. Callers should NOT wrap `watches` in `useMemo` — that just
+// adds a layer of indirection around a guarantee this hook already
+// provides (confirmed M7-12: command-widgets.tsx's 8 call sites and
+// missions/page.tsx all pass inline literals with no resubscribe churn).
 export function useRealtimeRefetch(watches: RealtimeTableWatch[], onChange: () => void, debounceMs = 300): void {
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;

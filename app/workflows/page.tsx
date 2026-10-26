@@ -283,6 +283,12 @@ function ExecutionsPanel({ addEvent, toast }: { addEvent: (e: { message: string;
     }
   }, [loading]);
 
+  // M7-12: NOT converted to Realtime — this reads n8n's own execution
+  // state via n8n.executions.listExecutions(), an external HTTP API call
+  // to the n8n service, not a Supabase table. There is no Postgres row to
+  // subscribe to; left on its original 5s poll by design (short because
+  // n8n executions are typically fast-moving/short-lived, unlike the
+  // dashboard widgets).
   useEffect(() => {
     load();
     if (!autoRefresh) return;

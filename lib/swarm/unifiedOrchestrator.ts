@@ -107,6 +107,22 @@ export interface OrchestrateOptions {
    * acknowledgment call itself fails; never left unfired.
    */
   onAcknowledgment?: (text: string) => void;
+  /**
+   * M7-12: real, incremental mission progress — fires synchronously at
+   * each genuine milestone already being emitted internally via
+   * emitRuntimeEvent() during runMissionPipeline()'s single awaited call
+   * chain (planning started, mission launched, results aggregated,
+   * completed/failed). Mission execution is synchronous/in-request (not
+   * a separate background process the client could subscribe to via
+   * Realtime mid-flight) — this callback is invoked from deep inside
+   * that same call stack as each step actually happens, so it reaches
+   * the caller in real time without needing a separate subscription or
+   * a change to the execution model. Grounded in real state only: no
+   * fabricated percentages or step counts that don't correspond to an
+   * actual emitRuntimeEvent() call already happening for other reasons
+   * (observability, G-Brain's live activity feed).
+   */
+  onMissionProgress?: (title: string, detail: string) => void;
 }
 
 export interface OrchestrateResult extends OrchestratorResult {
@@ -155,6 +171,7 @@ async function runMissionPipeline(
   userRequest: string,
   tenantId: string,
   isSimulation: boolean,
+  onProgress?: (title: string, detail: string) => void,
 ): Promise<{
   response: string;
   missionId: string | null;
@@ -173,6 +190,7 @@ async function runMissionPipeline(
     title: 'Planning mission',
     detail: `Decomposing request into objectives and tasks`,
   });
+  onProgress?.('Planning mission', 'Decomposing request into objectives and tasks');
 
   // 1. Launch the mission (creates mission, objectives, tasks, dispatches)
   const missionResult = await launchMission({ userRequest, tenantId, isSimulation });
@@ -204,6 +222,7 @@ async function runMissionPipeline(
     title: 'Mission pipeline selected',
     detail: `Executing ${tasks.length} tasks across ${objectives.length} objectives`,
   });
+  onProgress?.('Mission started', `Executing ${tasks.length} tasks across ${objectives.length} objectives`);
 
   await updateRuntimeState({
     currentMissionId: mission.id,
@@ -212,7 +231,7 @@ async function runMissionPipeline(
     missionProgress: 0,
   });
 
-  const executionResults = await executeMissionTasks(mission, tasks, objectives);
+  const executionResults = await executeMissionTasks(mission, tasks, objectives, onProgress);
 
   // 3. Determine final mission status
   const completed = executionResults.filter((r) => r.status === 'completed');
@@ -436,7 +455,7 @@ export async function orchestrate(
   } else {
     let missionFailed = false;
     try {
-      const result = await runMissionPipeline(userRequest, opts.tenantId, opts.isSimulation ?? false);
+      const result = await runMissionPipeline(userRequest, opts.tenantId, opts.isSimulation ?? false, options.onMissionProgress);
       response = result.response;
       missionId = result.missionId;
       execution = result.execution;

@@ -7,6 +7,7 @@ import { AppShell } from '@/components/temo/app-shell';
 import { MissionCard, type Mission as MissionCardData } from '@/components/temo/mission-card';
 import { EmptyState, GlassPanel } from '@/components/temo/primitives';
 import { useDashboardStore } from '@/stores/dashboardStore';
+import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { cn } from '@/lib/utils';
 
 const STATUS_TABS = ['All', 'Active', 'Pending', 'Completed', 'Failed'] as const;
@@ -24,13 +25,16 @@ export default function MissionsPage() {
   // read — not the mock `workflows` array this page used to render.
   // M4-06: previously fetched once on mount only — this page and the
   // Homepage Mission Control widget could silently disagree until a full
-  // page reload. Now polls on a reasonable cadence like the rest of the
-  // "live" dashboard surfaces.
+  // page reload.
+  // M7-12: converted from a 15s poll to Realtime on the missions table,
+  // with a 60s safety-net poll in case the Realtime connection drops
+  // (same philosophy as M7-02/usePolled's realtimeTables pattern).
   useEffect(() => {
     loadMissions();
-    const t = setInterval(loadMissions, 15_000);
+    const t = setInterval(loadMissions, 60_000);
     return () => clearInterval(t);
   }, [loadMissions]);
+  useRealtimeRefetch([{ table: 'missions' }], loadMissions);
 
   const cardData: MissionCardData[] = missions.map((m) => {
     const startedAt = new Date(m.createdAt).getTime();
