@@ -65,6 +65,26 @@ function providerConfigured(provider: ProviderId, settings: AppSettings): boolea
   return !!settings[field];
 }
 
+// M7-13: a real discovery catalog (e.g. Gemini's listModels()) returns
+// every model the provider offers — image generation, text-to-speech,
+// transcription, embeddings, video — not just chat-completion models.
+// Nothing upstream of this filtered that by modality, so these were
+// always eligible routing candidates; it only became a visible, practical
+// problem once M7-13's provider-restriction fix (route()'s Groq/Gemini-
+// first gate for latency-sensitive routing) shrank the candidate pool
+// enough for one to actually win — confirmed live: 'gemini-nano-banana-2.1'
+// (an image model) outscored every real Gemini/Groq chat model for a
+// plain FAST_CHAT classification once non-trusted providers were excluded.
+// This router only ever feeds chatWithFallback/streamWithFallback (text
+// chat completions) — no caller wants an image/audio/embedding model —
+// so these are excluded at the single source every routing decision
+// reads from, not patched per-caller.
+const NON_CHAT_MODEL_PATTERN = /banana|imagen|dall-e|\bveo\b|lyria|tts|speech|transcribe|whisper|embed|\bclip\b|guard|orpheus|canopylabs/i;
+
+function isChatModel(modelId: string): boolean {
+  return !NON_CHAT_MODEL_PATTERN.test(modelId);
+}
+
 /**
  * The full set of candidate models for routing: real discovered catalog
  * rows for providers that have been validated, plus a static-fallback
@@ -82,6 +102,7 @@ export async function getCandidateModels(): Promise<ModelCapabilityProfile[]> {
     if (!isProviderId(row.provider)) continue;
     if (!providerConfigured(row.provider, settings)) continue;
     seenProviders.add(row.provider);
+    if (!isChatModel(row.model_id)) continue;
     const validatedAt = new Date(row.validated_at).getTime();
     const stale = Date.now() - validatedAt > VALIDATED_STALE_MS;
     profiles.push({
@@ -112,6 +133,7 @@ export async function getCandidateModels(): Promise<ModelCapabilityProfile[]> {
     if (seenProviders.has(pid)) continue;
     if (!providerConfigured(pid, settings)) continue;
     for (const modelId of PROVIDER_MODELS[pid]) {
+      if (!isChatModel(modelId)) continue;
       profiles.push({
         provider: pid,
         modelId,

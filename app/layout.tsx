@@ -9,16 +9,17 @@ const spaceGrotesk = Space_Grotesk({
   variable: '--font-grotesk',
 });
 
+// M7-13: openGraph/twitter images used to point at Bolt's own default OG
+// asset (bolt.new/static/og_default.png) — a scaffold leftover, not a
+// Temo asset. No real Temo social-share image exists in public/ yet, so
+// the tags are removed rather than pointed at something fake; add them
+// back once a real asset exists.
 export const metadata: Metadata = {
   metadataBase: new URL('https://temo.ai'),
   title: 'Temo — AI Operating System',
   description: 'A premium AI workspace for interacting naturally with multiple AI agents.',
-  openGraph: {
-    images: [{ url: 'https://bolt.new/static/og_default.png' }],
-  },
   twitter: {
     card: 'summary_large_image',
-    images: [{ url: 'https://bolt.new/static/og_default.png' }],
   },
 };
 

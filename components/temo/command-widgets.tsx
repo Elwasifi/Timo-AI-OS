@@ -15,7 +15,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { usePolled } from '@/lib/hooks/usePolled';
-import { Activity, Brain, ListChecks, Radio, Workflow as WorkflowIcon } from 'lucide-react';
+import { Activity, Brain, ListChecks, Radio, Workflow as WorkflowIcon, type LucideIcon } from 'lucide-react';
 import { Panel } from './command-deck';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import {
@@ -47,11 +47,23 @@ function timeAgo(iso: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function GroupLabel({ children }: { children: ReactNode }) {
+// M7-13 (dashboard reorganization, visual/CSS only — no data-fetching,
+// Realtime wiring, or widget behavior touched by this file's changes):
+// the 4-category grouping itself (Core Operations/Live System/
+// Intelligence/Automation) already existed — the diagnostic found the
+// gap was that it read as a continuous scroll with small text dividers,
+// not 4 legible zones. WidgetGroup gives each category its own bordered
+// container (see .widget-group in globals.css) instead of a bare label,
+// and an anchor id for the jump nav below to target.
+function WidgetGroup({ id, label, icon: Icon, children }: { id: string; label: string; icon: LucideIcon; children: ReactNode }) {
   return (
-    <div className="col-span-full mt-1 font-mono text-[10px] uppercase tracking-[0.2em] text-temo-titanium/60 first:mt-0">
-      {children}
-    </div>
+    <section id={id} className="widget-group">
+      <div className="widget-group-header">
+        <Icon size={12} />
+        <span>{label}</span>
+      </div>
+      <div className="widget-group-grid">{children}</div>
+    </section>
   );
 }
 
@@ -96,7 +108,7 @@ function RuntimeSummaryWidget() {
   ]);
 
   return (
-    <Panel title="Runtime Summary" className="widget">
+    <Panel title="Runtime Summary" className="widget widget-span-2">
       {!active ? (
         <p className="widget-note">Loading...</p>
       ) : !active.mission ? (
@@ -327,26 +339,55 @@ function WorkflowsWidget() {
 
 // ---- Grouped export ----
 
+const JUMP_TARGETS = [
+  { id: 'widget-group-operations', label: 'Operations', icon: ListChecks },
+  { id: 'widget-group-system', label: 'System', icon: Activity },
+  { id: 'widget-group-intelligence', label: 'Intelligence', icon: Brain },
+  { id: 'widget-group-automation', label: 'Automation', icon: WorkflowIcon },
+];
+
+function WidgetJumpNav() {
+  return (
+    <nav className="widget-jump-nav">
+      {JUMP_TARGETS.map((t) => {
+        const Icon = t.icon;
+        return (
+          <a key={t.id} href={`#${t.id}`}>
+            <Icon size={11} />
+            {t.label}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
 export function CommandCenterWidgets({ missionWidget }: { missionWidget: ReactNode }) {
   return (
     <>
-      <GroupLabel><ListChecks size={11} className="mr-1 inline" />Core Operations</GroupLabel>
-      {missionWidget}
-      <ActiveTasksWidget />
-      <RuntimeSummaryWidget />
+      <WidgetJumpNav />
 
-      <GroupLabel><Activity size={11} className="mr-1 inline" />Live System</GroupLabel>
-      <LiveActivityWidget />
-      <SystemHealthWidget />
-      <ApiCallsWidget />
+      <WidgetGroup id="widget-group-operations" label="Core Operations" icon={ListChecks}>
+        <div className="widget-span-2">{missionWidget}</div>
+        <ActiveTasksWidget />
+        <RuntimeSummaryWidget />
+      </WidgetGroup>
 
-      <GroupLabel><Brain size={11} className="mr-1 inline" />Intelligence</GroupLabel>
-      <MemoryWidget />
-      <KnowledgeWidget />
-      <AnalyticsWidget />
+      <WidgetGroup id="widget-group-system" label="Live System" icon={Activity}>
+        <LiveActivityWidget />
+        <SystemHealthWidget />
+        <ApiCallsWidget />
+      </WidgetGroup>
 
-      <GroupLabel><WorkflowIcon size={11} className="mr-1 inline" />Automation</GroupLabel>
-      <WorkflowsWidget />
+      <WidgetGroup id="widget-group-intelligence" label="Intelligence" icon={Brain}>
+        <MemoryWidget />
+        <KnowledgeWidget />
+        <AnalyticsWidget />
+      </WidgetGroup>
+
+      <WidgetGroup id="widget-group-automation" label="Automation" icon={WorkflowIcon}>
+        <WorkflowsWidget />
+      </WidgetGroup>
     </>
   );
 }

@@ -34,6 +34,13 @@ const DEFAULT_TOKEN_ESTIMATE: Record<TaskClassification['expectedContextSize'], 
   large: { input: 6000, output: 2000 },
 };
 
+// M7-13: what counts as "proven" for the latency-sensitive hard gate below
+// — a handful of real successes at a solid success rate, not a perfect
+// track record (a model with exactly one lucky call shouldn't count as
+// field-tested either).
+const MIN_PROVEN_SUCCESSES = 3;
+const MIN_PROVEN_SUCCESS_RATE = 0.5;
+
 function estimateCandidateCost(
   cap: ModelCapabilityProfile,
   inputTokens: number,
@@ -122,10 +129,81 @@ export async function route(request: RoutingRequest): Promise<RoutingDecision> {
     // strict free-only strategy with no free models configured), fall back
     // to the unfiltered scored set rather than returning zero candidates —
     // an imperfect answer beats silently blocking execution.
-    const effectiveScored = scored.length > 0 ? scored : allCandidates.map((cap) => {
+    let effectiveScored = scored.length > 0 ? scored : allCandidates.map((cap) => {
       const cost = estimateCandidateCost(cap, tokenEstimate.input, tokenEstimate.output);
       return scoreCandidate(cap, health.get(`${cap.provider}::${cap.modelId}`) ?? null, request.classification, cost, routingStrategy);
     }).sort((a, b) => b.score - a.score);
+
+    // M7-13 (Amro's explicit "speed & reliability first" decision,
+    // following the diagnostic round): an untested candidate must never
+    // outrank a field-tested, proven provider on the critical response
+    // path. The diagnostic's live route() call showed
+    // openrouter/xingchen-agi/xing4.0-29b-a4b:free — zero rows in
+    // provider_model_health, i.e. never actually called — beating Groq
+    // and Gemini purely on a naming-pattern false positive (fixed above)
+    // plus scoreReliability()'s 0.6 "mild optimism for untested
+    // candidates" default.
+    //
+    // Gated on latencySensitivity !== 'low' rather than === 'high' only:
+    // the diagnostic also found lib/crew/ai-intent-analyzer.ts's invisible
+    // pre-response classification call routes through this exact function
+    // with taskType STRUCTURED_OUTPUT, which taskClassifier.ts gives
+    // latencySensitivity 'normal' (not 'high', since classifyTaskType()
+    // only special-cases VOICE/FAST_CHAT/AGENT_TO_AGENT) — a '=== high'
+    // gate would have left that call, which runs on literally every
+    // message, still exposed to the exact bug this is fixing. 'low'
+    // sensitivity (COMPLEX_REASONING/LARGE_MISSION/RESEARCH) is
+    // deliberately excluded — those are the one case where trying a less-
+    // proven but potentially more capable model is a legitimate trade-off,
+    // not a latency/reliability risk.
+    if (request.classification.latencySensitivity !== 'low') {
+      const isProven = (s: ScoredCandidate) => {
+        const h = health.get(`${s.provider}::${s.model}`);
+        if (!h) return false;
+        const total = h.successCount + h.failureCount;
+        return total > 0 && h.successCount >= MIN_PROVEN_SUCCESSES && h.successCount / total >= MIN_PROVEN_SUCCESS_RATE;
+      };
+
+      // Layer 1 (preferred): Amro named Groq/Gemini specifically as "our
+      // known-good, tested providers" — re-verification after the first
+      // two fixes above (regex anchoring + real-latency-over-naming in
+      // scoreTaskMatch) still found OTHER real, legitimately-scoring
+      // providers (openrouter/tencent/hy-mt2-7b, then openrouter/auto)
+      // outscoring Groq on genuine signals — not bugs, just two providers
+      // that are also decent. Tuning the general scoring model further to
+      // probabilistically favor Groq/Gemini can't GUARANTEE the outcome
+      // Amro asked for; restricting the candidate pool itself can. Within
+      // this restricted pool, real scoring still decides which of the two
+      // wins — this doesn't hardcode "Groq always beats Gemini" or vice
+      // versa, only "one of our two trusted providers beats everyone else"
+      // for the responsiveness-critical path.
+      const trusted = effectiveScored.filter((s) => s.provider === 'groq' || s.provider === 'gemini');
+      if (trusted.length > 0) {
+        // Still require proven-ness WITHIN the trusted pool — being Groq
+        // or Gemini doesn't exempt an individual MODEL from the same
+        // "untested must not win" rule (confirmed live: an entirely
+        // untested gemini-omni-1.1-flash, zero provider_model_health rows,
+        // still won here before this line existed). Falls back to the
+        // full trusted set (proven or not) only if literally no Groq/
+        // Gemini model has any track record yet — Amro's directive trusts
+        // the PROVIDER by brand, so even an unvalidated Groq/Gemini model
+        // is still preferable to a third-party free one.
+        const provenTrusted = trusted.filter(isProven);
+        effectiveScored = provenTrusted.length > 0 ? provenTrusted : trusted;
+      } else {
+        // Layer 2 (degrade gracefully): neither Groq nor Gemini is even
+        // configured for this caller (e.g. a BYOK tenant who only set up
+        // a different provider) — fall back to the proven-reliability gate
+        // across all providers rather than leaving this tenant with no
+        // speed-critical routing at all.
+        const proven = effectiveScored.filter(isProven);
+        if (proven.length > 0) effectiveScored = proven;
+        // Layer 3 (fail open): nothing is proven either (fresh deployment,
+        // zero call history anywhere) — same "an imperfect answer beats
+        // silently blocking execution" posture as the free-only fallback
+        // above; effectiveScored is left as the full, un-gated set.
+      }
+    }
 
     // A manual preference must not bypass the hard budget gate — security
     // requirement, not merely a scoring nicety (mission Section 21: "do not

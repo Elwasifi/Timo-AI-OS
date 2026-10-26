@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
-import { User, Bell, Shield, Palette, Volume2, Sparkles, Check, Loader2, Eye, EyeOff, Save, Workflow, Wifi, AlertCircle, Brain, Users, UserPlus, Trash2, Pencil, Globe, ShieldAlert, X as XIcon, CheckCircle2, XCircle, AlertTriangle, Clock, Settings as SettingsIcon, Play, CreditCard } from 'lucide-react';
+import { User, Bell, Shield, Palette, Volume2, Sparkles, Check, Loader2, Eye, EyeOff, Save, Workflow, Wifi, AlertCircle, Brain, Users, UserPlus, Trash2, Pencil, Globe, ShieldAlert, X as XIcon, CheckCircle2, XCircle, AlertTriangle, Clock, Settings as SettingsIcon, Play, CreditCard, type LucideIcon } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useVoiceStore } from '@/stores/voiceStore';
@@ -1684,51 +1684,73 @@ function ToggleRow({ label, description, defaultOn, onToggle }: { label: string;
   );
 }
 
-function NotificationsSection() {
+// M7-13: Notifications/Appearance/Privacy used to render live-looking
+// toggles and fields wired to nothing — flipping them had zero effect
+// (no onToggle handler, no persistence), and Privacy's "Two-factor auth:
+// Enabled" / "Auto-lock after 15 min idle" were flatly false: no 2FA and
+// no idle-auto-lock exist anywhere in this codebase (M7-13 diagnostic).
+// Amro's decision: hide/mark "Coming Soon" rather than build real
+// functionality now, and never present false state in the meantime.
+function ComingSoonSection({ title, description, icon: Icon, items }: {
+  title: string;
+  description: string;
+  icon: LucideIcon;
+  items: string[];
+}) {
   return (
     <div>
-      <h2 className="font-grotesk text-lg font-semibold">Notifications</h2>
-      <p className="mt-1 text-sm text-muted-foreground">Manage how Temo alerts you</p>
-      <div className="mt-4">
-        <ToggleRow label="Workflow completions" description="Notify when a workflow finishes" defaultOn={true} />
-        <ToggleRow label="Agent status changes" description="Alert on agent state transitions" defaultOn={true} />
-        <ToggleRow label="Provider errors" description="Notify on provider failures" defaultOn={true} />
-        <ToggleRow label="Daily digest" description="Email a summary each morning" defaultOn={false} />
-        <ToggleRow label="Sound effects" description="Play audio on new events" defaultOn={false} />
+      <h2 className="font-grotesk text-lg font-semibold">{title}</h2>
+      <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+      <div className="mt-6 flex flex-col items-center gap-3 rounded-xl border border-dashed border-border/50 py-10 text-center">
+        <Icon className="h-8 w-8 text-muted-foreground/60" />
+        <div>
+          <p className="text-sm font-medium text-foreground">Coming soon</p>
+          <p className="mt-1 max-w-xs text-xs text-muted-foreground">
+            This section isn&apos;t wired up yet — nothing here is saved or has any effect. We&apos;d rather show that honestly than show controls that silently do nothing.
+          </p>
+        </div>
+        <div className="mt-2 flex flex-wrap justify-center gap-2">
+          {items.map((item) => (
+            <span key={item} className="rounded-full border border-border/40 px-2.5 py-1 text-[11px] text-muted-foreground/70">
+              {item}
+            </span>
+          ))}
+        </div>
       </div>
     </div>
+  );
+}
+
+function NotificationsSection() {
+  return (
+    <ComingSoonSection
+      title="Notifications"
+      description="Manage how Temo alerts you"
+      icon={Bell}
+      items={['Workflow completions', 'Agent status changes', 'Provider errors', 'Daily digest', 'Sound effects']}
+    />
   );
 }
 
 function AppearanceSection() {
   return (
-    <div>
-      <h2 className="font-grotesk text-lg font-semibold">Appearance</h2>
-      <p className="mt-1 text-sm text-muted-foreground">Customize the look of Temo</p>
-      <div className="mt-4">
-        <Field label="Theme" value="Dark (locked)" />
-        <Field label="Accent color" value="Cyan #00E5FF" />
-        <Field label="Font" value="Inter / Space Grotesk" />
-        <Field label="Density" value="Comfortable" />
-        <Field label="Animations" value="Enabled" />
-      </div>
-    </div>
+    <ComingSoonSection
+      title="Appearance"
+      description="Customize the look of Temo"
+      icon={Palette}
+      items={['Theme', 'Accent color', 'Font', 'Density', 'Animations']}
+    />
   );
 }
 
 function PrivacySection() {
   return (
-    <div>
-      <h2 className="font-grotesk text-lg font-semibold">Privacy &amp; Security</h2>
-      <p className="mt-1 text-sm text-muted-foreground">Control your data and access</p>
-      <div className="mt-4">
-        <ToggleRow label="Local-only transcripts" description="Keep voice transcripts on-device" defaultOn={true} />
-        <ToggleRow label="Telemetry" description="Share anonymous usage data" defaultOn={false} />
-        <ToggleRow label="Auto-lock" description="Lock workspace after 15 min idle" defaultOn={true} />
-        <Field label="Data retention" value="30 days" />
-        <Field label="Two-factor auth" value="Enabled" />
-      </div>
-    </div>
+    <ComingSoonSection
+      title="Privacy & Security"
+      description="Control your data and access"
+      icon={Shield}
+      items={['Transcript retention', 'Telemetry', 'Auto-lock', 'Data retention', 'Two-factor auth']}
+    />
   );
 }
 

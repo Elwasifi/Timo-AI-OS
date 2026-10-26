@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase/client';
+import { useVisibilityRefresh } from './useVisibilityRefresh';
 
 export interface RealtimeTableWatch {
   table: string;
@@ -36,6 +37,17 @@ export function useRealtimeRefetch(watches: RealtimeTableWatch[], onChange: () =
 
   const watchKey = watches.map((w) => `${w.table}:${w.filter ?? '*'}`).join('|');
 
+  // M7-13: a tab backgrounded long enough to hit Chrome's timer throttling
+  // may have let the underlying websocket's heartbeat lapse — bumping this
+  // on visibility regain tears down and recreates the channel below
+  // (fresh join handshake) rather than trusting a possibly-stale
+  // connection to have silently self-healed.
+  const [resubscribeNonce, setResubscribeNonce] = useState(0);
+  useVisibilityRefresh(() => {
+    if (watches.length === 0) return;
+    setResubscribeNonce((n) => n + 1);
+  });
+
   useEffect(() => {
     if (watches.length === 0) return;
 
@@ -55,10 +67,15 @@ export function useRealtimeRefetch(watches: RealtimeTableWatch[], onChange: () =
     }
     channel.subscribe();
 
+    // A fresh subscription means the data on screen may already be
+    // out of date (that's exactly why this re-subscribed) — refetch
+    // immediately rather than waiting for the next real row change.
+    if (resubscribeNonce > 0) onChangeRef.current();
+
     return () => {
       if (timeout) clearTimeout(timeout);
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [watchKey, debounceMs]);
+  }, [watchKey, debounceMs, resubscribeNonce]);
 }

@@ -20,9 +20,33 @@ type Inferred = Pick<
 >;
 
 const CODING_PATTERNS = /coder|code|codestral|starcoder/i;
-const STRONG_REASONING_PATTERNS = /\bpro\b|opus|large|405b|70b|72b|235b|ultra/i;
-const FAST_PATTERNS = /flash|instant|lite|mini|nano|8b|7b|9b|1b\b|small/i;
-const SLOW_PATTERNS = /\bpro\b|opus|large|405b|235b|ultra|thinking/i;
+
+// M7-13: these raw digit+"b" patterns (param-count tokens like "8b"/"70b")
+// previously matched as unanchored SUBSTRINGS — "9b" matched inside "29b",
+// so a real 29-billion-parameter model got misclassified as a small/fast
+// model, which (combined with the router's "mild optimism" default for
+// untested candidates) caused an unproven free model to outrank Groq/
+// Gemini for every FAST_CHAT/VOICE routing decision (M7-13 diagnostic:
+// live route() picked openrouter/xingchen-agi/xing4.0-29b-a4b:free over
+// both). A digit-bounded helper requires the token to be a standalone
+// number (no digit immediately before or after), not a substring of a
+// larger one.
+function digitBounded(token: string): string {
+  return `(?<!\\d)${token}(?!\\d)`;
+}
+
+const STRONG_REASONING_PATTERNS = new RegExp(
+  `\\bpro\\b|opus|\\blarge\\b|ultra|${digitBounded('405b')}|${digitBounded('70b')}|${digitBounded('72b')}|${digitBounded('235b')}`,
+  'i',
+);
+const FAST_PATTERNS = new RegExp(
+  `flash|instant|lite|mini|nano|\\bsmall\\b|${digitBounded('8b')}|${digitBounded('7b')}|${digitBounded('9b')}|${digitBounded('1b')}`,
+  'i',
+);
+const SLOW_PATTERNS = new RegExp(
+  `\\bpro\\b|opus|\\blarge\\b|ultra|thinking|${digitBounded('405b')}|${digitBounded('235b')}`,
+  'i',
+);
 
 export function inferModelCapabilities(_provider: string, modelId: string): Inferred {
   const id = modelId.toLowerCase();

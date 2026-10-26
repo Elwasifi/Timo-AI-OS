@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Bell, CheckCircle, AlertCircle, Info, X } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
@@ -12,6 +13,14 @@ import { cn } from '@/lib/utils';
 export default function NotificationsPage() {
   const events = useSystemStore((s) => s.events);
   const activityFeed = useOrchestrationStore((s) => s.activityFeed);
+  // M7-13: neither store tracks read/unread state at all, so "mark as
+  // read" can't mean anything server/store-side without a real schema
+  // change — out of scope here (the ticket's ask was to stop the button
+  // being dead, not add persisted read-state). This is the honest,
+  // trivial version of what both controls visually claim: dismissing
+  // actually removes the item from view for this session, same as the
+  // per-row X below.
+  const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
 
   const TYPE_CONFIG = {
     success: { icon: CheckCircle, color: '#10B981', label: 'Success' },
@@ -23,7 +32,11 @@ export default function NotificationsPage() {
   const allNotifications = [
     ...events.map((e) => ({ id: e.id, title: e.message, type: e.type as keyof typeof TYPE_CONFIG, time: e.time, source: 'System' })),
     ...activityFeed.map((a) => ({ id: a.id, title: a.title, type: a.type === 'error' ? 'error' : 'info' as keyof typeof TYPE_CONFIG, time: '--:--', timestamp: a.timestamp, source: a.detail ?? 'Activity' })),
-  ];
+  ].filter((n) => !dismissedIds.has(n.id));
+
+  const markAllRead = () => {
+    setDismissedIds((prev) => new Set(Array.from(prev).concat(allNotifications.map((n) => n.id))));
+  };
 
   return (
     <AppShell>
@@ -33,7 +46,11 @@ export default function NotificationsPage() {
             <h1 className="font-sans text-2xl font-bold tracking-tight text-temo-led">Notifications</h1>
             <p className="font-mono text-xs text-temo-titanium">System alerts and event history</p>
           </div>
-          <button className="flex items-center gap-2 rounded-xl border border-temo-titanium/20 px-3 py-2 font-mono text-xs uppercase tracking-wider text-temo-titanium transition-colors hover:text-temo-led">
+          <button
+            onClick={markAllRead}
+            disabled={allNotifications.length === 0}
+            className="flex items-center gap-2 rounded-xl border border-temo-titanium/20 px-3 py-2 font-mono text-xs uppercase tracking-wider text-temo-titanium transition-colors hover:text-temo-led disabled:cursor-not-allowed disabled:opacity-40"
+          >
             <CheckCircle className="h-4 w-4" /> Mark All Read
           </button>
         </div>
@@ -79,7 +96,10 @@ export default function NotificationsPage() {
                   ) : (
                     <span className="shrink-0 font-mono text-[10px] text-temo-titanium/60">{n.time}</span>
                   )}
-                  <button className="text-temo-titanium opacity-0 transition-opacity group-hover:opacity-100 hover:text-temo-led">
+                  <button
+                    onClick={() => setDismissedIds((prev) => new Set(prev).add(n.id))}
+                    className="text-temo-titanium opacity-0 transition-opacity group-hover:opacity-100 hover:text-temo-led"
+                  >
                     <X className="h-4 w-4" />
                   </button>
                 </motion.div>

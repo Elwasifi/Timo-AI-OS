@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useRealtimeRefetch, type RealtimeTableWatch } from './useRealtimeRefetch';
+import { useVisibilityRefresh } from './useVisibilityRefresh';
 
 // M4-06: every "live" widget used to fetch exactly once on mount with no
 // revalidation — the confirmed cause of "needs a manual refresh every
@@ -56,6 +57,14 @@ export function usePolled<T>(
   }, [load, effectiveInterval]);
 
   useRealtimeRefetch(realtimeTables ?? [], load);
+
+  // M7-13: the setInterval poll above is just as vulnerable to Chrome's
+  // background-tab timer throttling as Realtime's own heartbeat
+  // (useRealtimeRefetch forces its own channel reconnect on visibility
+  // regain — this covers the plain-polling case, including callers with
+  // no realtimeTables at all, with an immediate refetch instead of
+  // waiting out whatever's left of a throttled interval).
+  useVisibilityRefresh(load);
 
   return data;
 }

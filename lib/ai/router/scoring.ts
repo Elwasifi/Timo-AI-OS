@@ -65,7 +65,23 @@ function scoreCapabilityMatch(cap: ModelCapabilityProfile, task: TaskClassificat
   return Math.max(0, Math.min(1, score));
 }
 
-function scoreTaskMatch(cap: ModelCapabilityProfile, task: TaskClassification): number {
+// M7-13: fast-chat fit used to be judged purely by inferredSpeedTier — a
+// naming-pattern guess (modelCapabilities.ts's FAST_PATTERNS, e.g. "8b"/
+// "flash"). That's a real blind spot for Groq specifically: Groq's speed
+// comes from its hardware (LPU inference), not from running small models,
+// so a legitimate Groq chat model like openai/gpt-oss-120b never matches
+// any "small model" naming pattern and scored only a neutral 0.5 here —
+// while an actually-slow model (confirmed: a real 4.1s avg latency) that
+// merely has "7b" in its name scored 0.9, enough on its own to beat Groq's
+// real, measured, sub-2.5s performance (M7-13 diagnostic + re-verification:
+// openrouter/tencent/hy-mt2-7b outscored groq/openai/gpt-oss-120b despite
+// being over 2x slower in practice). Mirrors scoreLatency()'s own already-
+// documented principle — "real measured data always wins over inference" —
+// by preferring real avg_latency_ms over the naming guess whenever it's
+// available; the naming heuristic now only applies to genuinely untested
+// candidates, which the route()-level proven-reliability gate already
+// keeps out of fast-chat/voice routing in the first place.
+function scoreTaskMatch(cap: ModelCapabilityProfile, task: TaskClassification, health: ModelHealth | null): number {
   let score = 0.5;
   if (task.taskType === 'CODING') {
     if (cap.inferredCodingStrength === 'strong') score = 0.9;
@@ -74,7 +90,11 @@ function scoreTaskMatch(cap: ModelCapabilityProfile, task: TaskClassification): 
     if (cap.inferredReasoningStrength === 'strong') score = 0.9;
     else if (cap.inferredReasoningStrength === 'standard') score = 0.5;
   } else if (task.latencySensitivity === 'high') {
-    if (cap.inferredSpeedTier === 'fast') score = 0.9;
+    if (health?.avgLatencyMs != null) {
+      if (health.avgLatencyMs <= 1500) score = 0.9;
+      else if (health.avgLatencyMs >= 4000) score = 0.2;
+      // else: genuinely middling real latency — stays at the neutral 0.5 default
+    } else if (cap.inferredSpeedTier === 'fast') score = 0.9;
     else if (cap.inferredSpeedTier === 'slow') score = 0.2;
   }
   return score;
@@ -157,7 +177,7 @@ export function scoreCandidate(
   const w = effectiveWeights(strategy);
   const breakdown = {
     capabilityMatch: scoreCapabilityMatch(cap, task) * w.capabilityMatch,
-    taskMatch: scoreTaskMatch(cap, task) * w.taskMatch,
+    taskMatch: scoreTaskMatch(cap, task, health) * w.taskMatch,
     reliability: scoreReliability(health) * w.reliability,
     latency: scoreLatency(health, cap, task.latencySensitivity) * w.latency,
     contextFit: scoreContextFit(cap, task) * w.contextFit,
