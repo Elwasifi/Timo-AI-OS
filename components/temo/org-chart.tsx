@@ -20,6 +20,7 @@ import {
   type Tone,
 } from '@/lib/agents/frontendBridge';
 import { Holo, VoiceAura, Node } from './holo';
+import { VoiceTrigger } from './voice-trigger';
 import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { useSystemStore, startSystemHealthPolling } from '@/stores/systemStore';
 
@@ -567,7 +568,7 @@ export function OrgChart() {
               </svg>
 
               {/* Temo — fixed at the exact center, largest node */}
-              <div className="radial-node radial-node-ceo" style={{ left: `${(CENTER / VB) * 100}%`, top: `${(CENTER / VB) * 100}%` }}>
+              <div className="radial-node radial-node-ceo relative" style={{ left: `${(CENTER / VB) * 100}%`, top: `${(CENTER / VB) * 100}%` }}>
                 <Node
                   level="ceo"
                   image={TEMO_UI.image}
@@ -580,6 +581,16 @@ export function OrgChart() {
                   kicker="&#9679; READY &middot; ACTIVE LISTENING"
                   active
                 />
+                {/* M7-11: same shared voice control as Main Dashboard
+                    (VoiceTrigger, M3-05/M3-10) — reused as-is, not
+                    rebuilt. Badge-positioned on the hero avatar circle's
+                    upper-right edge (not bottom-right — confirmed via a
+                    live screenshot that bottom-right collides with the
+                    name/description text stacked below the avatar, and
+                    an adjacent node's circle) since Node (holo.tsx) has
+                    no children slot to mount it centered-inside like
+                    command-deck.tsx's .holo-core placement does. */}
+                <VoiceTrigger size={40} anchorClassName="absolute top-6 right-2 z-30" expandedWidth={250} />
               </div>
 
               {/* Ring 1 — Corporate Office */}

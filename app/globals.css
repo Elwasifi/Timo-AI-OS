@@ -1039,12 +1039,18 @@ body { background: #020914; }
    .dashboard-shell above: html/body block scrolling globally. */
 .org-shell { position:relative; overflow-x:hidden; overflow-y:auto; height:100vh; color:#e7f6ff; background-position:center; background-size:cover; background-attachment:fixed; padding:16px; font-family:var(--font-inter),ui-sans-serif,sans-serif; }
 .org-topbar,.org-footer { position:relative; z-index:1; max-width:1680px; margin:auto; }
-.org-topbar { display:flex; justify-content:space-between; align-items:flex-end; gap:16px; flex-wrap:wrap; border-bottom:1px solid rgba(103,232,249,.16); padding:6px 12px 14px; }
-.org-topbar h1 { margin:4px 0; font-size:clamp(20px,3vw,34px); letter-spacing:.16em; }
+/* M7-11: visual-only polish pass — slightly more breathing room and a
+   calmer type scale in the topbar (the 8-9px labels read as cramped
+   rather than deliberately minimal), topbar-actions switched to a
+   right-aligned column so the dashboard link and live-status line stack
+   cleanly instead of eyeballing a shared baseline. No structural/
+   positioning changes to the radial canvas below this. */
+.org-topbar { display:flex; justify-content:space-between; align-items:flex-end; gap:16px; flex-wrap:wrap; border-bottom:1px solid rgba(103,232,249,.16); padding:10px 14px 18px; }
+.org-topbar h1 { margin:6px 0; font-size:clamp(20px,3vw,34px); letter-spacing:.16em; }
 .org-topbar h1 span { color:#67e8f9; font-weight:300; }
-.org-topbar p { margin:0; color:#94a3b8; font-size:9px; letter-spacing:.12em; text-transform:uppercase; }
-.org-kicker { color:#67e8f9 !important; font-size:8px !important; letter-spacing:.25em !important; }
-.org-topbar-actions { display:flex; align-items:center; gap:14px; }
+.org-topbar p { margin:0; color:#94a3b8; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; }
+.org-kicker { color:#67e8f9 !important; font-size:9.5px !important; letter-spacing:.22em !important; }
+.org-topbar-actions { display:flex; flex-direction:column; align-items:flex-end; gap:10px; }
 .org-dash-link { display:inline-flex; align-items:center; gap:6px; border:1px solid rgba(103,232,249,.4); border-radius:8px; padding:7px 12px; color:#a5f3fc; font-size:10px; letter-spacing:.1em; text-transform:uppercase; background:rgba(34,211,238,.08); box-shadow:0 0 16px rgba(34,211,238,.14); transition:.2s; }
 .org-dash-link:hover { border-color:#67e8f9; background:rgba(34,211,238,.18); box-shadow:0 0 22px rgba(34,211,238,.32); }
 .org-live { display:flex; align-items:center; gap:9px; color:#94a3b8; font-size:9px; }

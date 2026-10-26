@@ -45,9 +45,26 @@ interface VoiceStoreState {
   reset: () => void;
 }
 
+// M7-11: TTS tuning. selectedVoice used to default to 'Aurora' — a
+// fictional name that can never match a real browser
+// SpeechSynthesisVoice (see app/settings/page.tsx's VoiceSection fix for
+// the fuller root-cause story), silently falling back to whatever
+// arbitrary voice the browser picks with no indication the "selection"
+// was never honored. Empty string means "no explicit preference" —
+// voice-player.ts's pickVoice() already has a clean lang-based fallback
+// for this case (picks a real voice matching the configured language),
+// which is more honest than pointing at a name that doesn't exist.
+// rate 0.9 (default Web Speech API pacing at exactly 1.0 reads as
+// slightly rushed/clipped for longer assistant replies — a small,
+// easily-reverted step down reads more natural without feeling slow;
+// matches Settings -> Voice's Speed slider step of 0.1 exactly, so the
+// displayed value and the stored default never disagree). pitch stays
+// at the Web Speech API's own neutral 1.0 — deviating from it tends to
+// sound MORE synthetic, not less, so left untouched here. Both remain
+// fully user-adjustable via Settings -> Voice.
 const DEFAULT_SETTINGS: VoiceSettings = {
-  selectedVoice: 'Aurora',
-  speed: 1,
+  selectedVoice: '',
+  speed: 0.9,
   pitch: 1,
   language: 'en-US',
   volume: 0.8,

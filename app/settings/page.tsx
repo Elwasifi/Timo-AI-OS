@@ -360,44 +360,56 @@ function BillingSection() {
     );
   }
 
+  // M7-11: visual-only redesign toward a ChatGPT/Claude-style plan grid —
+  // taller cards, bolder price typography, a top accent bar + badge for
+  // the current plan, consistent card heights so the CTA row aligns
+  // across tiers. Same data (packages/tenant_entitlements), same
+  // disabled/"Coming Soon" CTAs, same filter — JSX/styling only.
   return (
     <div>
-      <h2 className="font-grotesk text-lg font-semibold">Billing & Plan</h2>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Private Beta: every workspace has full, unrestricted access regardless of plan shown below — nothing here is enforced yet.
+      <h2 className="font-grotesk text-xl font-semibold">Billing & Plan</h2>
+      <p className="mt-1.5 text-sm text-muted-foreground">
+        Private Beta — every workspace has full, unrestricted access regardless of plan. Nothing below is enforced yet.
       </p>
 
-      <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-7 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {packages.filter((p) => p.id !== 'custom').map((pkg) => {
           const isCurrent = pkg.id === currentPackageId;
           return (
             <div
               key={pkg.id}
               className={cn(
-                'rounded-xl border p-4',
-                isCurrent ? 'border-primary/50 bg-primary/5' : 'border-border/60',
+                'relative flex flex-col overflow-hidden rounded-2xl border bg-background/40 p-6 transition-colors',
+                isCurrent ? 'border-primary/60 ring-1 ring-primary/20' : 'border-border/50 hover:border-border',
               )}
             >
+              {isCurrent && <div className="absolute inset-x-0 top-0 h-1 bg-primary" />}
+
               <div className="flex items-center justify-between">
-                <span className="text-sm font-semibold">{pkg.name}</span>
+                <span className="text-base font-semibold">{pkg.name}</span>
                 {isCurrent && (
-                  <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-primary">
+                  <span className="rounded-full bg-primary/15 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
                     Current plan
                   </span>
                 )}
               </div>
-              <div className="mt-1 text-lg font-bold">{formatPriceCents(pkg.price_cents)}</div>
-              <ul className="mt-3 space-y-1.5 text-xs text-muted-foreground">
+
+              <div className="mt-4 flex items-baseline gap-1">
+                <span className="text-3xl font-bold tracking-tight">{formatPriceCents(pkg.price_cents)}</span>
+              </div>
+
+              <ul className="mt-6 flex-1 space-y-2.5 text-sm text-muted-foreground">
                 {(Array.isArray(pkg.features) ? pkg.features : []).map((f, i) => (
-                  <li key={i} className="flex items-center gap-1.5">
-                    <Check className="h-3 w-3 shrink-0 text-success" /> {f}
+                  <li key={i} className="flex items-start gap-2">
+                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+                    <span>{f}</span>
                   </li>
                 ))}
               </ul>
+
               <Button
-                size="sm"
                 disabled
-                className="mt-4 w-full"
+                className="mt-7 w-full"
                 variant={isCurrent ? 'secondary' : 'outline'}
               >
                 {isCurrent ? 'Current plan' : 'Coming Soon'}
@@ -1729,16 +1741,39 @@ function VoiceSection() {
   const [previewing, setPreviewing] = useState(false);
 
   useEffect(() => {
+    // M7-11: real root cause of "TTS sounds unnatural" — Chrome's
+    // speechSynthesis.getVoices() reliably returns [] on the very first
+    // synchronous call (voices load async, before onvoiceschanged ever
+    // fires) — this used to fall straight back to four fictional voice
+    // names ('Aurora'/'Nova'/'Echo'/'Pulse') that can never match a real
+    // SpeechSynthesisVoice. A user who "selected" one of those (including
+    // the old default, 'Aurora') was silently getting the browser's
+    // arbitrary fallback voice instead, with no indication their choice
+    // was never honored. Fixed with a few short retries before giving up,
+    // and an honest empty state (not fake names) if the browser genuinely
+    // reports none.
+    let cancelled = false;
+    let attempts = 0;
     const load = () => {
+      if (cancelled) return;
       const v = voiceManager.getAvailableVoices().map((v) => v.name);
-      if (v.length > 0) setVoices(v);
-      else setVoices(['Aurora', 'Nova', 'Echo', 'Pulse']);
+      if (v.length > 0) {
+        setVoices(v);
+        return;
+      }
+      attempts += 1;
+      if (attempts < 5) {
+        setTimeout(load, 300);
+      } else {
+        setVoices([]);
+      }
     };
     load();
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.onvoiceschanged = load;
     }
     return () => {
+      cancelled = true;
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.onvoiceschanged = null;
       }
@@ -1786,7 +1821,8 @@ function VoiceSection() {
             <SelectRow
               label="Voice"
               value={settings.selectedVoice}
-              options={voices}
+              options={voices.length > 0 ? ['', ...voices] : ['']}
+              optionLabels={{ '': voices.length > 0 ? 'Default (system voice)' : 'No voices detected on this browser' }}
               onChange={(v) => updateSettings({ selectedVoice: v })}
             />
           </div>
@@ -1876,11 +1912,14 @@ function SelectRow({
   label,
   value,
   options,
+  optionLabels,
   onChange,
 }: {
   label: string;
   value: string;
   options: string[];
+  /** Optional display-label override for specific option values (e.g. '' -> "Default (system voice)"). */
+  optionLabels?: Record<string, string>;
   onChange: (v: string) => void;
 }) {
   return (
@@ -1893,7 +1932,7 @@ function SelectRow({
       >
         {options.map((o) => (
           <option key={o} value={o} className="bg-card text-foreground">
-            {o}
+            {optionLabels?.[o] ?? o}
           </option>
         ))}
       </select>

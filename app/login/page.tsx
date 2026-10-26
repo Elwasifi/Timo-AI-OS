@@ -8,6 +8,11 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
+// M7-11: visual-only redesign toward a ChatGPT/Claude-style minimal login
+// layout — generous whitespace, calm typography, a single clear primary
+// action, understated branding instead of the previous heavy glow/neon
+// card. No change to auth logic, field names/handlers, or behavior — only
+// JSX/styling below.
 export default function LoginPage() {
   const router = useRouter();
   const signInWithPassword = useAuthStore((s) => s.signInWithPassword);
@@ -49,45 +54,47 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-[#020914] px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-cyan-500/15 bg-[rgba(2,9,20,0.85)] p-8 shadow-[0_0_40px_rgba(0,180,255,0.08)] backdrop-blur-xl">
-        <div className="mb-6 flex items-center gap-2">
-          <Sparkles className="h-6 w-6 text-cyan-300" />
-          <div>
-            <h1 className="text-lg font-semibold tracking-wide text-cyan-50">TEMO AI OS</h1>
-            <p className="text-[10px] uppercase tracking-widest text-cyan-300/60">
-              {mode === 'signin' ? 'Sign in to your workspace' : 'Create your workspace'}
-            </p>
+    <main className="flex min-h-screen items-center justify-center bg-[#08090c] px-4">
+      <div className="w-full max-w-[380px]">
+        <div className="mb-10 flex flex-col items-center text-center">
+          <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-white/[0.06]">
+            <Sparkles className="h-5 w-5 text-white/80" />
           </div>
+          <h1 className="text-xl font-semibold text-white">
+            {mode === 'signin' ? 'Welcome back' : 'Create your workspace'}
+          </h1>
+          <p className="mt-1.5 text-sm text-white/50">
+            {mode === 'signin' ? 'Sign in to continue to Temo AI OS' : 'Get started with Temo AI OS'}
+          </p>
         </div>
 
-        <form onSubmit={submit} className="space-y-4">
+        <form onSubmit={submit} className="space-y-3.5">
           {mode === 'signup' && (
             <div>
-              <Label htmlFor="company" className="text-xs text-slate-400">Company / organization name</Label>
+              <Label htmlFor="company" className="sr-only">Company / organization name</Label>
               <Input
                 id="company"
                 value={companyName}
                 onChange={(e) => setCompanyName(e.target.value)}
-                placeholder="Acme Inc."
-                className="mt-1"
+                placeholder="Company or organization name"
+                className="h-11 rounded-lg border-white/10 bg-white/[0.03] text-sm text-white placeholder:text-white/35 focus-visible:ring-white/20"
               />
             </div>
           )}
           <div>
-            <Label htmlFor="email" className="text-xs text-slate-400">Email</Label>
+            <Label htmlFor="email" className="sr-only">Email</Label>
             <Input
               id="email"
               type="email"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@company.com"
-              className="mt-1"
+              placeholder="Email address"
+              className="h-11 rounded-lg border-white/10 bg-white/[0.03] text-sm text-white placeholder:text-white/35 focus-visible:ring-white/20"
             />
           </div>
           <div>
-            <Label htmlFor="password" className="text-xs text-slate-400">Password</Label>
+            <Label htmlFor="password" className="sr-only">Password</Label>
             <Input
               id="password"
               type="password"
@@ -95,19 +102,33 @@ export default function LoginPage() {
               minLength={6}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              className="mt-1"
+              placeholder="Password"
+              className="h-11 rounded-lg border-white/10 bg-white/[0.03] text-sm text-white placeholder:text-white/35 focus-visible:ring-white/20"
             />
           </div>
 
-          {error && <p className="text-xs text-red-400">{error}</p>}
-          {signupNotice && <p className="text-xs text-emerald-400">{signupNotice}</p>}
+          {error && (
+            <p className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</p>
+          )}
+          {signupNotice && (
+            <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-400">{signupNotice}</p>
+          )}
 
-          <Button type="submit" className="w-full" disabled={loading}>
+          <Button
+            type="submit"
+            disabled={loading}
+            className="h-11 w-full rounded-lg bg-white text-sm font-medium text-black hover:bg-white/90"
+          >
             {loading && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
             {mode === 'signin' ? 'Sign in' : 'Create workspace'}
           </Button>
         </form>
+
+        <div className="mt-6 flex items-center gap-3">
+          <div className="h-px flex-1 bg-white/10" />
+          <span className="text-[11px] uppercase tracking-wider text-white/30">or</span>
+          <div className="h-px flex-1 bg-white/10" />
+        </div>
 
         <button
           type="button"
@@ -116,9 +137,13 @@ export default function LoginPage() {
             setError(null);
             setSignupNotice(null);
           }}
-          className="mt-4 w-full text-center text-xs text-cyan-300/70 hover:text-cyan-300"
+          className="mt-6 w-full text-center text-sm text-white/50 transition-colors hover:text-white"
         >
-          {mode === 'signin' ? "Don't have a workspace? Create one" : 'Already have a workspace? Sign in'}
+          {mode === 'signin' ? (
+            <>Don&apos;t have a workspace? <span className="text-white/80 underline underline-offset-2">Create one</span></>
+          ) : (
+            <>Already have a workspace? <span className="text-white/80 underline underline-offset-2">Sign in</span></>
+          )}
         </button>
       </div>
     </main>
