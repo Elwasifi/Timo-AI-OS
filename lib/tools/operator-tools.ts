@@ -66,7 +66,8 @@ interface DraftedGraph {
   connections: Record<string, unknown>;
 }
 
-async function draftWorkflowGraph(description: string): Promise<DraftedGraph> {
+// M7-13e: tenantId is the caller's real (internal-only, see assertInternalTenant) tenant id — it used to be hardcoded `null`, which the edge function treats as "internal" only by accident of its fallback.
+async function draftWorkflowGraph(description: string, tenantId: string): Promise<DraftedGraph> {
   const systemPrompt = `You design minimal n8n workflow node graphs from a plain-language description.
 Only use these node types: ${Array.from(ALLOWED_NODE_TYPES).join(', ')}.
 Every workflow must start with exactly one n8n-nodes-base.manualTrigger node.
@@ -76,7 +77,7 @@ Keep it small — 2 to 4 nodes is enough for almost any description. If the desc
 
   const result = await chatWithFallback(
     [{ role: 'user', content: description }],
-    { systemPrompt, temperature: 0.2, maxTokens: 800, usageContext: { operation: 'operator_workflow_draft', tenantId: null } },
+    { systemPrompt, temperature: 0.2, maxTokens: 800, usageContext: { operation: 'operator_workflow_draft', tenantId } },
   );
 
   const cleaned = result.content.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -106,7 +107,11 @@ const operatorCreateWorkflowHandler: ToolHandler = async (args, context) => {
   const workflowName = args.workflowName as string;
   const description = args.description as string;
 
-  const graph = await draftWorkflowGraph(description);
+  // assertInternalTenant() above already guarantees the internal tenant id; this explicit check makes the
+  // type narrowing honest (no `as string` cast that could hide a missing tenant if that guard ever changes).
+  const tenantId = context.tenantId;
+  if (!tenantId) throw new Error('operator.createWorkflow requires a resolved tenant id; none was present on the tool context.');
+  const graph = await draftWorkflowGraph(description, tenantId);
   const workflow = await n8n.workflows.create({ name: workflowName, nodes: graph.nodes, connections: graph.connections });
 
   return { workflowId: workflow.id, workflowName: workflow.name, nodeCount: graph.nodes.length };

@@ -4,6 +4,7 @@
 
 import { chatWithFallback, type ChatMessage } from '@/lib/ai/ai-provider';
 import { route, type RoutingDecision } from '@/lib/ai/router';
+import { useAuthStore } from '@/stores/authStore';
 import { memoryStore } from './memoryStore';
 import { loadMemorySettings } from './memorySettings';
 import type { MemoryImportance, MemoryRecord } from './types';
@@ -15,7 +16,16 @@ import { IMPORTANCE_FROM_SCORE } from './types';
 // directly rather than via classifyTask()'s general heuristics, since
 // those infer task type from message length/content — these calls are
 // always small regardless of how long the memory being summarized is.
-async function smallTaskDecision(): Promise<RoutingDecision> {
+// M7-13e: these calls used to pass tenantId: null, which the ai-chat edge
+// function resolves as the INTERNAL tenant — a client tenant's memory
+// bookkeeping ran on (and was billed to) the internal tenant's provider keys.
+// They now carry the real tenant (explicit, else the signed-in tenant); with
+// none resolved there is no key to use, so the caller takes its non-LLM default.
+function resolveTenantId(explicit?: string | null): string | null {
+  return explicit || useAuthStore.getState().currentTenantId || null;
+}
+
+async function smallTaskDecision(tenantId: string): Promise<RoutingDecision> {
   return route({
     classification: {
       taskType: 'SMALL_TASK',
@@ -30,14 +40,16 @@ async function smallTaskDecision(): Promise<RoutingDecision> {
       costSensitivity: 'high',
       reliabilityRequirement: 'normal',
     },
-    tenantId: null,
+    tenantId,
   });
 }
 
 export const summarizer = {
-  async summarizeMemory(content: string): Promise<string> {
+  async summarizeMemory(content: string, tenantIdArg?: string | null): Promise<string> {
     const settings = await loadMemorySettings();
     if (!settings.auto_summarize) return '';
+    const tenantId = resolveTenantId(tenantIdArg);
+    if (!tenantId) return '';
 
     try {
       const messages: ChatMessage[] = [
@@ -46,7 +58,7 @@ export const summarizer = {
           content: `Summarize the following memory content in 1-2 concise sentences. Focus on the key facts and decisions.\n\n${content}`,
         },
       ];
-      const decision = await smallTaskDecision();
+      const decision = await smallTaskDecision(tenantId);
       const result = await chatWithFallback(messages, {
         systemPrompt: 'You are a memory summarizer. Produce concise, factual summaries.',
         temperature: 0.3,
@@ -54,7 +66,7 @@ export const summarizer = {
         candidates: decision.candidates,
         usageContext: {
           operation: 'memory_summarize',
-          tenantId: null,
+          tenantId,
           metadata: { taskType: decision.taskType, routingMode: decision.mode },
         },
       });
@@ -64,7 +76,9 @@ export const summarizer = {
     }
   },
 
-  async assessImportance(content: string, title: string): Promise<{ importance: MemoryImportance; score: number }> {
+  async assessImportance(content: string, title: string, tenantIdArg?: string | null): Promise<{ importance: MemoryImportance; score: number }> {
+    const tenantId = resolveTenantId(tenantIdArg);
+    if (!tenantId) return { importance: 'medium', score: 50 };
     try {
       const messages: ChatMessage[] = [
         {
@@ -72,7 +86,7 @@ export const summarizer = {
           content: `Rate the importance of this memory on a scale of 0-100 (100=critical, 80=high, 50=medium, 25=low, 10=temporary). Reply with ONLY the number.\n\nTitle: ${title}\nContent: ${content.slice(0, 500)}`,
         },
       ];
-      const decision = await smallTaskDecision();
+      const decision = await smallTaskDecision(tenantId);
       const result = await chatWithFallback(messages, {
         systemPrompt: 'You are a memory importance assessor. Reply with only a number 0-100.',
         temperature: 0.1,
@@ -80,7 +94,7 @@ export const summarizer = {
         candidates: decision.candidates,
         usageContext: {
           operation: 'memory_importance_assessment',
-          tenantId: null,
+          tenantId,
           metadata: { taskType: decision.taskType, routingMode: decision.mode },
         },
       });
@@ -91,7 +105,7 @@ export const summarizer = {
     }
   },
 
-  async shouldRemember(content: string, title: string): Promise<boolean> {
+  async shouldRemember(content: string, title: string, tenantIdArg?: string | null): Promise<boolean> {
     const settings = await loadMemorySettings();
     if (!settings.auto_remember) return false;
 
@@ -101,6 +115,8 @@ export const summarizer = {
     if (criticalKeywords.some((kw) => lowerContent.includes(kw))) return true;
 
     // Use AI to decide for ambiguous content
+    const tenantId = resolveTenantId(tenantIdArg);
+    if (!tenantId) return true; // no tenant to run a model for — same default as an AI failure
     try {
       const messages: ChatMessage[] = [
         {
@@ -108,15 +124,19 @@ export const summarizer = {
           content: `Should this information be stored as a long-term memory? Reply with ONLY "yes" or "no".\n\nTitle: ${title}\nContent: ${content.slice(0, 300)}`,
         },
       ];
-      const decision = await smallTaskDecision();
+      const decision = await smallTaskDecision(tenantId);
       const result = await chatWithFallback(messages, {
         systemPrompt: 'You decide if information is worth remembering long-term. Reply with only "yes" or "no".',
         temperature: 0.1,
-        maxTokens: 5,
+        // M7-13e: was 5 — reasoning-capable models (gemini-3.x, gpt-oss)
+        // spend part of maxTokens on hidden reasoning and returned an empty
+        // completion, which ai-provider records as a provider FAILURE
+        // (polluting health + triggering fallbacks on every single turn).
+        maxTokens: 128,
         candidates: decision.candidates,
         usageContext: {
           operation: 'memory_should_remember',
-          tenantId: null,
+          tenantId,
           metadata: { taskType: decision.taskType, routingMode: decision.mode },
         },
       });

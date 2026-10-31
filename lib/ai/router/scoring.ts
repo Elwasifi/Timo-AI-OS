@@ -162,9 +162,38 @@ function rateLimitPenalty(health: ModelHealth | null): number {
   return 0;
 }
 
-function failurePenalty(health: ModelHealth | null): number {
-  if (!health) return 0;
-  return Math.min(1, health.consecutiveFailures * 0.35);
+// M7-13b: this used to be a flat Math.min(1, consecutiveFailures * 0.35)
+// with no regard for how much history backs that streak — 2 consecutive
+// failures scored identically whether the model had 3 total calls or 196.
+// Confirmed live: groq/allam-2-7b's 2 consecutive failures out of 196
+// calls (99% historical success rate) cost it a -0.14 weighted penalty,
+// almost exactly canceling its real, measured ~1.1s latency advantage
+// over the router's actual pick — a model with a far thinner track
+// record. Two changes: (1) scale the raw penalty down by sqrt(totalCalls)
+// — a couple of recent misses in a long, mostly-successful history should
+// weigh far less than the same couple of misses in a tiny sample, while a
+// model with few total calls still gets a meaningful penalty from a
+// failure streak (sqrt grows slowly: 196 calls -> /14, 6 calls -> /2.4);
+// (2) decay the penalty by how long ago the last failure was — a streak
+// from an hour-plus ago matters less than one from the last few minutes,
+// since "consecutiveFailures" as stored is a raw counter with no time
+// dimension of its own.
+export function failurePenalty(health: ModelHealth | null): number {
+  if (!health || health.consecutiveFailures <= 0) return 0;
+  // M7-13e: scale by SUCCESSES, not total calls. Total calls includes the
+  // failures themselves, so a permanently broken model (0 successes, N
+  // failures — e.g. nvidia returning 404 on every call) saw its penalty
+  // SHRINK as it kept failing (N=100 -> /10), making it retried MORE, the
+  // opposite of the intent. A track record of successes is what earns
+  // leniency for a couple of recent misses; a model with none gets the
+  // full, unscaled penalty.
+  const raw = Math.min(1, health.consecutiveFailures * 0.35);
+  const sampleScaled = raw / Math.sqrt(Math.max(1, health.successCount));
+  const minutesSinceFailure = health.lastFailureAt
+    ? (Date.now() - new Date(health.lastFailureAt).getTime()) / 60_000
+    : 0;
+  const decay = minutesSinceFailure > 60 ? 0.3 : minutesSinceFailure > 15 ? 0.6 : 1;
+  return sampleScaled * decay;
 }
 
 export function scoreCandidate(

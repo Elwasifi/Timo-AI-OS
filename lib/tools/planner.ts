@@ -33,7 +33,7 @@ interface PlannerResponse {
  * that's not a failure and should never be reported as one.
  */
 export class ToolPlanningError extends Error {
-  constructor(message: string, public cause_: unknown, public provider?: string) {
+  constructor(message: string, public cause_: unknown, public provider?: string, public code?: 'no_tenant') {
     super(message);
     this.name = 'ToolPlanningError';
   }
@@ -47,10 +47,20 @@ export class ToolPlanner {
   async plan(
     input: string,
     agentId: string,
-    permissions: ToolPermission[]
+    permissions: ToolPermission[],
+    tenantId?: string | null,
   ): Promise<PlannerResponse | null> {
     const available = toolRegistry.listForAgent(agentId, permissions);
     if (available.length === 0) return null;
+
+    // M7-13e: this used to pass tenantId: null, which the ai-chat edge function
+    // resolves as the INTERNAL tenant — a client tenant's tool planning ran on
+    // (and was billed to) the internal tenant's provider keys. Fail closed:
+    // with no resolved tenant there is nobody's key to use, so no provider call
+    // is made (reported as a planning failure, not as "no tool fits").
+    if (!tenantId) {
+      throw new ToolPlanningError('Tool planning needs a resolved tenant; none was available, so no AI call was made.', null, undefined, 'no_tenant');
+    }
 
     const toolCatalog = available.map((t) => ({
       id: t.id,
@@ -79,7 +89,7 @@ Rules:
       // Tool selection is a small, structured-JSON task — the router's
       // STRUCTURED_OUTPUT/TOOL_EXECUTION profile favors fast, reliable
       // models over always reaching for the strongest one.
-      const decision = await route({ classification: classifyTask({ text: input, needsStructuredOutput: true, needsTools: true }), tenantId: null });
+      const decision = await route({ classification: classifyTask({ text: input, needsStructuredOutput: true, needsTools: true }), tenantId });
       const result = await chatWithFallback(
         [{ role: 'user', content: input }] as ChatMessage[],
         {
@@ -87,7 +97,7 @@ Rules:
           usageContext: {
             operation: 'tool_planning',
             agentId,
-            tenantId: null,
+            tenantId,
             metadata: { taskType: decision.taskType, routingMode: decision.mode },
           },
         }
@@ -115,6 +125,28 @@ Rules:
         timestamp: Date.now(),
       });
       throw new ToolPlanningError(`Tool planning failed: ${message}`, err, provider);
+    }
+  }
+
+  /**
+   * M7-13e: like plan(), but a "no tenant resolved" failure is returned as
+   * `failure` instead of thrown, so a caller whose job is to answer the user
+   * can DEGRADE to a plain chat reply rather than surface a planner error as
+   * the answer. Deliberately narrow: every OTHER planner failure (providers
+   * exhausted, unparseable response) still throws exactly as plan() does, so
+   * existing behavior for those is unchanged.
+   */
+  async planSafely(
+    input: string,
+    agentId: string,
+    permissions: ToolPermission[],
+    tenantId?: string | null,
+  ): Promise<{ plan: PlannerResponse | null; failure: ToolPlanningError | null }> {
+    try {
+      return { plan: await this.plan(input, agentId, permissions, tenantId), failure: null };
+    } catch (err) {
+      if (err instanceof ToolPlanningError && err.code === 'no_tenant') return { plan: null, failure: err };
+      throw err;
     }
   }
 

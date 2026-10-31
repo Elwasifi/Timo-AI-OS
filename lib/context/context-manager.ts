@@ -18,6 +18,7 @@ import { runAgentLoop } from '@/lib/swarm/agentLoop';
 import { getAgentById } from '@/lib/agents/agentRegistryService';
 import { getApproval } from '@/lib/governance/approvals';
 import { ConversationService, type ChatMessage } from '@/lib/ai/conversation-service';
+import { isGreeting } from '@/lib/crew/ai-intent-analyzer';
 import type {
   DetectedIntent, ContextDecisions, ContextManagerResult,
   AssembledContext, ReasoningStep, ContextMetadata, ReasoningPriorityLevel,
@@ -59,7 +60,15 @@ export async function runContextManager(
 
   // ---- Step 0: Load conversation history ----
   let conversationHistory: ChatMessage[] = [];
-  if (conversationId) {
+  // M7-13e: a bare greeting ("Hi", "hamdellah", "thanks") gets NO prior
+  // history. Confirmed live: "Hi" sent into a long landing-page
+  // conversation came back as "Ready for Luna to take this and build out
+  // the visual design layout..." — the model dutifully continued the old
+  // topic because 10 earlier messages were attached (twice: system prompt
+  // + messages array) and the greeting itself carries nothing to anchor on.
+  // A greeting has no use for context, and skipping it also saves the DB
+  // read and a few thousand input tokens.
+  if (conversationId && !isGreeting(input)) {
     try {
       const messages = await ConversationService.getMessages(conversationId);
       // Exclude the just-persisted user message (last message) to avoid duplication

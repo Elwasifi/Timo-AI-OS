@@ -4,6 +4,7 @@ import { useMemo } from 'react';
 import { Check, Copy } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
+import { parseBlocks } from '@/lib/markdown/parseBlocks';
 
 /**
  * Minimal markdown renderer — supports headings, bold, italic, inline code,
@@ -51,6 +52,8 @@ export function Markdown({ content }: { content: string }) {
                 {renderInline(block.text)}
               </blockquote>
             );
+          case 'hr':
+            return <hr key={i} className="border-border/40" />;
           default:
             return (
               <p key={i} className="text-sm leading-relaxed text-foreground">
@@ -61,88 +64,6 @@ export function Markdown({ content }: { content: string }) {
       })}
     </div>
   );
-}
-
-type Block =
-  | { type: 'heading'; level: number; text: string }
-  | { type: 'paragraph'; text: string }
-  | { type: 'code'; text: string; lang: string }
-  | { type: 'list'; items: string[] }
-  | { type: 'quote'; text: string };
-
-function parseBlocks(md: string): Block[] {
-  const lines = md.split('\n');
-  const blocks: Block[] = [];
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-
-    // Code block
-    if (line.trim().startsWith('```')) {
-      const lang = line.trim().slice(3).trim();
-      const code: string[] = [];
-      i++;
-      while (i < lines.length && !lines[i].trim().startsWith('```')) {
-        code.push(lines[i]);
-        i++;
-      }
-      i++; // skip closing ```
-      blocks.push({ type: 'code', text: code.join('\n'), lang });
-      continue;
-    }
-
-    // Heading
-    const headingMatch = line.match(/^(#{1,3})\s+(.*)/);
-    if (headingMatch) {
-      blocks.push({ type: 'heading', level: headingMatch[1].length, text: headingMatch[2] });
-      i++;
-      continue;
-    }
-
-    // Quote
-    if (line.trim().startsWith('>')) {
-      blocks.push({ type: 'quote', text: line.trim().slice(1).trim() });
-      i++;
-      continue;
-    }
-
-    // List
-    if (/^[-*]\s+/.test(line.trim())) {
-      const items: string[] = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
-        items.push(lines[i].trim().replace(/^[-*]\s+/, ''));
-        i++;
-      }
-      blocks.push({ type: 'list', items });
-      continue;
-    }
-
-    // Empty line — skip
-    if (line.trim() === '') {
-      i++;
-      continue;
-    }
-
-    // Paragraph — collect consecutive non-empty, non-special lines
-    const para: string[] = [];
-    while (
-      i < lines.length &&
-      lines[i].trim() !== '' &&
-      !lines[i].trim().startsWith('```') &&
-      !lines[i].match(/^(#{1,3})\s+/) &&
-      !/^[-*]\s+/.test(lines[i].trim()) &&
-      !lines[i].trim().startsWith('>')
-    ) {
-      para.push(lines[i]);
-      i++;
-    }
-    if (para.length > 0) {
-      blocks.push({ type: 'paragraph', text: para.join(' ') });
-    }
-  }
-
-  return blocks;
 }
 
 function renderInline(text: string): React.ReactNode[] {

@@ -122,6 +122,8 @@ export interface RoutingDecision {
   reason: string;
   /** Routing mode actually applied this call ('manual' when a preference/override was used). */
   mode: 'automatic' | 'manual' | 'fallback_static';
+  /** M7-13e: true when a client (BYOK) tenant has no provider keys at all — `candidates` is empty and `reason` says to add a key. */
+  byokMissing?: boolean;
 }
 
 export type RoutingStrategy = 'balanced' | 'speed' | 'quality' | 'cost' | 'free_only';

@@ -2,8 +2,9 @@ import type { ProviderId } from '@/lib/settings/settings-service';
 import { FALLBACK_ORDER, loadSettings, PROVIDER_KEY_FIELD, PROVIDER_MODEL_FIELD, type AppSettings } from '@/lib/settings/settings-service';
 import { logger } from '@/lib/utils/logger';
 import { recordUsage, type UsageContext } from './usageLedger';
-import { recordHealth, getHealth } from './router/healthTracker';
+import { recordHealth, getHealth, getAllHealth, isProvenHealth } from './router/healthTracker';
 import { checkBudget } from '@/lib/governance/entitlements';
+import { requiresByok, loadTenantProviderConfig, ByokNotConfiguredError } from '@/lib/settings/tenantConfiguredProviders';
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system';
@@ -27,6 +28,8 @@ export interface ChatOptions {
    * router).
    */
   candidates?: { provider: ProviderId; model: string }[];
+  /** M7-13e: per-request ceiling override (ms) for ONE provider attempt; omit to derive it from the call type — see requestTimeoutFor(). */
+  timeoutMs?: number;
 }
 
 export interface ChatResult {
@@ -69,6 +72,86 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * M7-13e: per-request ceiling for one provider call through the ai-chat edge
+ * function. Before this, `fetch` had no timeout at all — one stalled
+ * provider left the whole chat on "THINKING" indefinitely, with no
+ * "Trying <next provider>" line ever logged. Non-streaming calls get this
+ * as a total deadline; streaming calls get it as an IDLE deadline (reset on
+ * every received chunk) so a long answer that keeps flowing is never cut
+ * off, only a stalled one. A timeout surfaces as AIProviderError status 408
+ * / code 'timeout' — not retried (a stalled provider will most likely stall
+ * again; the fallback chain moves on instead).
+ */
+export const PROVIDER_REQUEST_TIMEOUT_MS = 20_000;
+/** Long non-streaming generations (mission task execution, worker/manager delegation, tool loops, big drafts). */
+export const LONG_GENERATION_TIMEOUT_MS = 90_000;
+/** maxTokens above the 2048 chat default implies a long output. */
+export const LARGE_OUTPUT_TIMEOUT_MS = 60_000;
+const LONG_GENERATION_OPERATIONS = new Set([
+  'mission_task', 'worker_execution', 'manager_review', 'chat_tool_loop', 'tool_response', 'operator_workflow_draft',
+]);
+
+/**
+ * The per-attempt ceiling depends on what is being generated, so a legitimate
+ * long answer is never cut off by the tight limit that protects short calls:
+ *   explicit options.timeoutMs        -> as given
+ *   mission/delegation/tool-loop ops  -> 90s (LONG_GENERATION_OPERATIONS)
+ *   maxTokens > 2048                  -> 60s
+ *   everything else (chat, intent, memory, acknowledgments, tool planning) -> 20s
+ * Streaming calls use the value as an IDLE limit (reset per chunk), so a long
+ * streamed reply is never cut while it is flowing.
+ */
+export function requestTimeoutFor(options: ChatOptions): number {
+  if (options.timeoutMs && options.timeoutMs > 0) return options.timeoutMs;
+  const op = options.usageContext?.operation;
+  if (op && LONG_GENERATION_OPERATIONS.has(op)) return LONG_GENERATION_TIMEOUT_MS;
+  if ((options.maxTokens ?? 2048) > 2048) return LARGE_OUTPUT_TIMEOUT_MS;
+  return PROVIDER_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * Overall deadline for INTERACTIVE calls (chat / voice / intent / memory:
+ * anything that gets the short 20s per-attempt limit). Without it a plain
+ * chat could spend 20s x 3 fallback attempts (60s) — longer than the chat
+ * page's 40s inactivity watchdog, which would then fire first and show a
+ * generic stall instead of a clean error. 30s total sits clearly below that
+ * watchdog; each attempt is also capped to the time remaining. Mission /
+ * worker / long-generation calls (per-attempt limit > 20s) are NOT subject
+ * to it and keep their 60-90s per-attempt limits unchanged.
+ */
+export const INTERACTIVE_DEADLINE_MS = 30_000;
+/** Don't start another provider attempt with less than this left — it could not finish. */
+const MIN_ATTEMPT_MS = 1_500;
+
+export function isInteractiveCall(options: ChatOptions): boolean {
+  return requestTimeoutFor(options) <= PROVIDER_REQUEST_TIMEOUT_MS;
+}
+
+function deadlineError(providerId: ProviderId): AIProviderError {
+  return new AIProviderError(
+    `The AI is taking too long to respond (${INTERACTIVE_DEADLINE_MS / 1000}s limit reached across providers). Please try again in a moment.`,
+    408,
+    providerId,
+    'deadline',
+  );
+}
+
+function startRequestTimer(providerId: ProviderId, ms: number = PROVIDER_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const fire = () => { timedOut = true; controller.abort(); };
+  let timer = setTimeout(fire, ms);
+  return {
+    signal: controller.signal,
+    /** Reset the deadline (streaming: called per received chunk). */
+    touch() { clearTimeout(timer); timer = setTimeout(fire, ms); },
+    stop() { clearTimeout(timer); },
+    timedOut: () => timedOut,
+    error: () => new AIProviderError(`${providerId} did not respond within ${Math.round(ms / 1000)}s`, 408, providerId, 'timeout'),
+  };
+}
+
 function isRetryable(status: number): boolean {
   return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
@@ -93,6 +176,7 @@ class AIProviderImpl implements AIProvider {
 
   async chat(messages: ChatMessage[], options: ChatOptions = {}): Promise<ChatResult> {
     for (let attempt = 0; attempt <= 2; attempt++) {
+      const timer = startRequestTimer(this.id, requestTimeoutFor(options));
       try {
         const body = {
           provider: this.id,
@@ -113,6 +197,7 @@ class AIProviderImpl implements AIProvider {
           method: 'POST',
           headers: getHeaders(),
           body: JSON.stringify(body),
+          signal: timer.signal,
         });
 
         if (!res.ok) {
@@ -143,12 +228,15 @@ class AIProviderImpl implements AIProvider {
           model: typeof data.model === 'string' && data.model ? data.model : (options.model || ''),
         };
       } catch (err) {
+        if (timer.timedOut()) throw timer.error();
         if (err instanceof AIProviderError) throw err;
         if (attempt < 2) {
           await sleep(1000 * Math.pow(2, attempt));
           continue;
         }
         throw new AIProviderError(err instanceof Error ? err.message : 'Network error', 0, this.id);
+      } finally {
+        timer.stop();
       }
     }
     throw new AIProviderError('Exhausted retries', 500, this.id);
@@ -159,6 +247,7 @@ class AIProviderImpl implements AIProvider {
     options: ChatOptions & { onDelta: StreamCallback }
   ): Promise<StreamResult> {
     for (let attempt = 0; attempt <= 2; attempt++) {
+      const timer = startRequestTimer(this.id, requestTimeoutFor(options));
       try {
         const body = {
           provider: this.id,
@@ -177,6 +266,7 @@ class AIProviderImpl implements AIProvider {
           method: 'POST',
           headers: getHeaders(),
           body: JSON.stringify(body),
+          signal: timer.signal,
         });
 
         if (!res.ok || !res.body) {
@@ -200,6 +290,7 @@ class AIProviderImpl implements AIProvider {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          timer.touch();
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() ?? '';
@@ -232,6 +323,7 @@ class AIProviderImpl implements AIProvider {
           model: options.model || '',
         };
       } catch (err) {
+        if (timer.timedOut()) throw timer.error();
         if (err instanceof AIProviderError && (err.code === 'rate_limited' || (!isRetryable(err.status) && err.status !== 0))) {
           throw err;
         }
@@ -242,6 +334,8 @@ class AIProviderImpl implements AIProvider {
         throw err instanceof AIProviderError
           ? err
           : new AIProviderError(err instanceof Error ? err.message : 'Stream failed', 0, this.id);
+      } finally {
+        timer.stop();
       }
     }
     throw new AIProviderError('Exhausted retries', 500, this.id);
@@ -305,7 +399,46 @@ async function resolveOrderedPairs(
   settings: AppSettings,
 ): Promise<{ providerId: ProviderId; model: string }[]> {
   if (options.candidates && options.candidates.length > 0) {
-    return options.candidates.map((c) => ({ providerId: c.provider, model: c.model }));
+    const routed = options.candidates.map((c) => ({ providerId: c.provider, model: c.model }));
+    // M7-13e last-resort tier (CLIENT tenants only): the router's candidate
+    // list is deliberately narrow (trusted pool, proven models), so a tenant
+    // whose groq + gemini candidates all fail would otherwise get an error
+    // even with other working keys configured (e.g. openrouter). After every
+    // router candidate, append the tenant's remaining configured providers
+    // (pinned model, else the provider default). Never for a provider whose
+    // circuit is open for this tenant, and still bounded by the interactive
+    // deadline in the fallback loops. Internal tenant: untouched.
+    const extraTenantId = options.usageContext?.tenantId;
+    if (!requiresByok(extraTenantId)) return routed;
+    const cfg = await loadTenantProviderConfig(extraTenantId as string);
+    if (!cfg) return routed;
+    const routedProviders = new Set(routed.map((p) => p.providerId));
+    const extras = FALLBACK_ORDER
+      .filter((id) => cfg.some((c) => c.provider === id) && !routedProviders.has(id))
+      .map((providerId) => ({
+        providerId,
+        model: cfg.find((c) => c.provider === providerId)?.model || getModelForProvider(providerId, settings),
+      }))
+      .filter((p) => !isCircuitOpen(extraTenantId, p.providerId, p.model));
+    return [...routed, ...extras];
+  }
+  // M7-13e: a CLIENT (BYOK) tenant's default chain is built from ITS OWN
+  // configured providers (names + pinned models; never key values), not from
+  // app_settings (internal tenant only — for anyone else it is empty
+  // defaults, which used to make every provider look available and cost a
+  // wasted 401 round trip per unconfigured one). No keys at all is a clear,
+  // typed error — never a silent fallback onto the internal tenant's keys.
+  const byokTenantId = options.usageContext?.tenantId;
+  if (requiresByok(byokTenantId)) {
+    const cfg = await loadTenantProviderConfig(byokTenantId as string);
+    if (cfg && cfg.length === 0) throw new ByokNotConfiguredError();
+    if (cfg) {
+      return FALLBACK_ORDER.filter((id) => cfg.some((c) => c.provider === id)).map((providerId) => ({
+        providerId,
+        model: cfg.find((c) => c.provider === providerId)?.model || getModelForProvider(providerId, settings),
+      }));
+    }
+    // cfg === null: the config read failed — unknown, so keep the previous behavior below.
   }
   const activeProvider = (settings.active_provider as ProviderId) in providers
     ? (settings.active_provider as ProviderId)
@@ -313,6 +446,113 @@ async function resolveOrderedPairs(
   const available = await getAvailableProviders();
   const ordered: ProviderId[] = [activeProvider, ...available.filter((id) => id !== activeProvider)];
   return ordered.map((providerId) => ({ providerId, model: getModelForProvider(providerId, settings) }));
+}
+
+// ---- M7-13e: hard-failure circuit breaker + track-record ordering ----
+//
+// Confirmed live (Amro's failing chain): nvidia/meta/llama-3.1-405b-instruct
+// returns 404 on EVERY call (M7-12b), yet every chat turn still tried it —
+// and the post-reply memory step tried it again — paying a round trip each
+// time. A 404/410 (model gone) or 401/403 (key rejected) will not fix
+// itself within a session, so after one such failure the pair is skipped
+// for CIRCUIT_COOLDOWN_MS. 401/403 are a property of the key, so they open
+// the circuit for the whole provider (`provider::*`); 404/410 only for the
+// specific model. In-memory (per tab) on purpose: the persisted health
+// table's last_status_code is overwritten by later calls and can't be
+// trusted for this; persisted history is instead used below via the
+// zero-success rule.
+export const CIRCUIT_COOLDOWN_MS = 30 * 60 * 1000;
+const HARD_FAILURE_STATUSES = new Set([401, 403, 404, 410]);
+const PROVIDER_WIDE_STATUSES = new Set([401, 403]);
+const circuitOpenUntil = new Map<string, number>();
+
+// Circuits are scoped PER TENANT. A 401/403 means THIS tenant's key was
+// rejected, and even a 404 can be tenant-specific ("does not exist or you do
+// not have access to it"). lib/ai also runs server-side (task queue, API
+// routes) where one process serves many tenants, so an unscoped key would
+// let tenant A's bad key disable a provider for tenant B. Calls with no
+// tenant (internal system calls) share the 'internal' bucket.
+const tenantScope = (tenantId?: string | null) => tenantId || 'internal';
+const circuitKey = (tenantId: string | null | undefined, providerId: ProviderId, model: string) =>
+  `${tenantScope(tenantId)}::${providerId}::${model}`;
+
+export function isCircuitOpen(tenantId: string | null | undefined, providerId: ProviderId, model: string, now: number = Date.now()): boolean {
+  const modelUntil = circuitOpenUntil.get(circuitKey(tenantId, providerId, model));
+  const providerUntil = circuitOpenUntil.get(circuitKey(tenantId, providerId, '*'));
+  return (modelUntil !== undefined && now < modelUntil) || (providerUntil !== undefined && now < providerUntil);
+}
+
+export function tripCircuitIfHardFailure(tenantId: string | null | undefined, providerId: ProviderId, model: string, status: number): boolean {
+  if (!HARD_FAILURE_STATUSES.has(status)) return false;
+  const providerWide = PROVIDER_WIDE_STATUSES.has(status);
+  circuitOpenUntil.set(providerWide ? circuitKey(tenantId, providerId, '*') : circuitKey(tenantId, providerId, model), Date.now() + CIRCUIT_COOLDOWN_MS);
+  logger.providerWarn(
+    `Circuit open for ${providerWide ? providerId + ' (all models)' : providerId + '/' + model} — HTTP ${status} is a hard failure, skipping it for ${CIRCUIT_COOLDOWN_MS / 60000} minutes`,
+  );
+  return true;
+}
+
+/** Clear open circuits — e.g. after a tenant saves a new API key, so a fixed key is retried immediately. Scoped to the given tenant (and provider, if given); with no arguments clears everything (tests). */
+export function resetProviderCircuits(tenantId?: string | null, providerId?: ProviderId): void {
+  if (tenantId === undefined && !providerId) { circuitOpenUntil.clear(); return; }
+  const prefix = providerId ? `${tenantScope(tenantId)}::${providerId}::` : `${tenantScope(tenantId)}::`;
+  Array.from(circuitOpenUntil.keys()).forEach((k) => { if (k.startsWith(prefix)) circuitOpenUntil.delete(k); });
+}
+
+type ProviderPair = { providerId: ProviderId; model: string };
+
+/**
+ * Orders/filters the fallback chain by real track record:
+ *   proven (best expected time-to-answer first) -> unknown/unproven -> pairs
+ *   that have NEVER succeeded (0 successes with failures) -> open circuits.
+ * The last two tiers are only kept when nothing better exists, so a broken
+ * provider is never retried "for variety" while a working one is available,
+ * yet a tenant whose ONLY configured provider looks broken still gets a
+ * real attempt instead of an immediate refusal.
+ *
+ * Router-supplied candidates (`fromRouter`) keep the router's own order —
+ * it already scored them and may deliberately put an unproven model first
+ * for mission/reasoning work, or honor a manual pick — they only get the
+ * dead-pair filtering. The default chain (no router candidates, e.g. a
+ * BYOK tenant whose app_settings is not readable) gets the full ordering.
+ */
+export async function prioritizePairs(
+  pairs: ProviderPair[],
+  fromRouter: boolean,
+  tenantId?: string | null,
+): Promise<{ pairs: ProviderPair[]; lastResort: boolean }> {
+  if (pairs.length <= 1) return { pairs, lastResort: false };
+  const health = await getAllHealth();
+  const providerSuccesses = new Map<ProviderId, number>();
+  health.forEach((h) => providerSuccesses.set(h.provider, (providerSuccesses.get(h.provider) ?? 0) + h.successCount));
+
+  const tierOf = (p: ProviderPair): number => {
+    if (isCircuitOpen(tenantId, p.providerId, p.model)) return 3;
+    const h = health.get(`${p.providerId}::${p.model}`);
+    const neverWorked =
+      (!!h && h.successCount === 0 && h.failureCount > 0) ||
+      (providerSuccesses.has(p.providerId) && providerSuccesses.get(p.providerId) === 0);
+    if (neverWorked) return 2;
+    return isProvenHealth(h) ? 0 : 1;
+  };
+  // Expected time to a good answer: avg latency inflated by the failure rate.
+  const costOf = (p: ProviderPair): number => {
+    const h = health.get(`${p.providerId}::${p.model}`);
+    if (!h || h.avgLatencyMs === null) return Number.POSITIVE_INFINITY;
+    const total = h.successCount + h.failureCount;
+    return h.avgLatencyMs / Math.max(0.01, total > 0 ? h.successCount / total : 1);
+  };
+
+  const tagged = pairs.map((p, i) => ({ p, i, tier: tierOf(p) }));
+  const good = tagged.filter((t) => t.tier <= 1);
+  if (good.length > 0) {
+    const ordered = fromRouter
+      ? good.sort((a, b) => a.i - b.i)
+      : good.sort((a, b) => a.tier - b.tier || (a.tier === 0 ? costOf(a.p) - costOf(b.p) : 0) || a.i - b.i);
+    return { pairs: ordered.map((t) => t.p), lastResort: false };
+  }
+  // Nothing healthy: try what exists, never-worked before open-circuit.
+  return { pairs: tagged.sort((a, b) => a.tier - b.tier || a.i - b.i).map((t) => t.p), lastResort: true };
 }
 
 /**
@@ -395,23 +635,33 @@ export async function chatWithFallback(
   messages: ChatMessage[],
   options: ChatOptions = {},
 ): Promise<ChatResult> {
+  const deadlineAt = isInteractiveCall(options) ? Date.now() + INTERACTIVE_DEADLINE_MS : null;
+  let deadlineHit = false;
   const settings = await loadSettings();
   let pairs = await resolveOrderedPairs(options, settings);
   pairs = await applyBudgetGate(pairs, options.usageContext?.tenantId);
+  const prioritized = await prioritizePairs(pairs, !!(options.candidates && options.candidates.length > 0), options.usageContext?.tenantId);
+  pairs = prioritized.pairs;
 
   let lastError: AIProviderError | null = null;
 
   for (const { providerId, model } of pairs) {
+    if (!prioritized.lastResort && isCircuitOpen(options.usageContext?.tenantId, providerId, model)) {
+      lastError = new AIProviderError(`${providerId} skipped (circuit open after a hard failure)`, 0, providerId);
+      continue;
+    }
     if (await isSkippableUnhealthy(providerId, model)) {
       logger.providerWarn(`Skipping ${providerId}/${model} — ${UNHEALTHY_CONSECUTIVE_FAILURES}+ recent consecutive failures, still in cooldown`);
       lastError = new AIProviderError(`${providerId} skipped (recent repeated failures)`, 0, providerId);
       continue;
     }
+    const remainingMs = deadlineAt === null ? Number.POSITIVE_INFINITY : deadlineAt - Date.now();
+    if (remainingMs < MIN_ATTEMPT_MS) { deadlineHit = true; break; }
     const provider = getProvider(providerId);
     const start = Date.now();
     try {
       logger.provider(`Trying ${providerId}`, { model });
-      const result = await provider.chat(messages, { ...options, model });
+      const result = await provider.chat(messages, { ...options, model, timeoutMs: Math.min(requestTimeoutFor(options), remainingMs) });
       const latencyMs = Date.now() - start;
       if (isEmptyResult(result.content)) {
         recordHealth({ provider: providerId, modelId: model, success: false, latencyMs, statusCode: 200 });
@@ -436,6 +686,7 @@ export async function chatWithFallback(
     } catch (err) {
       lastError = err instanceof AIProviderError ? err : new AIProviderError(String(err), 0, providerId);
       recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
+      tripCircuitIfHardFailure(options.usageContext?.tenantId, providerId, model, lastError.status);
       logger.providerWarn(`${providerId} failed: ${lastError.message}`);
       // M2-02: an IP-level rate limit applies identically to every
       // provider (it's checked before the edge function even looks at
@@ -446,6 +697,7 @@ export async function chatWithFallback(
     }
   }
 
+  if (deadlineHit) throw deadlineError(lastError?.providerId ?? pairs[0]?.providerId ?? 'gemini');
   const friendlyMessage = getFriendlyError(lastError);
   throw new Error(friendlyMessage);
 }
@@ -458,23 +710,33 @@ export async function streamWithFallback(
   messages: ChatMessage[],
   options: ChatOptions & { onDelta: StreamCallback },
 ): Promise<string> {
+  const deadlineAt = isInteractiveCall(options) ? Date.now() + INTERACTIVE_DEADLINE_MS : null;
+  let deadlineHit = false;
   const settings = await loadSettings();
   let pairs = await resolveOrderedPairs(options, settings);
   pairs = await applyBudgetGate(pairs, options.usageContext?.tenantId);
+  const prioritized = await prioritizePairs(pairs, !!(options.candidates && options.candidates.length > 0), options.usageContext?.tenantId);
+  pairs = prioritized.pairs;
 
   let lastError: AIProviderError | null = null;
 
   for (const { providerId, model } of pairs) {
+    if (!prioritized.lastResort && isCircuitOpen(options.usageContext?.tenantId, providerId, model)) {
+      lastError = new AIProviderError(`${providerId} skipped (circuit open after a hard failure)`, 0, providerId);
+      continue;
+    }
     if (await isSkippableUnhealthy(providerId, model)) {
       logger.providerWarn(`Skipping ${providerId}/${model} — ${UNHEALTHY_CONSECUTIVE_FAILURES}+ recent consecutive failures, still in cooldown`);
       lastError = new AIProviderError(`${providerId} skipped (recent repeated failures)`, 0, providerId);
       continue;
     }
+    const remainingMs = deadlineAt === null ? Number.POSITIVE_INFINITY : deadlineAt - Date.now();
+    if (remainingMs < MIN_ATTEMPT_MS) { deadlineHit = true; break; }
     const provider = getProvider(providerId);
     const start = Date.now();
     try {
       logger.provider(`Streaming via ${providerId}`, { model });
-      const result = await provider.chatStream(messages, { ...options, model });
+      const result = await provider.chatStream(messages, { ...options, model, timeoutMs: Math.min(requestTimeoutFor(options), remainingMs) });
       const latencyMs = Date.now() - start;
       if (isEmptyResult(result.content)) {
         recordHealth({ provider: providerId, modelId: model, success: false, latencyMs, statusCode: 200 });
@@ -501,12 +763,14 @@ export async function streamWithFallback(
     } catch (err) {
       lastError = err instanceof AIProviderError ? err : new AIProviderError(String(err), 0, providerId);
       recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
+      tripCircuitIfHardFailure(options.usageContext?.tenantId, providerId, model, lastError.status);
       logger.providerWarn(`${providerId} stream failed: ${lastError.message}`);
       if (lastError.code === 'rate_limited') break;
       continue;
     }
   }
 
+  if (deadlineHit) throw deadlineError(lastError?.providerId ?? pairs[0]?.providerId ?? 'gemini');
   const friendlyMessage = getFriendlyError(lastError);
   throw new Error(friendlyMessage);
 }

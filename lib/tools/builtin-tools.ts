@@ -593,8 +593,8 @@ function registerMemoryTools(): void {
     );
   };
 
-  const memorySummarizeHandler: ToolHandler = async (args) => {
-    return memory.summarize(args.id as string);
+  const memorySummarizeHandler: ToolHandler = async (args, context) => {
+    return memory.summarize(args.id as string, context.tenantId);
   };
 
   const memoryUpdateHandler: ToolHandler = async (args) => {

@@ -121,7 +121,7 @@ export async function decideTools(
   let plan: Awaited<ReturnType<typeof toolPlanner.plan>> = null;
   let plannerFailureReason: string | null = null;
   try {
-    plan = await toolPlanner.plan(input, agentId, permissions);
+    plan = await toolPlanner.plan(input, agentId, permissions, tenantId);
   } catch (err) {
     if (err instanceof ToolPlanningError) {
       plannerFailureReason = err.message;

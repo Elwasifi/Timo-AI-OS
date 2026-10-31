@@ -17,6 +17,7 @@ import {
   ArrowRight,
   CheckCircle2,
   Loader2,
+  VolumeX,
   type LucideIcon,
 } from 'lucide-react';
 import { AppShell } from '@/components/temo/app-shell';
@@ -32,6 +33,7 @@ import { getAgentGreeting } from '@/lib/crew/agent-responses';
 import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { ConversationService, type MessageRecord } from '@/lib/ai/conversation-service';
 import { orchestrate } from '@/lib/swarm';
+import { CHAT_INACTIVITY_TIMEOUT_MS, MISSION_INACTIVITY_TIMEOUT_MS, ChatWatchdogError, presentChatFailure } from '@/lib/chat/failurePresentation';
 import { useAuthStore } from '@/stores/authStore';
 import type { AgentAnimationState, TimelineEvent, ActivityFeedItem } from '@/types';
 import { ClientTime } from '@/components/temo/client-time';
@@ -51,7 +53,16 @@ interface Message {
   routingFrom?: string;
   routingTo?: string;
   confidence?: number;
+  /** M7-13e: the request failed or stalled — the bubble shows a visible Retry button. */
+  failed?: boolean;
 }
+
+// M7-13e: the inactivity watchdog (limits, error type) and the rule for when a
+// failed request may offer "Retry" live in lib/chat/failurePresentation.ts so
+// they are unit-tested. A request may go CHAT_INACTIVITY_TIMEOUT_MS with no
+// sign of life (timeline event, stream delta, status change, mission progress
+// or acknowledgment) before the page gives up; once a mission has started the
+// limit is MISSION_INACTIVITY_TIMEOUT_MS and Retry is never offered.
 
 // M1-05: chat conversation persistence. crewCoordinator.currentConversationId
 // is an in-memory field with no persistence of its own, and the page always
@@ -81,6 +92,7 @@ export default function ChatPage() {
   const isMuted = useVoiceStore((s) => s.isMuted);
   const isListening = useVoiceStore((s) => s.isListening);
   const isVoiceActive = useVoiceStore((s) => s.isListening || s.isThinking || s.isSpeaking);
+  const isSpeaking = useVoiceStore((s) => s.isSpeaking);
   const voiceError = useVoiceStore((s) => s.lastError);
   const activeAgentId = useVoiceStore((s) => s.activeAgentId);
   const setActiveAgent = useVoiceStore((s) => s.setActiveAgent);
@@ -121,6 +133,11 @@ export default function ChatPage() {
   // instead of nothing until it fully completes. Grounded in the mission
   // pipeline's own real step/progress events, not fabricated.
   const [missionProgress, setMissionProgress] = useState<{ title: string; detail: string } | null>(null);
+  // M7-13e: last sign of life from the in-flight request (see CHAT_INACTIVITY_TIMEOUT_MS).
+  const lastActivityRef = useRef(Date.now());
+  const touchActivity = () => { lastActivityRef.current = Date.now(); };
+  // True once the in-flight request turned out to be a mission (see MISSION_INACTIVITY_TIMEOUT_MS).
+  const missionModeRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -236,6 +253,7 @@ export default function ChatPage() {
 
     crewCoordinator.setCallbacks({
       onTimeline: (taskId, label, detail, status) => {
+        lastActivityRef.current = Date.now();
         addTimelineEvent({
           id: `tl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           taskId,
@@ -248,6 +266,7 @@ export default function ChatPage() {
       },
       onActivity: (item) => addActivity(item),
       onAgentStatus: (agentId, status, activity) => {
+        lastActivityRef.current = Date.now();
         useDashboardStore.setState((s) => ({
           agents: s.agents.map((a) =>
             a.id === agentId ? { ...a, status, currentActivity: activity ?? a.currentActivity } : a
@@ -255,6 +274,7 @@ export default function ChatPage() {
         }));
       },
       onWorkerActive: (workerId) => {
+        lastActivityRef.current = Date.now();
         useOrchestrationStore.getState().setActiveWorker(workerId);
       },
       onRoutingAnnouncement: (text, _fromId, toId) => {
@@ -268,6 +288,7 @@ export default function ChatPage() {
         completeTask(task);
       },
       onStreamDelta: (agentId, delta, full) => {
+        lastActivityRef.current = Date.now();
         setMessages((prev) =>
           prev.map((m) =>
             m.streaming && m.role === 'assistant'
@@ -299,6 +320,19 @@ export default function ChatPage() {
 
   const send = async (text: string) => {
     if (!text.trim() || isStreaming || isRouting) return;
+
+    // M7-13b: the input itself was never actually disabled by speechState
+    // (isStreaming/isRouting are both reset before voiceManager.speak() is
+    // called in every path below) — but nothing ever stopped Temo's
+    // current speech when a new message was sent, and voiceManager's
+    // voice-originated reply flow awaits speak() to completion before
+    // resetting isProcessingVoice, which separately blocked the mic
+    // button (startListening() no-ops while isProcessingVoice is true)
+    // for the full duration of playback. voiceManager.interrupt() already
+    // existed (stops speechSynthesis, aborts recognition, resets
+    // isProcessingVoice) — it just wasn't called from here. Safe to call
+    // unconditionally: a no-op when nothing is speaking/listening.
+    voiceManager.interrupt();
 
     const userMsg: Message = {
       id: `u${Date.now()}`,
@@ -383,9 +417,23 @@ export default function ChatPage() {
 
     setIsStreaming(true);
 
+    // M7-13e watchdog: rejects if the request shows no sign of life for
+    // CHAT_INACTIVITY_TIMEOUT_MS. Raced against orchestrate() below —
+    // orchestrate has no cancel hook, so on a stall the page stops waiting
+    // (and the in-flight work is abandoned) rather than hanging forever.
+    touchActivity();
+    missionModeRef.current = false;
+    let watchdogTimer: ReturnType<typeof setInterval> | undefined;
+    const watchdog = new Promise<never>((_, reject) => {
+      watchdogTimer = setInterval(() => {
+        const limit = missionModeRef.current ? MISSION_INACTIVITY_TIMEOUT_MS : CHAT_INACTIVITY_TIMEOUT_MS;
+        if (Date.now() - lastActivityRef.current > limit) reject(new ChatWatchdogError(missionModeRef.current));
+      }, 1000);
+    });
+
     // Run the unified orchestrator — the single entry point for all AI execution
     try {
-      const result = await orchestrate(text, {
+      const pending = orchestrate(text, {
         announce: true,
         stream: true,
         tenantId: useAuthStore.getState().currentTenantId ?? '00000000-0000-0000-0000-000000000001',
@@ -398,6 +446,8 @@ export default function ChatPage() {
         // a typing indicator for however long the mission takes. Replaces
         // M3-02's single hardcoded string with real per-request text.
         onAcknowledgment: (ackText) => {
+          missionModeRef.current = true;
+          touchActivity();
           setMessages((m) => [
             ...m,
             {
@@ -413,9 +463,13 @@ export default function ChatPage() {
           ]);
         },
         onMissionProgress: (title, detail) => {
+          missionModeRef.current = true;
+          touchActivity();
           setMissionProgress({ title, detail });
         },
       });
+      pending.catch(() => {}); // a late failure after the watchdog fired must not become an unhandled rejection
+      const result = await Promise.race([pending, watchdog]);
       setMissionProgress(null);
       const routing = result.routing;
       const response = result.response;
@@ -536,17 +590,26 @@ export default function ChatPage() {
       useOrchestrationStore.getState().setActiveAgent('temo');
       setTimeout(() => clearTimeline(), 4000);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'AI request failed';
+      // Once the mission pipeline started, ANY error (watchdog or not) gets the
+      // Missions-page message and NO Retry: Retry would relaunch the mission.
+      const failure = presentChatFailure(err, missionModeRef.current);
       setMessages((m) =>
         m.map((msg) =>
           msg.id === replyId
-            ? { ...msg, content: `I encountered an issue: ${message}\n\nPlease check your API key configuration in Settings.`, streaming: false }
+            ? { ...msg, content: failure.content, streaming: false, failed: failure.allowRetry }
             : msg
         )
       );
       setIsStreaming(false);
       setRoutingInProgress(false);
       setMissionProgress(null);
+      // Reset the progress strip / agent status too — a stalled request used to leave them "active" indefinitely.
+      clearTimeline();
+      useOrchestrationStore.getState().setActiveWorker(null);
+      useOrchestrationStore.getState().setActiveAgent('temo');
+      useOrchestrationStore.getState().updateAgentStatus('temo', 'available', 'Idle');
+    } finally {
+      clearInterval(watchdogTimer);
     }
   };
 
@@ -676,8 +739,17 @@ export default function ChatPage() {
               was missing. Quick prompts hide while active so the bar has a
               clean, uncluttered row instead of overlapping them. */}
           {isVoiceActive || voiceError ? (
-            <div className="relative flex h-8 items-center justify-center">
+            <div className="relative flex h-8 items-center justify-center gap-2">
               <VoiceTrigger hideIdleTrigger size={0} expandedWidth={280} />
+              {isSpeaking && (
+                <button
+                  onClick={() => voiceManager.interrupt()}
+                  title="Stop speaking"
+                  className="absolute right-0 flex items-center gap-1.5 rounded-full border border-border/40 bg-white/[0.02] px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-destructive/40 hover:text-destructive"
+                >
+                  <VolumeX className="h-3.5 w-3.5" /> Stop
+                </button>
+              )}
             </div>
           ) : (
             <div className="flex flex-wrap gap-2">
@@ -710,6 +782,13 @@ export default function ChatPage() {
               if (isListening) {
                 void voiceManager.stopListening();
               } else {
+                // M7-13b: cancel any in-progress speech first — without
+                // this, startListening() silently no-oped while
+                // isProcessingVoice stayed true for the entire TTS
+                // playback (voiceManager's voice-reply flow only resets
+                // it after await speak() resolves), so pressing the mic
+                // mid-reply did nothing.
+                voiceManager.interrupt();
                 void voiceManager.startListening();
               }
             }}
@@ -884,7 +963,19 @@ const MessageBubble = memo(function MessageBubble({
           {message.streaming && !message.content ? <TypingIndicator color={color} /> : <Markdown content={message.content} />}
         </div>
 
-        {!message.streaming && message.content && (
+        {message.failed && !message.streaming && (
+          <button
+            type="button"
+            onClick={onRegenerate}
+            className="flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors hover:bg-white/5"
+            style={{ borderColor: `${color}60`, color }}
+          >
+            <RotateCcw className="h-3 w-3" />
+            Retry
+          </button>
+        )}
+
+        {!message.streaming && message.content && !message.failed && (
           <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
             <ActionButton icon={copied ? Check : Copy} label={copied ? 'Copied' : 'Copy'} onClick={copy} color={color} />
             {!isMuted && (

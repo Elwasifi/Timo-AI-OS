@@ -27,6 +27,8 @@ import {
 } from './runtimeStore';
 import { route } from '@/lib/ai/router';
 import { chatWithFallback } from '@/lib/ai/ai-provider';
+import { crewCoordinator } from '@/lib/crew/crew-coordinator';
+import { ConversationService } from '@/lib/ai/conversation-service';
 import type { OrchestratorResult, PipelineType } from './executionTypes';
 import type { Mission } from './types';
 import type { RoutingResult, TaskRecord } from '@/types';
@@ -178,6 +180,24 @@ async function runMissionPipeline(
   execution: OrchestratorResult['execution'];
   timeline: OrchestratorResult['timeline'];
 }> {
+  // M7-13b (Item C.3): the mission pipeline never persisted the user's own
+  // message anywhere — crew-coordinator.ts's persistMessage() (the same
+  // fire-and-forget pattern reused here) only runs inside CrewCoordinator's
+  // own methods, which this pipeline never calls. The message only ever
+  // existed in the chat page's local React state, so a reload (which
+  // re-fetches from ConversationService.getMessages()) silently lost it —
+  // confirmed root cause of "last chat message gone after refresh"
+  // (M7-13b diagnostic). getConversationId() reads crewCoordinator's own
+  // in-memory field, which app/chat/page.tsx's send() already guarantees
+  // is set (via startConversation()) before orchestrate() is ever called —
+  // so this is a real id here, not a guess.
+  const conversationId = crewCoordinator.getConversationId();
+  if (conversationId) {
+    ConversationService.addMessage(conversationId, 'user', userRequest).catch((e) =>
+      console.error('[orchestrator] persist mission user msg:', e),
+    );
+  }
+
   // Emit planning event — Temo is planning the mission
   await emitRuntimeEvent({
     eventType: 'planning',
@@ -215,6 +235,17 @@ async function runMissionPipeline(
 
   // 2. Execute all dispatched tasks
   const { mission, objectives, tasks } = missionResult;
+
+  // M7-13b (Item C.3): a short acknowledgment so the chat history shows
+  // something concrete happened even if the mission itself never
+  // completes in this tab/session (reload, navigation, or the lock-
+  // deadlock fix's own backstop — M7-13b Item B) — same conversationId
+  // resolved above, same fire-and-forget persistence pattern.
+  if (conversationId) {
+    ConversationService.addMessage(conversationId, 'assistant', `Mission started: ${mission.title}`, 'temo').catch((e) =>
+      console.error('[orchestrator] persist mission ack msg:', e),
+    );
+  }
 
   await recordEvent(mission.id, 'pipeline_selected', {
     entityType: 'mission',

@@ -13,8 +13,9 @@
 // needs a server hop, same as before.
 
 import { supabase } from '@/lib/supabase/client';
-import { INTERNAL_TENANT_ID } from '@/lib/governance/internalTenant';
 import type { ProviderId } from './settings-service';
+import { resetProviderCircuits } from '@/lib/ai/ai-provider';
+import { requiresByok, invalidateTenantProviderConfig } from './tenantConfiguredProviders';
 
 /** Ollama is self-hosted/local — excluded from BYOK (M7-09 scoping): a tenant's own instance isn't reachable from this server. */
 export type ByokProviderId = Exclude<ProviderId, 'ollama'>;
@@ -46,10 +47,8 @@ function mapRow(row: TenantProviderKeyRow): TenantProviderKey {
   };
 }
 
-/** Whether a tenant should use BYOK at all — false only for the one grandfathered internal/admin tenant (M7-09 scoping), which keeps using app_settings. */
-export function requiresByok(tenantId: string | null | undefined): boolean {
-  return !!tenantId && tenantId !== INTERNAL_TENANT_ID;
-}
+// M7-13e: requiresByok() moved to tenantConfiguredProviders.ts (the routing-side, names-only module) so lib/ai can use it without importing this key-CRUD module; re-exported here so existing importers are unchanged.
+export { requiresByok };
 
 export async function loadTenantProviderKeys(tenantId: string): Promise<TenantProviderKey[]> {
   const { data, error } = await supabase
@@ -77,6 +76,9 @@ export async function saveTenantProviderKey(
     updated_at: new Date().toISOString(),
   });
   if (error) throw new Error(`Failed to save ${provider} key: ${error.message}`);
+  // M7-13e: a fixed/replaced key should be retried immediately, not after the 30-minute hard-failure cooldown.
+  resetProviderCircuits(tenantId, provider);
+  invalidateTenantProviderConfig(tenantId); // routing sees the new provider immediately
 }
 
 export async function deleteTenantProviderKey(tenantId: string, provider: ByokProviderId): Promise<void> {
@@ -86,6 +88,7 @@ export async function deleteTenantProviderKey(tenantId: string, provider: ByokPr
     .eq('tenant_id', tenantId)
     .eq('provider', provider);
   if (error) throw new Error(`Failed to remove ${provider} key: ${error.message}`);
+  invalidateTenantProviderConfig(tenantId);
 }
 
 /** Which BYOK providers this tenant has configured right now. */

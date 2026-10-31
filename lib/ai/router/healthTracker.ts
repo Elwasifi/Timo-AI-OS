@@ -14,6 +14,20 @@ import type { ModelHealth } from './types';
 const HEALTH_CACHE_TTL_MS = 60 * 1000; // short — health should reflect recent reality
 let cache: { rows: Map<string, ModelHealth>; fetchedAt: number } | null = null;
 
+// M7-13: what counts as "proven" — a handful of real successes at a solid
+// success rate, not a perfect track record (a model with exactly one lucky
+// call shouldn't count as field-tested either). M7-13e: moved here from
+// router/index.ts so lib/ai/ai-provider.ts's fallback ordering uses the
+// SAME definition instead of a second copy.
+export const MIN_PROVEN_SUCCESSES = 3;
+export const MIN_PROVEN_SUCCESS_RATE = 0.5;
+
+export function isProvenHealth(h: ModelHealth | null | undefined): boolean {
+  if (!h) return false;
+  const total = h.successCount + h.failureCount;
+  return total > 0 && h.successCount >= MIN_PROVEN_SUCCESSES && h.successCount / total >= MIN_PROVEN_SUCCESS_RATE;
+}
+
 function key(provider: string, modelId: string): string {
   return `${provider}::${modelId}`;
 }

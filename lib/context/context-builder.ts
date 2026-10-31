@@ -95,7 +95,7 @@ function assemblePrompt(input: ContextBuilderInput): string {
   const history = input.conversationHistory.slice(-10);
   if (history.length > 0) {
     sections.push('--- CONVERSATION HISTORY ---');
-    sections.push('Recent messages from this conversation. Use this for context — do not re-answer old questions.');
+    sections.push('Recent messages from this conversation. Use this for context — do not re-answer old questions. Always answer the LATEST user message first; only continue an earlier topic if the latest message asks you to.');
     for (const msg of history) {
       const role = msg.role === 'user' ? 'User' : msg.role === 'assistant' ? 'Assistant' : 'System';
       const content = msg.content.slice(0, 500);

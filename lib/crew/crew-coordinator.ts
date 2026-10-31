@@ -291,13 +291,29 @@ export class CrewCoordinator {
 
     try {
       if (!delegated) {
-      if (selectedAgent?.id === 'flow' && isN8nRequest(input) && !ctxResult?.toolAnswer) {
+      // M7-13e: the planner now needs a resolved tenant (it used to run on the
+      // internal tenant's keys via tenantId: null). If none is available the
+      // user must still get a normal reply — NOT "I encountered an issue:
+      // Tool planning needs a resolved tenant" from the catch below — so a
+      // no-tenant planner failure skips the n8n tool path and falls through to
+      // the plain response generation like any other message.
+      const wantsN8nTool = selectedAgent?.id === 'flow' && isN8nRequest(input) && !ctxResult?.toolAnswer;
+      let plan: Awaited<ReturnType<typeof toolPlanner.plan>> = null;
+      let n8nPlannerUnavailable = false;
+      if (wantsN8nTool) {
         this.emitTimeline(task.id, 'tool planning', 'Selecting n8n tool...', 'active');
 
         // Use the tool planner to let AI pick the right n8n tool
         const permissions = permissionEngine.getPermissions('flow');
-        const plan = await toolPlanner.plan(input, 'flow', permissions);
-
+        const planned = await toolPlanner.planSafely(input, 'flow', permissions, useAuthStore.getState().currentTenantId);
+        plan = planned.plan;
+        if (planned.failure) {
+          n8nPlannerUnavailable = true;
+          logger.error(`n8n tool planning skipped, answering directly: ${planned.failure.message}`);
+          this.emitTimeline(task.id, 'tool planning', 'Planner unavailable — answering directly', 'completed');
+        }
+      }
+      if (wantsN8nTool && !n8nPlannerUnavailable) {
         if (plan && plan.tools.length > 0) {
           this.emitTimeline(task.id, 'tool execution', `Executing ${plan.tools.length} tool(s)...`, 'active');
           const result = await toolPlanner.executePlan(plan, 'flow');
@@ -377,21 +393,30 @@ export class CrewCoordinator {
     const wasMemoryAnswered = !!ctxResult?.directAnswer;
     const wasToolAnswered = !!ctxResult?.toolAnswer;
     if (!wasMemoryAnswered && !wasToolAnswered) {
-      try {
-        const memSettings = await loadMemorySettings();
-        if (memSettings.auto_remember) {
-          await memory.autoRemember({
-            title: `User request: ${input.slice(0, 80)}`,
-            content: `User asked: ${input}\n\nAgent ${routing.selectedAgentName} responded: ${response.slice(0, 500)}`,
-            agent: routing.selectedAgentId,
-            source: 'conversation',
-            tags: ['auto', routing.selectedAgentId],
-            tenantId: useAuthStore.getState().currentTenantId,
-          });
+      // M7-13e: fire-and-forget. This used to be awaited, and
+      // autoRemember -> shouldRemember makes its own LLM yes/no call (plus
+      // its own provider fallback chain), so every reply's "done" was held
+      // up behind a memory-bookkeeping call the user never sees (measured:
+      // 20-40s of the 63s "Hi" turn in the diagnostic harness). Failures
+      // are still logged.
+      const tenantIdForMemory = useAuthStore.getState().currentTenantId;
+      void (async () => {
+        try {
+          const memSettings = await loadMemorySettings();
+          if (memSettings.auto_remember) {
+            await memory.autoRemember({
+              title: `User request: ${input.slice(0, 80)}`,
+              content: `User asked: ${input}\n\nAgent ${routing.selectedAgentName} responded: ${response.slice(0, 500)}`,
+              agent: routing.selectedAgentId,
+              source: 'conversation',
+              tags: ['auto', routing.selectedAgentId],
+              tenantId: tenantIdForMemory,
+            });
+          }
+        } catch (e) {
+          console.warn('[coordinator] Auto-remember failed:', e instanceof Error ? e.message : e);
         }
-      } catch (e) {
-        console.warn('[coordinator] Auto-remember failed:', e instanceof Error ? e.message : e);
-      }
+      })();
     }
 
     void execution;

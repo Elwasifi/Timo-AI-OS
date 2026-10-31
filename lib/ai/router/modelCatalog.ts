@@ -18,6 +18,7 @@ import { supabase } from '@/lib/supabase/client';
 import { loadSettings, PROVIDER_MODELS, PROVIDER_KEY_FIELD, type ProviderId, type AppSettings } from '@/lib/settings/settings-service';
 import { inferModelCapabilities } from './modelCapabilities';
 import type { ModelCapabilityProfile } from './types';
+import type { TenantProviderConfig } from '@/lib/settings/tenantConfiguredProviders';
 
 interface CatalogRow {
   provider: string;
@@ -93,14 +94,22 @@ function isChatModel(modelId: string): boolean {
  * candidates. Providers with no key/URL configured at all are excluded
  * entirely — never appear as a routable candidate.
  */
-export async function getCandidateModels(): Promise<ModelCapabilityProfile[]> {
-  const [rows, settings] = await Promise.all([loadCatalogRows(), loadSettings()]);
+export async function getCandidateModels(tenantConfig?: TenantProviderConfig[]): Promise<ModelCapabilityProfile[]> {
+  // M7-13e: for a CLIENT tenant the caller passes that tenant's configured
+  // providers (names + pinned models from tenant_provider_keys, no key
+  // values) and app_settings is not consulted at all — it is RLS-restricted
+  // to the internal tenant, so for anyone else it only ever returned empty
+  // defaults and made every provider look unconfigured. With no argument
+  // (internal tenant) behavior is exactly as before.
+  const [rows, settings] = await Promise.all([loadCatalogRows(), tenantConfig ? Promise.resolve(null) : loadSettings()]);
+  const isConfigured = (pid: ProviderId): boolean =>
+    tenantConfig ? tenantConfig.some((c) => c.provider === pid) : providerConfigured(pid, settings as AppSettings);
   const profiles: ModelCapabilityProfile[] = [];
   const seenProviders = new Set<string>();
 
   for (const row of rows) {
     if (!isProviderId(row.provider)) continue;
-    if (!providerConfigured(row.provider, settings)) continue;
+    if (!isConfigured(row.provider)) continue;
     seenProviders.add(row.provider);
     if (!isChatModel(row.model_id)) continue;
     const validatedAt = new Date(row.validated_at).getTime();
@@ -131,7 +140,7 @@ export async function getCandidateModels(): Promise<ModelCapabilityProfile[]> {
   const providerIds: ProviderId[] = ['gemini', 'groq', 'nvidia', 'openrouter', 'ollama'];
   for (const pid of providerIds) {
     if (seenProviders.has(pid)) continue;
-    if (!providerConfigured(pid, settings)) continue;
+    if (!isConfigured(pid)) continue;
     for (const modelId of PROVIDER_MODELS[pid]) {
       if (!isChatModel(modelId)) continue;
       profiles.push({
@@ -155,6 +164,17 @@ export async function getCandidateModels(): Promise<ModelCapabilityProfile[]> {
     }
   }
 
+  // A client tenant may pin a model per provider (tenant_provider_keys.model).
+  // Honor it when that model is actually in the candidate set; if it isn't
+  // (not in the catalog), keep the provider's normal candidates rather than
+  // leaving the provider with nothing.
+  if (tenantConfig) {
+    return profiles.filter((p) => {
+      const pinned = tenantConfig.find((c) => c.provider === p.provider)?.model;
+      if (!pinned) return true;
+      return p.modelId === pinned || !profiles.some((q) => q.provider === p.provider && q.modelId === pinned);
+    });
+  }
   return profiles;
 }
 

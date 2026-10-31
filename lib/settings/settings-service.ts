@@ -102,9 +102,19 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // whenever loadSettings()'s DB read fails, meaning a DB outage would
   // silently steer real chat calls at a 404ing model with no visible
   // signal, the same silent-failure class as M6-01.
-  gemini_model: 'gemini-3.6-flash',
+  // M7-13e: gemini-3.6-flash spends maxTokens on invisible reasoning and
+  // returns HTTP-200 empty completions (24 failures / 64 recorded calls,
+  // avg ~15s latency, live health table) — a poor default for chat.
+  // gemini-3.1-flash-lite-preview: 123 successes / 1 failure, avg ~4.7s.
+  gemini_model: 'gemini-3.1-flash-lite-preview',
   groq_api_key: null,
-  groq_model: 'llama-3.3-70b-versatile',
+  // M7-13e: llama-3.3-70b-versatile is dead on Groq ("model_not_found"
+  // 404, reproduced live), and this DEFAULT_SETTINGS fallback is what every
+  // non-internal (BYOK) tenant actually runs on, since app_settings is
+  // RLS-restricted to the internal tenant — so every one of their chat
+  // turns paid a 404 round trip first. openai/gpt-oss-120b: 14 successes /
+  // 1 failure, avg ~1.0s in the live health table.
+  groq_model: 'openai/gpt-oss-120b',
   nvidia_api_key: null,
   nvidia_model: 'meta/llama-3.1-405b-instruct',
   openrouter_api_key: null,

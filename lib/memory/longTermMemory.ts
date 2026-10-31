@@ -23,14 +23,14 @@ export const longTermMemory = {
     // Auto-assess importance if not specified
     let importance = input.importance ?? 'medium';
     if (!input.importance && settings.auto_remember) {
-      const assessment = await summarizer.assessImportance(input.content, input.title);
+      const assessment = await summarizer.assessImportance(input.content, input.title, input.tenantId);
       importance = assessment.importance;
     }
 
     // Auto-summarize if enabled
     let summary: string | undefined;
     if (settings.auto_summarize) {
-      summary = await summarizer.summarizeMemory(input.content);
+      summary = await summarizer.summarizeMemory(input.content, input.tenantId);
     }
 
     const record = await memoryStore.store({

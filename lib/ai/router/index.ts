@@ -17,7 +17,8 @@ import { loadSettings, type ProviderId } from '@/lib/settings/settings-service';
 import { checkBudget } from '@/lib/governance/entitlements';
 import { estimateCost } from '@/lib/ai/pricing';
 import { getCandidateModels } from './modelCatalog';
-import { getAllHealth } from './healthTracker';
+import { requiresByok, loadTenantProviderConfig } from '@/lib/settings/tenantConfiguredProviders';
+import { getAllHealth, isProvenHealth, MIN_PROVEN_SUCCESSES } from './healthTracker';
 import { scoreCandidate } from './scoring';
 import type {
   RoutingRequest, RoutingDecision, RoutingStrategy, ScoredCandidate,
@@ -28,18 +29,14 @@ export { classifyTask, type ClassifyInput } from './taskClassifier';
 export { recordHealth } from './healthTracker';
 export type * from './types';
 
+/** M7-13e: avg latency above which a model is excluded from latency-sensitive (chat/voice/intent) routing. */
+const INTERACTIVE_MAX_AVG_LATENCY_MS = 12_000;
+
 const DEFAULT_TOKEN_ESTIMATE: Record<TaskClassification['expectedContextSize'], { input: number; output: number }> = {
   small: { input: 500, output: 300 },
   medium: { input: 2000, output: 800 },
   large: { input: 6000, output: 2000 },
 };
-
-// M7-13: what counts as "proven" for the latency-sensitive hard gate below
-// — a handful of real successes at a solid success rate, not a perfect
-// track record (a model with exactly one lucky call shouldn't count as
-// field-tested either).
-const MIN_PROVEN_SUCCESSES = 3;
-const MIN_PROVEN_SUCCESS_RATE = 0.5;
 
 function estimateCandidateCost(
   cap: ModelCapabilityProfile,
@@ -93,8 +90,33 @@ export async function route(request: RoutingRequest): Promise<RoutingDecision> {
           ? routingPreferences[request.classification.taskType]
           : undefined;
 
+    // M7-13e: a CLIENT tenant's configured providers/models come from its own
+    // tenant_provider_keys rows (names + pinned models only — see
+    // tenantConfiguredProviders.ts), not from app_settings, which only the
+    // internal tenant can read. Before this, every client tenant got 0
+    // candidates and none of the gates below ever applied to them.
+    // Internal tenant / no tenant: tenantConfig stays undefined and
+    // getCandidateModels() runs exactly as before.
+    let tenantConfig: Awaited<ReturnType<typeof loadTenantProviderConfig>> | undefined;
+    if (requiresByok(request.tenantId)) {
+      tenantConfig = await loadTenantProviderConfig(request.tenantId as string);
+      if (tenantConfig && tenantConfig.length === 0) {
+        // Genuinely no keys: say so plainly. Never fall through to the internal tenant's providers.
+        return {
+          candidates: [],
+          taskType: request.classification.taskType,
+          selected: null,
+          scored: [],
+          reason: 'No AI provider API key is configured for this workspace — add one under Settings → AI Providers.',
+          mode: 'fallback_static',
+          byokMissing: true,
+        };
+      }
+      // A failed read (null) is "unknown", not "no keys": keep the previous behavior.
+    }
+
     const [allCandidates, health, budget] = await Promise.all([
-      getCandidateModels(),
+      getCandidateModels(tenantConfig ?? undefined),
       getAllHealth(),
       request.tenantId ? checkBudget(request.tenantId) : Promise.resolve(null),
     ]);
@@ -157,12 +179,47 @@ export async function route(request: RoutingRequest): Promise<RoutingDecision> {
     // proven but potentially more capable model is a legitimate trade-off,
     // not a latency/reliability risk.
     if (request.classification.latencySensitivity !== 'low') {
-      const isProven = (s: ScoredCandidate) => {
+      // M7-13b: after scaling failurePenalty by sample size (scoring.ts),
+      // re-verification found groq/allam-2-7b winning FAST_CHAT/VOICE
+      // purely on its real latency + long track record — but ALLaM is
+      // SDAIA's Arabic-specialized model family, not a general-purpose
+      // chat model, and Amro's directive was explicit: "speed must not
+      // buy us a weak chat model." Neither "proven" nor "trusted
+      // provider" captures this — ALLaM genuinely IS proven and IS on a
+      // trusted provider; the problem is specialization, which this
+      // router has no other signal for (provider_model_catalog doesn't
+      // record language focus). An explicit, named exclusion from
+      // general-purpose latency-sensitive routing — not a blanket ban
+      // from the router entirely, just from the "pick anything, fastest
+      // wins" path — until the catalog has a real capability signal for
+      // this. Extend this list if other narrow-specialty models turn up
+      // the same way.
+      const isNarrowSpecialtyModel = (modelId: string) => /\ballam\b/i.test(modelId);
+
+      // M7-13e: a model that is a poor fit for interactive chat/voice even
+      // though it "works" — (1) gemini-3.6-flash spends maxTokens on
+      // invisible reasoning and returns HTTP-200 empty completions (confirmed
+      // live: it failed 24 of 64 recorded calls, avg ~15s, and was the
+      // "returned an empty completion" step in Amro's failing chain);
+      // (2) anything whose measured average latency is over
+      // INTERACTIVE_MAX_AVG_LATENCY_MS (gemma-4-26b-a4b-it averages ~54s)
+      // can't answer a chat/voice turn in time. Same fail-open posture as
+      // the allam filter: only applied while other candidates remain.
+      const isSlowOrReasoningHeavy = (s: ScoredCandidate) => {
+        if (s.provider === 'gemini' && /gemini-3\.6-flash/i.test(s.model)) return true;
         const h = health.get(`${s.provider}::${s.model}`);
-        if (!h) return false;
-        const total = h.successCount + h.failureCount;
-        return total > 0 && h.successCount >= MIN_PROVEN_SUCCESSES && h.successCount / total >= MIN_PROVEN_SUCCESS_RATE;
+        return !!h && h.avgLatencyMs !== null && h.successCount >= MIN_PROVEN_SUCCESSES && h.avgLatencyMs > INTERACTIVE_MAX_AVG_LATENCY_MS;
       };
+
+      const isProven = (s: ScoredCandidate) => {
+        return isProvenHealth(health.get(`${s.provider}::${s.model}`));
+      };
+
+      // Fail-open same as every other gate here: only exclude narrow-
+      // specialty models if real general-purpose candidates remain —
+      // never leave a tenant with zero candidates over this.
+      const generalPurpose = effectiveScored.filter((s) => !isNarrowSpecialtyModel(s.model) && !isSlowOrReasoningHeavy(s));
+      if (generalPurpose.length > 0) effectiveScored = generalPurpose;
 
       // Layer 1 (preferred): Amro named Groq/Gemini specifically as "our
       // known-good, tested providers" — re-verification after the first

@@ -106,19 +106,20 @@ export const memory = {
   },
 
   // ---- Summarization ----
-  async summarize(id: string): Promise<MemoryRecord | null> {
+  async summarize(id: string, tenantId?: string | null): Promise<MemoryRecord | null> {
     const record = await memoryStore.getById(id);
     if (!record) return null;
-    const summary = await summarizer.summarizeMemory(record.content);
+    // M7-13e: callers that run server-side (the task-queue memory.summarize tool) have no signed-in store to fall back on, so they pass the tenant explicitly.
+    const summary = await summarizer.summarizeMemory(record.content, tenantId);
     return memoryStore.update(id, { summary });
   },
 
-  async summarizeAll(): Promise<number> {
+  async summarizeAll(tenantId?: string | null): Promise<number> {
     const all = await memoryStore.list({ limit: 200 });
     let count = 0;
     for (const m of all) {
       if (!m.summary) {
-        const summary = await summarizer.summarizeMemory(m.content);
+        const summary = await summarizer.summarizeMemory(m.content, tenantId);
         if (summary) {
           await memoryStore.update(m.id, { summary });
           count++;
@@ -199,7 +200,7 @@ export const memory = {
     const settings = await loadMemorySettings();
     if (!settings.auto_remember) return null;
 
-    const should = await summarizer.shouldRemember(input.content, input.title);
+    const should = await summarizer.shouldRemember(input.content, input.title, input.tenantId);
     if (!should) return null;
 
     return longTermMemory.store({
