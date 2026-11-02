@@ -138,6 +138,32 @@ export const OPERATION_LIMITS: Record<string, { perAttemptMs: number; deadlineMs
 };
 
 /**
+ * M7-13c-1b: reasoning-style models (groq's openai/gpt-oss-*, also served via
+ * OpenRouter/NVIDIA) spend part of `max_tokens` on hidden reasoning BEFORE any
+ * visible text. A small background call (memory yes/no = 128, importance = 10,
+ * summary = 150, acknowledgment = 256) can have the whole allowance consumed by
+ * that reasoning and come back as an empty completion — which this file counts
+ * as a failure (health sample + soft-cooldown strike), so tiny bookkeeping calls
+ * after each reply were able to put the model that serves foreground chat into
+ * cooldown (live, 2026-11-02). The fix is a central floor on what is actually
+ * SENT for such models; callers keep asking for what they need and a larger
+ * request is never lowered. Non-reasoning models keep the caller's value.
+ * Token accounting is unaffected: usage is recorded from the provider's response.
+ */
+export const REASONING_MIN_MAX_TOKENS = 1024;
+
+/** True for model ids that reason before answering (kept small and exported so it is testable and easy to extend). */
+export function isReasoningStyleModel(modelId: string): boolean {
+  return /gpt-oss/i.test(modelId);
+}
+
+/** The max_tokens that will actually be sent for `model`: the caller's value, raised to the floor for reasoning-style models only. */
+export function effectiveMaxTokens(modelId: string, requested: number | undefined): number | undefined {
+  if (!isReasoningStyleModel(modelId)) return requested;
+  return Math.max(requested ?? 2048, REASONING_MIN_MAX_TOKENS);
+}
+
+/**
  * M7-13c-1: same-model attempts. Interactive calls get 2 (one retry) on a
  * transient 5xx / network error instead of 3 — three tries at an unavailable
  * model cost 1s + 2s of backoff plus three round trips before the next
@@ -833,6 +859,7 @@ export async function chatWithFallback(
       logger.provider(`Trying ${providerId}`, { model });
       const result = await provider.chat(messages, {
         ...options,
+        maxTokens: effectiveMaxTokens(model, options.maxTokens),
         model,
         timeoutMs: Math.min(requestTimeoutFor(options), remainingMs),
         fullTimeoutMs: requestTimeoutFor(options),
@@ -923,6 +950,7 @@ export async function streamWithFallback(
       logger.provider(`Streaming via ${providerId}`, { model });
       const result = await provider.chatStream(messages, {
         ...options,
+        maxTokens: effectiveMaxTokens(model, options.maxTokens),
         model,
         timeoutMs: Math.min(requestTimeoutFor(options), remainingMs),
         fullTimeoutMs: requestTimeoutFor(options),
