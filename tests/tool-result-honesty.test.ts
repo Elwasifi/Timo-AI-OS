@@ -133,6 +133,17 @@ describe('failures carry a specific reason and a kind (deterministic ones are ta
     expect(NON_RETRYABLE_TOOL_FAILURES.has(r.failureKind!)).toBe(true);
   });
 
+  it('missing configuration (no API key for this workspace) -> not_configured, the specific message is preserved, non-retryable (M7-13c-2a-4)', async () => {
+    const msg = 'web.search needs a Gemini API key for this workspace — add one in Settings → AI Providers.';
+    vi.mocked(toolPlanner.plan).mockResolvedValue(planOf('web.search'));
+    vi.mocked(toolExecutor.execute).mockResolvedValue(fail('web.search', msg, 'not_configured') as never);
+    const r = await decide();
+    expect(r.success).toBe(false);
+    expect(r.failureKind).toBe('not_configured');
+    expect(r.error).toBe(msg);
+    expect(NON_RETRYABLE_TOOL_FAILURES.has(r.failureKind!)).toBe(true);
+  });
+
   it('permission denied -> non-retryable; an uncoded (transient) tool error stays retryable', async () => {
     vi.mocked(toolPlanner.plan).mockResolvedValue(planOf('web.search'));
     vi.mocked(toolExecutor.execute).mockResolvedValueOnce(fail('web.search', 'Agent "x" lacks permission(s): web', 'permission_denied') as never);

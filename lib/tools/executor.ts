@@ -15,7 +15,7 @@ import type {
   ToolRequest, ToolResultEnvelope, ToolExecutionEvent, ToolExecutionContext,
   ToolParamSchema, RegisteredTool, ToolErrorCode,
 } from './types';
-import { ToolNotImplementedError } from './types';
+import { ToolNotImplementedError, ToolNotConfiguredError } from './types';
 import { toolRegistry } from './registry';
 import { ensureBuiltinToolsRegistered } from './builtin-tools';
 import { permissionEngine } from './permissions';
@@ -243,6 +243,12 @@ class ToolExecutorImpl {
         // M7-13c-2a: a placeholder tool can never succeed on a retry — fail it once, with a typed code.
         if (err instanceof ToolNotImplementedError) {
           errorCode = 'not_implemented';
+          break;
+        }
+        // M7-13c-2a-4: missing/rejected configuration (no API key for this workspace, key refused) is just as
+        // deterministic — retrying cannot add a key. Fail once, with the specific message.
+        if (err instanceof ToolNotConfiguredError) {
+          errorCode = 'not_configured';
           break;
         }
 

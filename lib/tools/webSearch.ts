@@ -1,91 +1,46 @@
-// Real web search handler for the web.search tool (M6-02).
+// web.search handler (M6-02, reworked M7-13c-2a-4).
 //
-// Uses Gemini's native Search Grounding (a request-time tool flag on
-// generateContent, not a separate search API/vendor) instead of a new
-// third-party search provider — Gemini is already in the provider fallback
-// chain with a working rotated key (S0-01), and grounding has a genuinely
-// free quota (5,000 grounded queries/month on Gemini 3 models, 1,500/day on
-// Gemini 2.5 Flash) with zero new account, key, or billing relationship.
-//
-// web.search was a placeholder (lib/tools/builtin-tools.ts's
-// placeholderHandler) from the moment it was first registered — M5-02 fixed
-// the fake-success reporting *around* tool results generally, it never
-// touched this handler's actual data source.
+// Uses Gemini's native Search Grounding (see webSearchCore.ts for the call itself). Since M7-13c-2a-4 the
+// Gemini key is the TENANT's own (BYOK) and is resolved SERVER-SIDE only:
+//   - toolExecutor runs both in the browser (chat) and on the server (mission task queue). In the browser this
+//     handler calls POST /api/tools/web-search with the user's session; the key never reaches the browser, which
+//     matters all the more because M7-13f will stop members reading tenant_provider_keys.api_key from it.
+//   - on the server (no `window`) it calls the same core directly — the tenant id comes from the executor's trusted
+//     context, there is no user session to forward.
+// Before this, the handler read the single global app_settings row, so a BYOK tenant's search always failed with
+// "no Gemini API key configured" (and was retried 3 times).
 
-import { loadSettings } from '@/lib/settings/settings-service';
-import type { ToolHandler } from './types';
+import { authFetch } from '@/lib/api/authFetch';
+import { ToolNotConfiguredError, type ToolHandler } from './types';
+import type { WebSearchResult } from './webSearchCore';
 
-const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-
-interface GroundingChunk {
-  web?: { uri?: string; title?: string };
-}
-
-interface GeminiGenerateContentResponse {
-  candidates?: {
-    content?: { parts?: { text?: string }[] };
-    groundingMetadata?: {
-      webSearchQueries?: string[];
-      groundingChunks?: GroundingChunk[];
-    };
-  }[];
-}
-
-export const webSearchHandler: ToolHandler = async (args) => {
+export const webSearchHandler: ToolHandler = async (args, context) => {
   const query = args.query as string;
-  const maxResults = typeof args.maxResults === 'number' ? Math.min(Math.max(args.maxResults, 1), 20) : 5;
+  const maxResults = typeof args.maxResults === 'number' ? args.maxResults : undefined;
 
   if (!query || !query.trim()) {
     throw new Error('web.search requires a non-empty query.');
   }
 
-  const settings = await loadSettings();
-  const apiKey = settings.gemini_api_key;
-  if (!apiKey) {
-    // Never fabricate results — an unconfigured key is a real failure,
-    // matching the placeholder-handler discipline this replaces (M4-02):
-    // throw, don't return a fake/empty "success".
-    throw new Error('web.search is not available — no Gemini API key configured (Settings → AI Providers).');
+  if (typeof window === 'undefined') {
+    const { searchWithTenantKey } = await import('./webSearchCore');
+    return searchWithTenantKey(context.tenantId, query, maxResults);
   }
 
-  // Fallback matches whatever this account's key currently supports —
-  // confirmed live that gemini-2.0-flash/gemini-2.5-flash are deprecated
-  // on this project's key ("no longer available[/to new users]"),
-  // gemini-3.6-flash is the one that responds.
-  const model = settings.gemini_model || 'gemini-3.6-flash';
-  const url = `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`;
-
-  const res = await fetch(url, {
+  const res = await authFetch('/api/tools/web-search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: query }] }],
-      tools: [{ google_search: {} }],
-      generationConfig: { temperature: 0, maxOutputTokens: 1024 },
-    }),
+    body: JSON.stringify({ tenantId: context.tenantId, query, maxResults }),
+    signal: context.signal,
   });
+  const json = (await res.json().catch(() => null)) as
+    | { success?: boolean; data?: WebSearchResult; error?: { code?: string; message?: string } }
+    | null;
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Gemini grounding request failed (${res.status}): ${body.slice(0, 300) || res.statusText}`);
-  }
+  if (res.ok && json?.success && json.data) return json.data;
 
-  const data = (await res.json()) as GeminiGenerateContentResponse;
-  const candidate = data.candidates?.[0];
-  const chunks = candidate?.groundingMetadata?.groundingChunks ?? [];
-  const answerText = candidate?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
-
-  // Grounding genuinely returning nothing (the model decided a search
-  // wasn't warranted, or found nothing) is an honest empty result, not a
-  // failure — a real search can legitimately turn up zero sources.
-  const results = chunks
-    .filter((c) => c.web?.uri)
-    .slice(0, maxResults)
-    .map((c) => ({
-      title: c.web?.title ?? c.web?.uri ?? 'Untitled',
-      url: c.web!.uri!,
-      snippet: '',
-    }));
-
-  return { results, query, count: results.length, summary: answerText || undefined };
+  const message = json?.error?.message ?? `web.search failed (HTTP ${res.status}).`;
+  // The route reports missing/rejected configuration as NOT_CONFIGURED: deterministic, never retried.
+  if (json?.error?.code === 'NOT_CONFIGURED') throw new ToolNotConfiguredError(message);
+  throw new Error(message);
 };

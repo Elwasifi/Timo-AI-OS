@@ -117,13 +117,26 @@ export interface ToolRequest {
  * agent does not have, a tool that does not exist or is a placeholder), so the
  * caller can fail fast with a specific reason instead of retrying it.
  */
-export type ToolErrorCode = 'missing_params' | 'invalid_params' | 'permission_denied' | 'tool_not_found' | 'not_implemented';
+export type ToolErrorCode = 'missing_params' | 'invalid_params' | 'permission_denied' | 'tool_not_found' | 'not_implemented' | 'not_configured';
 
 /** M7-13c-2a: thrown by placeholder handlers (no real integration yet) so the executor can report a typed, non-retryable failure. */
 export class ToolNotImplementedError extends Error {
   constructor(public readonly service: string) {
     super(`${service} is not yet implemented — no real action was taken. This tool is a placeholder for future integration (MCP, OAuth, local runtime).`);
     this.name = 'ToolNotImplementedError';
+  }
+}
+
+/**
+ * M7-13c-2a-4: thrown when a tool cannot run because its CONFIGURATION is missing or rejected — no API key for this
+ * workspace, or the provider refused the key (401/403). Deterministic: the same call fails the same way until a
+ * person fixes the configuration, so the executor never retries it and the task fails on the first attempt.
+ * The message is shown to the user as-is: it must say what to do, and must never contain a secret.
+ */
+export class ToolNotConfiguredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ToolNotConfiguredError';
   }
 }
 

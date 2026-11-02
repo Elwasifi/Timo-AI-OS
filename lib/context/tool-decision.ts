@@ -66,12 +66,13 @@ export type ToolFailureKind =
   | 'permission_denied'
   | 'tool_not_found'
   | 'not_implemented' // placeholder tool: no real integration exists yet
+  | 'not_configured' // the tool needs configuration that is missing/rejected (e.g. no API key for this workspace)
   | 'empty_result' // the tool ran but returned nothing usable (may differ on retry)
   | 'tool_error'; // anything else the tool reported
 
 /** Failures that are deterministic: retrying the same task cannot change the outcome. */
 export const NON_RETRYABLE_TOOL_FAILURES: ReadonlySet<ToolFailureKind> = new Set<ToolFailureKind>([
-  'no_tools_for_agent', 'no_match', 'planner_no_tenant', 'invalid_params', 'permission_denied', 'tool_not_found', 'not_implemented',
+  'no_tools_for_agent', 'no_match', 'planner_no_tenant', 'invalid_params', 'permission_denied', 'tool_not_found', 'not_implemented', 'not_configured',
 ]);
 
 /** Text a tool "answer" must never consist of: it means the tool returned nothing real. */
@@ -346,6 +347,8 @@ function failureKindOfExecution(e: ToolExecutionRecord): ToolFailureKind {
       return 'tool_not_found';
     case 'not_implemented':
       return 'not_implemented';
+    case 'not_configured':
+      return 'not_configured';
     default:
       return 'tool_error';
   }
