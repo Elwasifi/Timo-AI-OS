@@ -51,6 +51,36 @@ export type ToolDecisionOutcome =
   // app/api/approvals/[id]/confirm/route.ts, not this task-resume path.
   | 'pending_approval';
 
+/**
+ * M7-13c-2a: WHY a tool decision did not produce an answer — so callers can tell a failure that
+ * will come out the same on every retry (fail now, with the specific reason) from one that may
+ * pass on a retry (provider outage, an empty search, a flaky tool).
+ */
+export type ToolFailureKind =
+  | 'no_tools_for_agent' // the agent has no registered tool it is permitted to use at all
+  | 'no_match' // planning worked and nothing fit
+  | 'planner_unavailable' // every AI provider failed / timed out while choosing a tool (transient)
+  | 'planner_no_tenant' // no tenant to run the planner for (configuration, not transient)
+  | 'planner_unusable' // the planner answered with something unusable (may differ on retry)
+  | 'invalid_params' // a required parameter is missing/blank or has the wrong type
+  | 'permission_denied'
+  | 'tool_not_found'
+  | 'not_implemented' // placeholder tool: no real integration exists yet
+  | 'empty_result' // the tool ran but returned nothing usable (may differ on retry)
+  | 'tool_error'; // anything else the tool reported
+
+/** Failures that are deterministic: retrying the same task cannot change the outcome. */
+export const NON_RETRYABLE_TOOL_FAILURES: ReadonlySet<ToolFailureKind> = new Set<ToolFailureKind>([
+  'no_tools_for_agent', 'no_match', 'planner_no_tenant', 'invalid_params', 'permission_denied', 'tool_not_found', 'not_implemented',
+]);
+
+/** Text a tool "answer" must never consist of: it means the tool returned nothing real. */
+const PLACEHOLDER_ANSWERS = new Set(['result', 'results', 'undefined', 'null', 'n/a', '[object object]']);
+export function isPlaceholderAnswer(text: string): boolean {
+  const t = text.trim().toLowerCase().replace(/[.!…]+$/, '');
+  return t === '' || PLACEHOLDER_ANSWERS.has(t);
+}
+
 export interface ToolDecisionResult {
   shouldUseTool: boolean;
   selectedToolIds: string[];
@@ -61,6 +91,8 @@ export interface ToolDecisionResult {
   outcome: ToolDecisionOutcome;
   /** M7-04 bugfix: set only when outcome === 'pending_approval'. */
   pendingApprovalId?: string;
+  /** M7-13c-2a: set whenever the decision did not produce an answer (see ToolFailureKind). */
+  failureKind?: ToolFailureKind;
 }
 
 /** M7-13c-1: start of the error text used when the tool planner could not run at all (as opposed to running and finding no match). */
@@ -123,10 +155,15 @@ export async function decideTools(
   const permissions = permissionEngine.getPermissions(agentId);
   let plan: Awaited<ReturnType<typeof toolPlanner.plan>> = null;
   let plannerFailureReason: string | null = null;
+  let plannerFailureKind: ToolFailureKind | null = null;
+  // M7-13c-2a: how many tools this agent may use at all — distinguishes "nothing is available to it"
+  // from "something was available and nothing fit" when the planner returns no plan.
+  const availableToolCount = toolRegistry.listForAgent(agentId, permissions).length;
   try {
     plan = await toolPlanner.plan(input, agentId, permissions, tenantId);
   } catch (err) {
     if (err instanceof ToolPlanningError) {
+      plannerFailureKind = err.code === 'planner_unavailable' ? 'planner_unavailable' : err.code === 'no_tenant' ? 'planner_no_tenant' : 'planner_unusable';
       // M7-13c-1: when the planner's AI call itself failed (every candidate down / timed out), say
       // so — and that the task can be retried — rather than letting the empty result below read as
       // "no tool matched". PLANNER_UNAVAILABLE_PREFIX is also what callers/tests key on.
@@ -253,11 +290,34 @@ export async function decideTools(
   // true, success: false, error: null` gives the caller no way to tell
   // "planner genuinely failed" from "nothing matched and that's fine."
   // Always carry a real, documented reason when nothing executed.
+  //
+  // M7-13c-2a: and always carry a machine-readable failureKind next to it, so a failure that is
+  // deterministic (no tool for this agent, no match, bad parameters, a placeholder tool) is not
+  // retried four times, and the stored reason names the real cause.
   let error: string | null = null;
+  let failureKind: ToolFailureKind | undefined;
   if (allFailed) {
-    error = executions.map((e) => e.error).filter(Boolean).join('; ');
+    const classified = classifyExecutionFailures(executions);
+    error = classified.error;
+    failureKind = classified.kind;
   } else if (executions.length === 0) {
-    error = plannerFailureReason ?? 'No matching tool could be planned or matched for this request.';
+    if (plannerFailureReason) {
+      error = plannerFailureReason;
+      failureKind = plannerFailureKind ?? 'planner_unusable';
+    } else if (availableToolCount === 0) {
+      error = `No tools available: agent "${agentId}" has no registered tool it is permitted to use for this request.`;
+      failureKind = 'no_tools_for_agent';
+    } else {
+      error = 'No matching tool could be planned or matched for this request.';
+      failureKind = 'no_match';
+    }
+  } else if (!toolAnswer || toolAnswer.trim().length === 0) {
+    // M7-13c-2a: a tool "succeeded" but produced no usable content (live: web.search without a
+    // summary became the literal answer "Result" and the task was saved as completed). That is
+    // not a success: report it as a failure with a reason.
+    toolAnswer = null;
+    error = `Tool ${selectedToolIds.join(', ')} ran but returned no usable content, so the request was not answered.`;
+    failureKind = 'empty_result';
   }
 
   return {
@@ -265,10 +325,46 @@ export async function decideTools(
     selectedToolIds,
     executions,
     toolAnswer,
-    success: anySuccess,
+    success: anySuccess && failureKind !== 'empty_result',
     error,
     outcome: toolAnswer && anySuccess ? 'handled' : 'attempted_failed',
+    ...(failureKind ? { failureKind } : {}),
   };
+}
+
+/** M7-13c-2a: map the executor's typed failure codes to a ToolFailureKind. */
+function failureKindOfExecution(e: ToolExecutionRecord): ToolFailureKind {
+  const r = e.result;
+  const code = 'ok' in r && !r.ok ? r.errorCode : undefined;
+  switch (code) {
+    case 'missing_params':
+    case 'invalid_params':
+      return 'invalid_params';
+    case 'permission_denied':
+      return 'permission_denied';
+    case 'tool_not_found':
+      return 'tool_not_found';
+    case 'not_implemented':
+      return 'not_implemented';
+    default:
+      return 'tool_error';
+  }
+}
+
+/**
+ * The overall kind is a NON-retryable one only when EVERY failed execution is deterministic;
+ * a mix with a transient failure stays a plain 'tool_error' (the retry might fix the transient part).
+ */
+function classifyExecutionFailures(executions: ToolExecutionRecord[]): { kind: ToolFailureKind; error: string } {
+  const failed = executions.filter((e) => !e.success);
+  const kinds = failed.map(failureKindOfExecution);
+  const allDeterministic = kinds.length > 0 && kinds.every((k) => NON_RETRYABLE_TOOL_FAILURES.has(k));
+  const messages = failed.map((e, i) =>
+    kinds[i] === 'not_implemented'
+      ? `Tool "${e.toolId}" is not implemented yet — no real action was taken.`
+      : (e.error ?? `Tool "${e.toolId}" failed.`),
+  );
+  return { kind: allDeterministic ? kinds[0] : 'tool_error', error: messages.join('; ') };
 }
 
 function resolveToolIds(category: DetectedIntent['toolCategoryHint']): string[] {
@@ -351,25 +447,48 @@ function buildToolAnswer(executions: ToolExecutionRecord[]): string {
   for (const e of successful) {
     const data = extractData(e.result);
 
-    // If the tool returned a human-readable summary, use it directly
+    // M7-13c-2a: only REAL content becomes part of an answer. A blank string, or a placeholder such
+    // as the literal "Result" (what this used to fall back to for an object with no name/title/id),
+    // is dropped — if nothing real is left the caller reports an empty-result failure.
+    let text = '';
     if (typeof data === 'string') {
-      parts.push(data);
+      text = data;
     } else if (data && typeof data === 'object') {
-      const obj = data as Record<string, unknown>;
-      if (typeof obj.summary === 'string') {
-        parts.push(obj.summary);
-      } else if (typeof obj.message === 'string') {
-        parts.push(obj.message);
-      } else if (Array.isArray(obj.workflows) || Array.isArray(obj.data)) {
-        const arr = (obj.workflows ?? obj.data) as unknown[];
-        parts.push(formatListAsHumanReadable(arr, e.toolId));
-      } else {
-        parts.push(formatObjectAsHumanReadable(obj, e.toolId));
-      }
+      text = textFromObject(data as Record<string, unknown>, e.toolId);
     }
+    if (!isPlaceholderAnswer(text)) parts.push(text.trim());
   }
 
   return parts.join('\n\n');
+}
+
+const nonBlank = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0;
+
+function textFromObject(obj: Record<string, unknown>, toolId: string): string {
+  // A simulated/sandboxed call carries an honest explanation instead of a result.
+  if (obj.simulated === true && nonBlank(obj.note)) return obj.note;
+  if (nonBlank(obj.summary)) return obj.summary;
+  if (nonBlank(obj.message)) return obj.message;
+  if (Array.isArray(obj.results)) return formatSearchResults(obj.results);
+  if (Array.isArray(obj.workflows) || Array.isArray(obj.data)) {
+    return formatListAsHumanReadable((obj.workflows ?? obj.data) as unknown[], toolId);
+  }
+  return formatObjectAsHumanReadable(obj, toolId);
+}
+
+/** web.search results without a generated summary: list what was actually found. Empty list -> '' (no usable content). */
+function formatSearchResults(results: unknown[]): string {
+  const lines: string[] = [];
+  for (const r of results.slice(0, 5)) {
+    if (!r || typeof r !== 'object') continue;
+    const o = r as Record<string, unknown>;
+    const title = nonBlank(o.title) ? o.title.trim() : '';
+    const url = nonBlank(o.url) ? o.url.trim() : '';
+    const snippet = nonBlank(o.snippet) ? o.snippet.trim() : '';
+    if (!title && !url && !snippet) continue;
+    lines.push(`• ${title || url}${title && url ? ` — ${url}` : ''}${snippet ? `\n  ${snippet}` : ''}`);
+  }
+  return lines.length > 0 ? `Search results:\n\n${lines.join('\n')}` : '';
 }
 
 function formatListAsHumanReadable(items: unknown[], toolId: string): string {
@@ -388,25 +507,32 @@ function formatListAsHumanReadable(items: unknown[], toolId: string): string {
     return lines.join('\n');
   }
 
-  lines.push(`Found ${items.length} item${items.length === 1 ? '' : 's'}:`);
-  lines.push('');
   for (const item of items) {
-    const obj = item as Record<string, unknown>;
-    const name = obj.name ?? obj.title ?? obj.id ?? 'Unknown';
-    lines.push(`• ${name}`);
+    const label = typeof item === 'string'
+      ? item
+      : (item && typeof item === 'object'
+        ? ((item as Record<string, unknown>).name ?? (item as Record<string, unknown>).title ?? (item as Record<string, unknown>).id)
+        : undefined);
+    if (nonBlank(label) || typeof label === 'number') lines.push(`• ${label}`);
   }
-  return lines.join('\n');
+  // Items with no name/title/id carry nothing we can show: not a usable answer.
+  if (lines.length === 0) return '';
+  return [`Found ${items.length} item${items.length === 1 ? '' : 's'}:`, '', ...lines].join('\n');
 }
 
 function formatObjectAsHumanReadable(obj: Record<string, unknown>, toolId: string): string {
   if (toolId.startsWith('n8n') || toolId.includes('workflow')) {
-    const name = obj.name ?? obj.id ?? 'Workflow';
+    const wfName = obj.name ?? obj.id;
+    if (!nonBlank(wfName) && typeof wfName !== 'number') return '';
     const status = obj.active ? 'Active' : 'Inactive';
-    return `Workflow: ${name} (${status})`;
+    return `Workflow: ${wfName} (${status})`;
   }
 
-  const name = obj.name ?? obj.title ?? obj.id ?? 'Result';
-  return `${name}`;
+  // No name/title/id means there is nothing to show — never a stand-in word like "Result".
+  const name = obj.name ?? obj.title ?? obj.id;
+  if (nonBlank(name)) return name;
+  if (typeof name === 'number') return String(name);
+  return '';
 }
 
 function extractData(result: ToolResultEnvelope | ChainResult): unknown {

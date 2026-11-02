@@ -4,6 +4,7 @@
 import type { ToolDefinition, ToolPermission } from './types';
 import { AGENT_PERMISSIONS } from './types';
 import { logger } from '@/lib/utils/logger';
+import { resolveToolOwnerIds } from './registry';
 
 export class PermissionDeniedError extends Error {
   constructor(agentId: string, toolId: string, missing: ToolPermission[]) {
@@ -38,7 +39,7 @@ export class PermissionEngine {
       throw new PermissionDeniedError(agentId, tool.id, missing);
     }
 
-    if (tool.supportedAgents.length > 0 && !tool.supportedAgents.includes(agentId)) {
+    if (tool.supportedAgents.length > 0 && !resolveToolOwnerIds(agentId).some((id) => tool.supportedAgents.includes(id))) {
       logger.n8nWarn(`Tool "${tool.id}" does not list agent "${agentId}" as supported`);
     }
   }

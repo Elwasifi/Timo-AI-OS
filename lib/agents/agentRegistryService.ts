@@ -19,6 +19,7 @@
 
 import { supabase } from '@/lib/supabase/client';
 import { AGENT_DEFINITIONS, getAgentDefinitionById } from './definitions';
+import { rememberAgentParents } from '@/lib/tools/registry';
 import { DEPARTMENTS, getDepartmentById } from './departments';
 import type {
   AgentRecord,
@@ -160,7 +161,9 @@ export async function loadAgents(): Promise<AgentRecord[]> {
     if (error) throw error;
     if (!data || data.length === 0) return [...AGENT_DEFINITIONS];
 
-    return (data as AgentRegistryRow[]).map(mapAgentRow);
+    const records = (data as AgentRegistryRow[]).map(mapAgentRow);
+    rememberAgentParents(records); // M7-13c-2a: let the tool registry resolve worker -> manager from live rows
+    return records;
   } catch {
     return [...AGENT_DEFINITIONS];
   }
@@ -186,7 +189,9 @@ export async function loadAgentsOrThrow(): Promise<AgentRecord[]> {
   if (error) throw new Error(error.message);
   if (!data || data.length === 0) return [...AGENT_DEFINITIONS];
 
-  return (data as AgentRegistryRow[]).map(mapAgentRow);
+  const records = (data as AgentRegistryRow[]).map(mapAgentRow);
+  rememberAgentParents(records); // M7-13c-2a
+  return records;
 }
 
 export async function loadDepartments(): Promise<DepartmentRecord[]> {

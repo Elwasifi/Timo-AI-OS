@@ -101,6 +101,22 @@ export interface ToolRequest {
   approvedApprovalId?: string;
 }
 
+/**
+ * M7-13c-2a: machine-readable class of a DETERMINISTIC tool failure — one that
+ * comes out the same on every retry (bad/missing parameters, a permission the
+ * agent does not have, a tool that does not exist or is a placeholder), so the
+ * caller can fail fast with a specific reason instead of retrying it.
+ */
+export type ToolErrorCode = 'missing_params' | 'invalid_params' | 'permission_denied' | 'tool_not_found' | 'not_implemented';
+
+/** M7-13c-2a: thrown by placeholder handlers (no real integration yet) so the executor can report a typed, non-retryable failure. */
+export class ToolNotImplementedError extends Error {
+  constructor(public readonly service: string) {
+    super(`${service} is not yet implemented — no real action was taken. This tool is a placeholder for future integration (MCP, OAuth, local runtime).`);
+    this.name = 'ToolNotImplementedError';
+  }
+}
+
 export interface ToolResultEnvelope {
   ok: boolean;
   toolId: string;
@@ -108,6 +124,8 @@ export interface ToolResultEnvelope {
   agentId: string;
   data?: unknown;
   error?: string;
+  /** M7-13c-2a: set on deterministic failures (see ToolErrorCode); absent for transient/unknown errors. */
+  errorCode?: ToolErrorCode;
   durationMs: number;
   retries: number;
   streaming: boolean;

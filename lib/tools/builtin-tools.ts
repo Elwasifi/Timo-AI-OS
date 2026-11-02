@@ -6,6 +6,7 @@
 // without changing agent code.
 
 import type { ToolDefinition, ToolHandler } from './types';
+import { ToolNotImplementedError } from './types';
 import { toolRegistry } from './registry';
 import { n8n } from '@/services/n8n';
 import { logger } from '@/lib/utils/logger';
@@ -254,7 +255,8 @@ const n8nImportHandler: ToolHandler = async (args) => {
 function placeholderHandler(service: string): ToolHandler {
   return async () => {
     logger.n8nWarn(`Tool called for unconfigured service: ${service}`);
-    throw new Error(`${service} is not yet implemented — no real action was taken. This tool is a placeholder for future integration (MCP, OAuth, local runtime).`);
+    // M7-13c-2a: typed so the executor reports errorCode 'not_implemented' and never retries it.
+    throw new ToolNotImplementedError(service);
   };
 }
 

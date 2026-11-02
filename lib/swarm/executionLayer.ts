@@ -31,7 +31,7 @@ import { loadSettings } from '@/lib/settings/settings-service';
 import { getAgentById } from '@/lib/agents/agentRegistryService';
 import { executeWorker, managerReview, type WorkerTask } from '@/lib/crew/manager-delegation';
 import { detectIntent } from '@/lib/context/intent-detector';
-import { decideTools } from '@/lib/context/tool-decision';
+import { decideTools, isPlaceholderAnswer, NON_RETRYABLE_TOOL_FAILURES } from '@/lib/context/tool-decision';
 import { buildManagerContext } from './managerContext';
 import { updateTask, claimTask, appendExecutionLog, getTasks } from './missionService';
 import { recalculateProgress, recalculateObjectiveStatus } from './missionEngine';
@@ -80,6 +80,9 @@ import type { Intent } from '@/types';
 function looksLikeRealAnswer(output: string): boolean {
   const trimmed = output.trim();
   if (trimmed.length === 0) return false;
+  // M7-13c-2a: a bare placeholder word ("Result", "null", "[object Object]" ...) is what a tool
+  // leaves behind when it returns nothing real; saving it as a completed task's output is a false success.
+  if (isPlaceholderAnswer(trimmed)) return false;
 
   const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const isJsonLine = (line: string): boolean => {
@@ -92,6 +95,19 @@ function looksLikeRealAnswer(output: string): boolean {
   };
 
   return !(lines.length > 0 && lines.every(isJsonLine));
+}
+
+/**
+ * M7-13c-2a: a task failure that will come out the same on every attempt (no tool for this agent,
+ * nothing matched, bad parameters, a placeholder tool, a missing permission). The retry loop in
+ * executeTask() fails these immediately, with the specific reason, instead of spending the
+ * remaining attempts and their backoff on an outcome that cannot change.
+ */
+export class NonRetryableTaskError extends Error {
+  constructor(message: string, public readonly failureKind: string) {
+    super(message);
+    this.name = 'NonRetryableTaskError';
+  }
 }
 
 // ---- Timeout helper ----
@@ -382,7 +398,11 @@ export async function executeTask(
           detail: toolResult.error ?? 'Unknown tool error',
           metadata: { toolIds: toolResult.selectedToolIds, failed: true },
         });
-        throw new Error(toolResult.error || `Tool execution failed for: ${toolResult.selectedToolIds.join(', ')}`);
+        const failureMessage = toolResult.error || `Tool execution failed for: ${toolResult.selectedToolIds.join(', ')}`;
+        if (toolResult.failureKind && NON_RETRYABLE_TOOL_FAILURES.has(toolResult.failureKind)) {
+          throw new NonRetryableTaskError(failureMessage, toolResult.failureKind);
+        }
+        throw new Error(failureMessage);
       } else {
         // No tool action needed — existing LLM/worker execution, unchanged.
 
@@ -645,16 +665,17 @@ export async function executeTask(
       };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown execution error';
+      const nonRetryable = err instanceof NonRetryableTaskError;
       retries++;
 
       await appendExecutionLog(task.id, {
         timestamp: new Date().toISOString(),
         event: 'execution_failed',
-        detail: `Attempt ${retries}/${maxRetries + 1} failed: ${errorMessage}`,
+        detail: `Attempt ${retries}/${maxRetries + 1} failed: ${errorMessage}${nonRetryable ? ' (deterministic failure — not retried)' : ''}`,
         agentId: managerId,
       });
 
-      if (retries <= maxRetries) {
+      if (!nonRetryable && retries <= maxRetries) {
         await recordEvent(mission.id, 'execution_retried', {
           entityType: 'task',
           entityId: task.id,

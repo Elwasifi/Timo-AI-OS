@@ -13,8 +13,9 @@
 
 import type {
   ToolRequest, ToolResultEnvelope, ToolExecutionEvent, ToolExecutionContext,
-  ToolParamSchema, RegisteredTool,
+  ToolParamSchema, RegisteredTool, ToolErrorCode,
 } from './types';
+import { ToolNotImplementedError } from './types';
 import { toolRegistry } from './registry';
 import { ensureBuiltinToolsRegistered } from './builtin-tools';
 import { permissionEngine } from './permissions';
@@ -23,7 +24,7 @@ import { requestApproval } from '@/lib/governance/approvals';
 import { getTenantExecutionMode, categoryHasRealSandboxIsolation, SANDBOX_TENANT_ID } from '@/lib/governance/executionMode';
 
 export class ToolValidationError extends Error {
-  constructor(toolId: string, param: string, message: string) {
+  constructor(toolId: string, param: string, message: string, public readonly code: 'missing_params' | 'invalid_params' = 'invalid_params') {
     super(`Validation failed for "${toolId}": param "${param}" — ${message}`);
     this.name = 'ToolValidationError';
   }
@@ -49,7 +50,7 @@ class ToolExecutorImpl {
 
     const registered = toolRegistry.get(toolId);
     if (!registered) {
-      return this.fail(request, start, 0, false, `Tool "${toolId}" not found in registry`);
+      return this.fail(request, start, 0, false, `Tool "${toolId}" not found in registry`, 'tool_not_found');
     }
 
     // Permission check
@@ -58,13 +59,13 @@ class ToolExecutorImpl {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Permission denied';
       logger.error(`Tool permission denied: ${toolId}`, { agentId, error: msg });
-      return this.fail(request, start, 0, false, msg);
+      return this.fail(request, start, 0, false, msg, 'permission_denied');
     }
 
     // Parameter validation
     const validationError = this.validateParams(registered, args);
     if (validationError) {
-      return this.fail(request, start, 0, false, validationError.message);
+      return this.fail(request, start, 0, false, validationError.message, validationError.code);
     }
 
     // M7-05: resolve the effective execution mode for this specific call.
@@ -200,6 +201,7 @@ class ToolExecutorImpl {
     let attempt = 0;
     const maxAttempts = retries + 1;
     let lastError = '';
+    let errorCode: ToolErrorCode | undefined;
 
     while (attempt < maxAttempts) {
       try {
@@ -231,6 +233,12 @@ class ToolExecutorImpl {
         attempt++;
         lastError = err instanceof Error ? err.message : String(err);
 
+        // M7-13c-2a: a placeholder tool can never succeed on a retry — fail it once, with a typed code.
+        if (err instanceof ToolNotImplementedError) {
+          errorCode = 'not_implemented';
+          break;
+        }
+
         if (controller.signal.aborted) {
           this.emit({ type: 'cancel', toolId, requestId: request.id, agentId, detail: 'Cancelled (timeout)', timestamp: Date.now() });
           logger.n8nWarn(`Tool timed out: ${toolId}`, { agentId, timeout });
@@ -247,7 +255,7 @@ class ToolExecutorImpl {
 
     clearTimeout(timeoutId);
     this.activeExecutions.delete(request.id);
-    return this.fail(request, start, attempt, false, lastError || 'Execution failed');
+    return this.fail(request, start, attempt, false, lastError || 'Execution failed', errorCode);
   }
 
   /** Cancel a running execution. */
@@ -270,9 +278,14 @@ class ToolExecutorImpl {
   private validateParams(tool: RegisteredTool, args: Record<string, unknown>): ToolValidationError | null {
     const check = (schema: ToolParamSchema, isRequired: boolean) => {
       const value = args[schema.name];
-      if (value === undefined || value === null) {
-        if (isRequired && schema.required) {
-          return new ToolValidationError(tool.definition.id, schema.name, 'required parameter missing');
+      const mustHave = isRequired && schema.required;
+      // M7-13c-2a: an empty or whitespace-only string is NOT a value for a required parameter
+      // (the planner used to be told to "use empty strings for unknown values", which let a
+      // blank query/path/id through validation and fail — or worse, act — downstream).
+      const blank = typeof value === 'string' && value.trim() === '';
+      if (value === undefined || value === null || (mustHave && blank)) {
+        if (mustHave) {
+          return new ToolValidationError(tool.definition.id, schema.name, 'required parameter missing', 'missing_params');
         }
         return null;
       }
@@ -317,7 +330,8 @@ class ToolExecutorImpl {
     start: number,
     retries: number,
     streaming: boolean,
-    error: string
+    error: string,
+    errorCode?: ToolErrorCode,
   ): ToolResultEnvelope {
     const envelope: ToolResultEnvelope = {
       ok: false,
@@ -325,6 +339,7 @@ class ToolExecutorImpl {
       requestId: request.id,
       agentId: request.agentId,
       error,
+      ...(errorCode ? { errorCode } : {}),
       durationMs: Date.now() - start,
       retries,
       streaming,

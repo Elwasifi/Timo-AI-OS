@@ -82,7 +82,7 @@ Respond with ONLY a JSON object (no markdown, no backticks):
 Rules:
 - Pick 1 tool for simple requests, multiple for chained requests (e.g. read then email).
 - Only use toolIds from the list above.
-- Fill in arguments from the user's request. Use empty strings for unknown values.
+- Fill in arguments only with values stated in, or directly implied by, the user's request. If a required value is not available, OMIT that argument — never guess and never use an empty string; the system reports the missing parameter.
 - If no tool fits, return {"tools":[],"explanation":"no matching tool"}`;
 
     try {
