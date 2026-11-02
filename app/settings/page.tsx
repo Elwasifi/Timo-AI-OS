@@ -29,6 +29,7 @@ import { authFetch } from '@/lib/api/authFetch';
 import type { TaskType } from '@/lib/ai/router';
 import { requiresByok } from '@/lib/settings/tenantProviderKeys';
 import { TenantByokSection } from '@/components/settings/tenant-byok-section';
+import { ExecutionModeSection } from '@/components/settings/execution-mode-section';
 
 const ROUTING_TASK_TYPES: TaskType[] = [
   'VOICE', 'FAST_CHAT', 'NORMAL_CHAT', 'AGENT_TO_AGENT', 'SMALL_TASK', 'CODING',
@@ -42,6 +43,7 @@ const SECTIONS = [
   { id: 'profile', label: 'Profile', icon: User },
   { id: 'workspace', label: 'Workspace & Language', icon: Globe },
   { id: 'approvals', label: 'Approvals', icon: ShieldAlert },
+  { id: 'execution', label: 'Execution Mode', icon: Shield },
   { id: 'agents', label: 'Agent Management', icon: Users },
   { id: 'providers', label: 'AI Providers', icon: Sparkles },
   { id: 'billing', label: 'Billing & Plan', icon: CreditCard },
@@ -140,6 +142,7 @@ export default function SettingsPage() {
               {active === 'profile' && <ProfileSection />}
               {active === 'workspace' && <WorkspaceSection />}
               {active === 'approvals' && <ApprovalsSection />}
+              {active === 'execution' && <ExecutionModeSection />}
               {active === 'agents' && <AgentsSection />}
               {active === 'providers' && (
                 tenantNeedsByok ? (

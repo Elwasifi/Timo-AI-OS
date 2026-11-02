@@ -56,8 +56,24 @@ export async function getTenantExecutionMode(tenantId: string | null | undefined
   return 'sandbox';
 }
 
-/** Applies an approved Live-mode switch for a tenant. Called only from the mode_change approval branch in the confirm route — never invoked directly "for convenience" (CLAUDE.md). */
+/**
+ * Writes tenants.execution_mode. SERVER ONLY, with the service-role client: since M7-13c-2a-3 the
+ * browser (authenticated role) has no UPDATE privilege on this column, so this is the only way it
+ * changes. Never call it "for convenience" (CLAUDE.md) — every caller must already have verified
+ * the TENANT OWNER (lib/auth/tenantRole.ts requireTenantRole(..., 'owner')). Today's callers:
+ *   - app/api/tenants/[id]/execution-mode (the Owner's Demo/Live toggle; Live additionally needs the
+ *     typed "LIVE" confirmation and leaves an approved mode_change audit row),
+ *   - the approved mode_change branch of app/api/approvals/[id]/confirm (owner-only for this type).
+ * Returns true only when exactly the tenant row was updated.
+ */
 export async function setTenantExecutionMode(tenantId: string, mode: ExecutionMode): Promise<boolean> {
-  const { error } = await supabase.from('tenants').update({ execution_mode: mode }).eq('id', tenantId);
-  return !error;
+  if (mode !== 'live' && mode !== 'sandbox' && mode !== 'simulation') return false;
+  const { getServiceRoleClient } = await import('@/lib/supabase/serverClient');
+  const { data, error } = await getServiceRoleClient()
+    .from('tenants')
+    .update({ execution_mode: mode })
+    .eq('id', tenantId)
+    .select('id')
+    .maybeSingle();
+  return !error && !!data;
 }

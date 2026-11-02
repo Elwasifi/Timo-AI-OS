@@ -9,6 +9,7 @@
 
 import { NextResponse } from 'next/server';
 import { requireUser, isTenantMember } from '@/lib/auth/apiAuth';
+import { requireTenantRole } from '@/lib/auth/tenantRole';
 import { ok, fail, badRequest } from '@/lib/api/response';
 import { requestApproval } from '@/lib/governance/approvals';
 
@@ -24,6 +25,11 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     const tenantId = params.id;
     if (!(await isTenantMember(user.id, tenantId))) {
       return NextResponse.json(fail('NOT_FOUND', 'Tenant not found', start), { status: 404 });
+    }
+    // M7-13c-2a-3: switching modes is an Owner decision — a plain member (or admin) may not even request it.
+    const roleCheck = await requireTenantRole(user.id, tenantId, 'owner');
+    if (!roleCheck.ok) {
+      return NextResponse.json(fail(roleCheck.code, roleCheck.message, start), { status: roleCheck.status });
     }
 
     const body = await req.json().catch(() => ({}));

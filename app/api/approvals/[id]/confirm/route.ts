@@ -28,6 +28,7 @@
 
 import { NextResponse } from 'next/server';
 import { requireUser, isTenantMember } from '@/lib/auth/apiAuth';
+import { requireTenantRole } from '@/lib/auth/tenantRole';
 import { ok, fail, notFound, badRequest, internalError } from '@/lib/api/response';
 import { getApproval, resolveApproval } from '@/lib/governance/approvals';
 import { toolExecutor } from '@/lib/tools/executor';
@@ -62,6 +63,17 @@ export async function POST(req: Request, { params }: { params: { id: string } })
       return NextResponse.json(badRequest(`This approval was already ${existing.status}`, start), { status: 409 });
     }
 
+    // M7-13c-2a-3: a mode_change approval (approve OR reject) is an Owner decision. Checked BEFORE
+    // resolveApproval(), so a member's attempt leaves the approval pending and untouched.
+    if (existing.type === 'mode_change') {
+      const roleCheck = existing.tenantId
+        ? await requireTenantRole(user.id, existing.tenantId, 'owner')
+        : ({ ok: false, status: 403, code: 'FORBIDDEN', message: 'Only the account owner can do this', role: null } as const);
+      if (!roleCheck.ok) {
+        return NextResponse.json(fail(roleCheck.code, roleCheck.message, start), { status: roleCheck.status });
+      }
+    }
+
     const resolved = await resolveApproval(params.id, decision, user.id);
     if (!resolved) return NextResponse.json(internalError('Failed to resolve approval', start), { status: 500 });
 
@@ -93,7 +105,9 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     // current mode, nothing to undo.
     if (decision === 'approved' && resolved.type === 'mode_change') {
       const { tenantId, newMode } = resolved.payload as { tenantId?: string; newMode?: string };
-      if (tenantId && newMode === 'live') {
+      // M7-13c-2a-3: the payload is just data (a row could be inserted with any payload), so it may only
+      // ever switch the SAME tenant the approval belongs to — whose Owner was verified above.
+      if (tenantId && newMode === 'live' && tenantId === resolved.tenantId) {
         const applied = await setTenantExecutionMode(tenantId, 'live');
         return NextResponse.json(ok({ approval: resolved, modeApplied: applied }, start));
       }
