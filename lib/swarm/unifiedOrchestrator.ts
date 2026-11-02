@@ -47,7 +47,36 @@ import type { RoutingResult, TaskRecord } from '@/types';
 // finishes, not blocking mission kickoff either way (fire-and-forget below).
 const FALLBACK_ACKNOWLEDGMENT = "Got it — this needs a full mission, so I'm breaking it down and getting to work. I'll follow up here with the result.";
 
+/**
+ * M7-13c-1: hard upper bound on how long the acknowledgment may take. It is
+ * already fire-and-forget (it never delays the mission), but a stalled attempt
+ * still held provider/health state and, on a bad day, resolved long after the
+ * user stopped caring. Within ~5s it either has a real sentence or it resolves
+ * to FALLBACK_ACKNOWLEDGMENT — it never rejects. The underlying provider
+ * request carries the same budget (`fast_acknowledgment` in
+ * lib/ai/ai-provider.ts OPERATION_LIMITS: 4.5s per attempt, 5s overall, no
+ * same-model retry), so its fetch is aborted by its own timer rather than left
+ * running; soft-cooled models are deferred by chatWithFallback itself.
+ */
+export const ACKNOWLEDGMENT_HARD_CAP_MS = 5_000;
+
 export async function generateFastAcknowledgment(userRequest: string, tenantId: string): Promise<string> {
+  let capTimer: ReturnType<typeof setTimeout> | undefined;
+  const cap = new Promise<string>((resolve) => {
+    capTimer = setTimeout(() => resolve(FALLBACK_ACKNOWLEDGMENT), ACKNOWLEDGMENT_HARD_CAP_MS);
+  });
+  const attempt = generateAcknowledgmentUncapped(userRequest, tenantId);
+  attempt.catch(() => {}); // if the cap wins, a late failure of the abandoned attempt must not become an unhandled rejection
+  try {
+    return await Promise.race([attempt, cap]);
+  } catch {
+    return FALLBACK_ACKNOWLEDGMENT;
+  } finally {
+    if (capTimer) clearTimeout(capTimer);
+  }
+}
+
+async function generateAcknowledgmentUncapped(userRequest: string, tenantId: string): Promise<string> {
   try {
     const decision = await route({
       classification: {
@@ -70,7 +99,9 @@ export async function generateFastAcknowledgment(userRequest: string, tenantId: 
       {
         systemPrompt: "The user just sent a request that needs real planning and multi-step work — it will take a while. In ONE short, natural sentence, acknowledge specifically what they asked for and say you're getting started on it now. Do not answer the request itself. Do not use quotation marks.",
         temperature: 0.4,
-        maxTokens: 60,
+        // M7-13c-1: was 60 — a reasoning model (groq/openai/gpt-oss-120b) spent the whole budget on hidden
+        // reasoning and returned an empty completion. The one-sentence limit lives in the prompt above, not here.
+        maxTokens: 256,
         candidates: decision.candidates,
         usageContext: { operation: 'fast_acknowledgment', tenantId },
       },

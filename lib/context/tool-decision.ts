@@ -63,6 +63,9 @@ export interface ToolDecisionResult {
   pendingApprovalId?: string;
 }
 
+/** M7-13c-1: start of the error text used when the tool planner could not run at all (as opposed to running and finding no match). */
+export const PLANNER_UNAVAILABLE_PREFIX = 'The tool planner was unavailable';
+
 export async function decideTools(
   input: string,
   intent: DetectedIntent,
@@ -124,7 +127,12 @@ export async function decideTools(
     plan = await toolPlanner.plan(input, agentId, permissions, tenantId);
   } catch (err) {
     if (err instanceof ToolPlanningError) {
-      plannerFailureReason = err.message;
+      // M7-13c-1: when the planner's AI call itself failed (every candidate down / timed out), say
+      // so — and that the task can be retried — rather than letting the empty result below read as
+      // "no tool matched". PLANNER_UNAVAILABLE_PREFIX is also what callers/tests key on.
+      plannerFailureReason = err.code === 'planner_unavailable'
+        ? `${PLANNER_UNAVAILABLE_PREFIX} (every AI provider failed or timed out while choosing a tool, so nothing was run) — this task can be retried. Detail: ${err.message}`
+        : err.message;
       logger.error('decideTools: tool planner failed, falling back to direct-pattern execution', {
         error: err.message,
         provider: err.provider,

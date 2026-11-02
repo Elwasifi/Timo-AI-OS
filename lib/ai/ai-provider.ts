@@ -30,6 +30,10 @@ export interface ChatOptions {
   candidates?: { provider: ProviderId; model: string }[];
   /** M7-13e: per-request ceiling override (ms) for ONE provider attempt; omit to derive it from the call type — see requestTimeoutFor(). */
   timeoutMs?: number;
+  /** M7-13c-1: INTERNAL — absolute deadline (epoch ms) set by the fallback loops so retries inside one provider attempt can never outlast the call's overall budget. Callers do not set this. */
+  deadlineAtMs?: number;
+  /** M7-13c-1: INTERNAL — the full (un-shortened) per-attempt limit, so a timeout of a timer shortened by the remaining budget can be told apart from a full-budget timeout. */
+  fullTimeoutMs?: number;
 }
 
 export interface ChatResult {
@@ -106,8 +110,52 @@ export function requestTimeoutFor(options: ChatOptions): number {
   if (options.timeoutMs && options.timeoutMs > 0) return options.timeoutMs;
   const op = options.usageContext?.operation;
   if (op && LONG_GENERATION_OPERATIONS.has(op)) return LONG_GENERATION_TIMEOUT_MS;
+  const limits = op ? OPERATION_LIMITS[op] : undefined;
+  if (limits) return limits.perAttemptMs;
   if ((options.maxTokens ?? 2048) > 2048) return LARGE_OUTPUT_TIMEOUT_MS;
   return PROVIDER_REQUEST_TIMEOUT_MS;
+}
+
+/**
+ * M7-13c-1: operations whose usefulness window is much shorter than a chat
+ * turn. Live evidence (Amro, 2026-11-02): a mission's tool-planning call
+ * inherited the generic 20s-per-attempt / 30s-overall chat budget and spent it
+ * all on one unavailable provider before a healthy one was reached; the
+ * fire-and-forget acknowledgment did the same. Both have a deterministic
+ * fallback (direct-pattern tool execution / a static sentence), so giving up
+ * early is cheaper than waiting. Anything not listed keeps 20s / 30s.
+ *   perAttemptMs  ceiling for ONE provider request
+ *   deadlineMs    ceiling for the whole fallback chain
+ *   noRetry       never retry the same model (move straight to the next one)
+ *   shortBudget   the limit is deliberately tighter than the model's normal latency: a TIMEOUT
+ *                 here is not evidence the model is unavailable (see AIProviderError.budgetLimited)
+ */
+export const OPERATION_LIMITS: Record<string, { perAttemptMs: number; deadlineMs: number; noRetry?: boolean; shortBudget?: boolean }> = {
+  tool_planning: { perAttemptMs: 12_000, deadlineMs: 20_000 },
+  // shortBudget: the 4.5s limit is OUR choice and below live first-token latency (Groq 3.4-4.8s), so
+  // a timeout here says nothing about the model — it must not cool it down or count against its health.
+  fast_acknowledgment: { perAttemptMs: 4_500, deadlineMs: 5_000, noRetry: true, shortBudget: true },
+};
+
+/**
+ * M7-13c-1: same-model attempts. Interactive calls get 2 (one retry) on a
+ * transient 5xx / network error instead of 3 — three tries at an unavailable
+ * model cost 1s + 2s of backoff plus three round trips before the next
+ * candidate was even considered. Mission-class calls keep 3. A provider's own
+ * 429 keeps its existing 3-attempt behaviour (it is a different path: rate
+ * limits are not "unavailable" and are not counted by the soft cooldown).
+ * Mutable only through the test setter below.
+ */
+const RETRY_POLICY = { interactiveAttempts: 2, longAttempts: 3, rateLimitAttempts: 3 };
+
+/** Test-only: shrink/restore the retry counts. */
+export function __setRetryAttemptsForTesting(p: Partial<typeof RETRY_POLICY>): void {
+  Object.assign(RETRY_POLICY, p);
+}
+
+/** Test-only: the retry counts currently in force (a copy). */
+export function __getRetryPolicyForTesting(): typeof RETRY_POLICY {
+  return { ...RETRY_POLICY };
 }
 
 /**
@@ -128,13 +176,58 @@ export function isInteractiveCall(options: ChatOptions): boolean {
   return requestTimeoutFor(options) <= PROVIDER_REQUEST_TIMEOUT_MS;
 }
 
-function deadlineError(providerId: ProviderId): AIProviderError {
+/** Overall budget for this call's whole fallback chain, or null for mission-class calls (no overall deadline). */
+function deadlineFor(options: ChatOptions): number | null {
+  if (!isInteractiveCall(options)) return null;
+  const op = options.usageContext?.operation;
+  return (op ? OPERATION_LIMITS[op]?.deadlineMs : undefined) ?? INTERACTIVE_DEADLINE_MS;
+}
+
+function deadlineError(providerId: ProviderId, limitMs: number = INTERACTIVE_DEADLINE_MS): AIProviderError {
   return new AIProviderError(
-    `The AI is taking too long to respond (${INTERACTIVE_DEADLINE_MS / 1000}s limit reached across providers). Please try again in a moment.`,
+    `The AI is taking too long to respond (${limitMs / 1000}s limit reached across providers). Please try again in a moment.`,
     408,
     providerId,
     'deadline',
   );
+}
+
+/** Time left in this call's overall budget (Infinity when it has none). */
+function remainingMsOf(options: ChatOptions): number {
+  return options.deadlineAtMs === undefined ? Number.POSITIVE_INFINITY : options.deadlineAtMs - Date.now();
+}
+
+/** One request's ceiling: its per-attempt limit, never more than what is left of the overall budget. */
+function attemptTimeoutMs(options: ChatOptions): number {
+  return Math.min(requestTimeoutFor(options), remainingMsOf(options));
+}
+
+/**
+ * M7-13c-1: a timeout only says "this model is unavailable" when the attempt had
+ * its FULL per-attempt budget. If the operation's budget is deliberately short
+ * (acknowledgment), or the timer was shortened to fit the time left in the
+ * overall deadline, the model was cut off by OUR budget, not by being down — so
+ * the error is flagged and the fallback loops neither soft-cool the model nor
+ * record a failed health sample for it.
+ */
+function budgetLimitedTimeout(timer: { error: () => AIProviderError }, options: ChatOptions, attemptMs: number): AIProviderError {
+  const e = timer.error();
+  const op = options.usageContext?.operation;
+  e.budgetLimited = !!(op && OPERATION_LIMITS[op]?.shortBudget) || attemptMs < (options.fullTimeoutMs ?? attemptMs);
+  return e;
+}
+
+function attemptCap(options: ChatOptions, status: number): number {
+  const op = options.usageContext?.operation;
+  if (op && OPERATION_LIMITS[op]?.noRetry) return 1;
+  if (status === 429) return RETRY_POLICY.rateLimitAttempts;
+  return isInteractiveCall(options) ? RETRY_POLICY.interactiveAttempts : RETRY_POLICY.longAttempts;
+}
+
+/** True when another attempt at the SAME model is allowed: under the attempt cap AND the backoff sleep plus a useful attempt still fit in the remaining budget. */
+function canRetry(options: ChatOptions, attempt: number, status: number, backoffMs: number): boolean {
+  if (attempt + 1 >= attemptCap(options, status)) return false;
+  return remainingMsOf(options) - backoffMs >= MIN_ATTEMPT_MS;
 }
 
 function startRequestTimer(providerId: ProviderId, ms: number = PROVIDER_REQUEST_TIMEOUT_MS) {
@@ -176,7 +269,8 @@ class AIProviderImpl implements AIProvider {
 
   async chat(messages: ChatMessage[], options: ChatOptions = {}): Promise<ChatResult> {
     for (let attempt = 0; attempt <= 2; attempt++) {
-      const timer = startRequestTimer(this.id, requestTimeoutFor(options));
+      const attemptMs = Math.max(1, attemptTimeoutMs(options));
+      const timer = startRequestTimer(this.id, attemptMs);
       try {
         const body = {
           provider: this.id,
@@ -191,7 +285,7 @@ class AIProviderImpl implements AIProvider {
           tenantId: options.usageContext?.tenantId ?? null,
         };
 
-        logger.aiDebug(`${this.id} chat attempt ${attempt + 1}/3`);
+        logger.aiDebug(`${this.id} chat attempt ${attempt + 1}/${attemptCap(options, 0)}`);
 
         const res = await fetch(EDGE_FUNCTION_URL, {
           method: 'POST',
@@ -210,7 +304,7 @@ class AIProviderImpl implements AIProvider {
           if (err.code === 'rate_limited') {
             throw new AIProviderError(err.error, res.status, this.id, 'rate_limited');
           }
-          if (isRetryable(res.status) && attempt < 2) {
+          if (isRetryable(res.status) && canRetry(options, attempt, res.status, 1000 * Math.pow(2, attempt))) {
             await sleep(1000 * Math.pow(2, attempt));
             continue;
           }
@@ -228,9 +322,9 @@ class AIProviderImpl implements AIProvider {
           model: typeof data.model === 'string' && data.model ? data.model : (options.model || ''),
         };
       } catch (err) {
-        if (timer.timedOut()) throw timer.error();
+        if (timer.timedOut()) throw budgetLimitedTimeout(timer, options, attemptMs);
         if (err instanceof AIProviderError) throw err;
-        if (attempt < 2) {
+        if (canRetry(options, attempt, 0, 1000 * Math.pow(2, attempt))) {
           await sleep(1000 * Math.pow(2, attempt));
           continue;
         }
@@ -247,7 +341,8 @@ class AIProviderImpl implements AIProvider {
     options: ChatOptions & { onDelta: StreamCallback }
   ): Promise<StreamResult> {
     for (let attempt = 0; attempt <= 2; attempt++) {
-      const timer = startRequestTimer(this.id, requestTimeoutFor(options));
+      const attemptMs = Math.max(1, attemptTimeoutMs(options));
+      const timer = startRequestTimer(this.id, attemptMs);
       try {
         const body = {
           provider: this.id,
@@ -260,7 +355,7 @@ class AIProviderImpl implements AIProvider {
           tenantId: options.usageContext?.tenantId ?? null,
         };
 
-        logger.aiDebug(`${this.id} stream attempt ${attempt + 1}/3`);
+        logger.aiDebug(`${this.id} stream attempt ${attempt + 1}/${attemptCap(options, 0)}`);
 
         const res = await fetch(EDGE_FUNCTION_URL, {
           method: 'POST',
@@ -274,7 +369,7 @@ class AIProviderImpl implements AIProvider {
           if (err.code === 'rate_limited') {
             throw new AIProviderError(err.error, res.status, this.id, 'rate_limited');
           }
-          if (isRetryable(res.status) && attempt < 2) {
+          if (isRetryable(res.status) && canRetry(options, attempt, res.status, 1000 * Math.pow(2, attempt))) {
             await sleep(1000 * Math.pow(2, attempt));
             continue;
           }
@@ -323,11 +418,11 @@ class AIProviderImpl implements AIProvider {
           model: options.model || '',
         };
       } catch (err) {
-        if (timer.timedOut()) throw timer.error();
+        if (timer.timedOut()) throw budgetLimitedTimeout(timer, options, attemptMs);
         if (err instanceof AIProviderError && (err.code === 'rate_limited' || (!isRetryable(err.status) && err.status !== 0))) {
           throw err;
         }
-        if (attempt < 2) {
+        if (canRetry(options, attempt, err instanceof AIProviderError ? err.status : 0, 1000 * Math.pow(2, attempt))) {
           await sleep(1000 * Math.pow(2, attempt));
           continue;
         }
@@ -353,6 +448,8 @@ export class AIProviderError extends Error {
     super(message);
     this.name = 'AIProviderError';
   }
+  /** M7-13c-1: set on a 'timeout' error whose timer was cut short by OUR budget (short-budget operation, or shortened to the remaining deadline) — such a timeout is not evidence about the model. */
+  budgetLimited?: boolean;
 }
 
 const providers: Record<ProviderId, AIProviderImpl> = {
@@ -494,9 +591,81 @@ export function tripCircuitIfHardFailure(tenantId: string | null | undefined, pr
 
 /** Clear open circuits — e.g. after a tenant saves a new API key, so a fixed key is retried immediately. Scoped to the given tenant (and provider, if given); with no arguments clears everything (tests). */
 export function resetProviderCircuits(tenantId?: string | null, providerId?: ProviderId): void {
-  if (tenantId === undefined && !providerId) { circuitOpenUntil.clear(); return; }
+  if (tenantId === undefined && !providerId) { circuitOpenUntil.clear(); softCooldownUntil.clear(); emptyStrikes.clear(); return; }
   const prefix = providerId ? `${tenantScope(tenantId)}::${providerId}::` : `${tenantScope(tenantId)}::`;
   Array.from(circuitOpenUntil.keys()).forEach((k) => { if (k.startsWith(prefix)) circuitOpenUntil.delete(k); });
+  // M7-13c-1: a re-saved key also clears the soft cooldown / empty-completion strikes for the same scope.
+  Array.from(softCooldownUntil.keys()).forEach((k) => { if (k.startsWith(prefix)) softCooldownUntil.delete(k); });
+  Array.from(emptyStrikes.keys()).forEach((k) => { if (k.startsWith(prefix)) emptyStrikes.delete(k); });
+}
+
+// ---- M7-13c-1: SOFT cooldown for "unavailable right now" failures ----
+//
+// The hard circuit above covers failures that will not fix themselves (key
+// rejected, model gone). It deliberately ignores 503 / timeouts / empty
+// completions, so a model that is simply down kept being tried FIRST on every
+// call and each call paid for it again (live: the mission's acknowledgment and
+// then its tool planner both spent their budget on the same unavailable gemini
+// before the healthy groq was reached). This is the short-lived counterpart:
+// after a counted failure the pair is deferred behind the other candidates for
+// SOFT_COOLDOWN_MS. In-memory and per tenant, like the hard circuit.
+//
+// COUNTED  : HTTP 500/502/503/504 (reported only after the same-model retries
+//            were used up), request timeouts, and empty completions (two
+//            within the window — one empty reply can be prompt-specific).
+// NOT      : 400/422/content errors (a property of the request, not the
+//            model), 429 (existing rate-limit handling), our own deadline.
+// Rules    : a cooled pair is DEFERRED (tried after the healthy ones), never
+//            dropped, so the last remaining candidate is always still tried;
+//            lastResort chains bypass it; the hard circuit is checked
+//            separately and always wins; a success clears the pair; saving a
+//            key (resetProviderCircuits) clears it.
+export const SOFT_COOLDOWN_MS = 3 * 60 * 1000;
+export const SOFT_EMPTY_STRIKES_TO_TRIP = 2;
+const SOFT_FAILURE_STATUSES = new Set([500, 502, 503, 504]);
+const softCooldownUntil = new Map<string, number>();
+const emptyStrikes = new Map<string, number[]>();
+
+export function isSoftCooledDown(tenantId: string | null | undefined, providerId: ProviderId, model: string, now: number = Date.now()): boolean {
+  const until = softCooldownUntil.get(circuitKey(tenantId, providerId, model));
+  return until !== undefined && now < until;
+}
+
+/** Returns true when this failure put the pair into a soft cooldown. */
+export function recordSoftFailure(tenantId: string | null | undefined, providerId: ProviderId, model: string, err: AIProviderError, now: number = Date.now()): boolean {
+  const key = circuitKey(tenantId, providerId, model);
+  const trip = () => {
+    softCooldownUntil.set(key, now + SOFT_COOLDOWN_MS);
+    emptyStrikes.delete(key);
+    logger.provider(`Soft cooldown for ${providerId}/${model} — ${err.code ?? err.status} counted as "unavailable", deferring it behind other candidates for ${SOFT_COOLDOWN_MS / 60000} minutes`);
+    return true;
+  };
+  if (err.code === 'empty_response') {
+    const recent = (emptyStrikes.get(key) ?? []).filter((t) => now - t < SOFT_COOLDOWN_MS);
+    recent.push(now);
+    emptyStrikes.set(key, recent);
+    return recent.length >= SOFT_EMPTY_STRIKES_TO_TRIP ? trip() : false;
+  }
+  if (err.code === 'timeout' || SOFT_FAILURE_STATUSES.has(err.status)) return trip();
+  return false;
+}
+
+function clearSoftCooldown(tenantId: string | null | undefined, providerId: ProviderId, model: string): void {
+  const key = circuitKey(tenantId, providerId, model);
+  softCooldownUntil.delete(key);
+  emptyStrikes.delete(key);
+}
+
+/**
+ * Stable reorder: soft-cooled pairs move behind the others. Skipped for
+ * lastResort chains and when nothing is cooled. Never removes a pair.
+ */
+function deferSoftCooledPairs(pairs: ProviderPair[], tenantId: string | null | undefined, lastResort: boolean): ProviderPair[] {
+  if (lastResort) return pairs;
+  const cooled = pairs.filter((p) => isSoftCooledDown(tenantId, p.providerId, p.model));
+  if (cooled.length === 0 || cooled.length === pairs.length) return pairs;
+  cooled.forEach((p) => logger.provider(`Deferring ${p.providerId}/${p.model} — soft cooldown after a recent unavailable response`));
+  return [...pairs.filter((p) => !cooled.includes(p)), ...cooled];
 }
 
 type ProviderPair = { providerId: ProviderId; model: string };
@@ -635,13 +804,14 @@ export async function chatWithFallback(
   messages: ChatMessage[],
   options: ChatOptions = {},
 ): Promise<ChatResult> {
-  const deadlineAt = isInteractiveCall(options) ? Date.now() + INTERACTIVE_DEADLINE_MS : null;
+  const deadlineMs = deadlineFor(options);
+  const deadlineAt = deadlineMs === null ? null : Date.now() + deadlineMs;
   let deadlineHit = false;
   const settings = await loadSettings();
   let pairs = await resolveOrderedPairs(options, settings);
   pairs = await applyBudgetGate(pairs, options.usageContext?.tenantId);
   const prioritized = await prioritizePairs(pairs, !!(options.candidates && options.candidates.length > 0), options.usageContext?.tenantId);
-  pairs = prioritized.pairs;
+  pairs = deferSoftCooledPairs(prioritized.pairs, options.usageContext?.tenantId, prioritized.lastResort);
 
   let lastError: AIProviderError | null = null;
 
@@ -661,12 +831,19 @@ export async function chatWithFallback(
     const start = Date.now();
     try {
       logger.provider(`Trying ${providerId}`, { model });
-      const result = await provider.chat(messages, { ...options, model, timeoutMs: Math.min(requestTimeoutFor(options), remainingMs) });
+      const result = await provider.chat(messages, {
+        ...options,
+        model,
+        timeoutMs: Math.min(requestTimeoutFor(options), remainingMs),
+        fullTimeoutMs: requestTimeoutFor(options),
+        deadlineAtMs: deadlineAt ?? undefined,
+      });
       const latencyMs = Date.now() - start;
       if (isEmptyResult(result.content)) {
         recordHealth({ provider: providerId, modelId: model, success: false, latencyMs, statusCode: 200 });
         logger.providerWarn(`${providerId}/${model} returned an empty completion (likely reasoning tokens exhausted maxTokens) — treating as failure`);
         lastError = new AIProviderError(`${providerId} returned an empty response`, 200, providerId, 'empty_response');
+        recordSoftFailure(options.usageContext?.tenantId, providerId, model, lastError);
         continue;
       }
       if (pairs[0].providerId !== providerId) {
@@ -682,11 +859,18 @@ export async function chatWithFallback(
         latencyMs,
       });
       recordHealth({ provider: providerId, modelId: model, success: true, latencyMs, statusCode: 200 });
+      clearSoftCooldown(options.usageContext?.tenantId, providerId, model);
       return result;
     } catch (err) {
       lastError = err instanceof AIProviderError ? err : new AIProviderError(String(err), 0, providerId);
-      recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
-      tripCircuitIfHardFailure(options.usageContext?.tenantId, providerId, model, lastError.status);
+      // M7-13c-1: a timeout caused by our own short/shortened budget says nothing about the model.
+      const ownBudgetTimeout = lastError.code === 'timeout' && lastError.budgetLimited === true;
+      if (!ownBudgetTimeout) {
+        recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
+      }
+      if (!tripCircuitIfHardFailure(options.usageContext?.tenantId, providerId, model, lastError.status) && !ownBudgetTimeout) {
+        recordSoftFailure(options.usageContext?.tenantId, providerId, model, lastError);
+      }
       logger.providerWarn(`${providerId} failed: ${lastError.message}`);
       // M2-02: an IP-level rate limit applies identically to every
       // provider (it's checked before the edge function even looks at
@@ -697,7 +881,7 @@ export async function chatWithFallback(
     }
   }
 
-  if (deadlineHit) throw deadlineError(lastError?.providerId ?? pairs[0]?.providerId ?? 'gemini');
+  if (deadlineHit) throw deadlineError(lastError?.providerId ?? pairs[0]?.providerId ?? 'gemini', deadlineMs ?? undefined);
   const friendlyMessage = getFriendlyError(lastError);
   throw new Error(friendlyMessage);
 }
@@ -710,13 +894,14 @@ export async function streamWithFallback(
   messages: ChatMessage[],
   options: ChatOptions & { onDelta: StreamCallback },
 ): Promise<string> {
-  const deadlineAt = isInteractiveCall(options) ? Date.now() + INTERACTIVE_DEADLINE_MS : null;
+  const deadlineMs = deadlineFor(options);
+  const deadlineAt = deadlineMs === null ? null : Date.now() + deadlineMs;
   let deadlineHit = false;
   const settings = await loadSettings();
   let pairs = await resolveOrderedPairs(options, settings);
   pairs = await applyBudgetGate(pairs, options.usageContext?.tenantId);
   const prioritized = await prioritizePairs(pairs, !!(options.candidates && options.candidates.length > 0), options.usageContext?.tenantId);
-  pairs = prioritized.pairs;
+  pairs = deferSoftCooledPairs(prioritized.pairs, options.usageContext?.tenantId, prioritized.lastResort);
 
   let lastError: AIProviderError | null = null;
 
@@ -736,12 +921,19 @@ export async function streamWithFallback(
     const start = Date.now();
     try {
       logger.provider(`Streaming via ${providerId}`, { model });
-      const result = await provider.chatStream(messages, { ...options, model, timeoutMs: Math.min(requestTimeoutFor(options), remainingMs) });
+      const result = await provider.chatStream(messages, {
+        ...options,
+        model,
+        timeoutMs: Math.min(requestTimeoutFor(options), remainingMs),
+        fullTimeoutMs: requestTimeoutFor(options),
+        deadlineAtMs: deadlineAt ?? undefined,
+      });
       const latencyMs = Date.now() - start;
       if (isEmptyResult(result.content)) {
         recordHealth({ provider: providerId, modelId: model, success: false, latencyMs, statusCode: 200 });
         logger.providerWarn(`${providerId}/${model} streamed an empty completion (likely reasoning tokens exhausted maxTokens) — treating as failure`);
         lastError = new AIProviderError(`${providerId} returned an empty response`, 200, providerId, 'empty_response');
+        recordSoftFailure(options.usageContext?.tenantId, providerId, model, lastError);
         continue;
       }
       if (pairs[0].providerId !== providerId) {
@@ -759,18 +951,25 @@ export async function streamWithFallback(
         latencyMs,
       });
       recordHealth({ provider: providerId, modelId: model, success: true, latencyMs, statusCode: 200 });
+      clearSoftCooldown(options.usageContext?.tenantId, providerId, model);
       return result.content;
     } catch (err) {
       lastError = err instanceof AIProviderError ? err : new AIProviderError(String(err), 0, providerId);
-      recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
-      tripCircuitIfHardFailure(options.usageContext?.tenantId, providerId, model, lastError.status);
+      // M7-13c-1: a timeout caused by our own short/shortened budget says nothing about the model.
+      const ownBudgetTimeout = lastError.code === 'timeout' && lastError.budgetLimited === true;
+      if (!ownBudgetTimeout) {
+        recordHealth({ provider: providerId, modelId: model, success: false, latencyMs: Date.now() - start, statusCode: lastError.status });
+      }
+      if (!tripCircuitIfHardFailure(options.usageContext?.tenantId, providerId, model, lastError.status) && !ownBudgetTimeout) {
+        recordSoftFailure(options.usageContext?.tenantId, providerId, model, lastError);
+      }
       logger.providerWarn(`${providerId} stream failed: ${lastError.message}`);
       if (lastError.code === 'rate_limited') break;
       continue;
     }
   }
 
-  if (deadlineHit) throw deadlineError(lastError?.providerId ?? pairs[0]?.providerId ?? 'gemini');
+  if (deadlineHit) throw deadlineError(lastError?.providerId ?? pairs[0]?.providerId ?? 'gemini', deadlineMs ?? undefined);
   const friendlyMessage = getFriendlyError(lastError);
   throw new Error(friendlyMessage);
 }

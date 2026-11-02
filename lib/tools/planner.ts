@@ -33,7 +33,7 @@ interface PlannerResponse {
  * that's not a failure and should never be reported as one.
  */
 export class ToolPlanningError extends Error {
-  constructor(message: string, public cause_: unknown, public provider?: string, public code?: 'no_tenant') {
+  constructor(message: string, public cause_: unknown, public provider?: string, public code?: 'no_tenant' | 'planner_unavailable') {
     super(message);
     this.name = 'ToolPlanningError';
   }
@@ -93,7 +93,8 @@ Rules:
       const result = await chatWithFallback(
         [{ role: 'user', content: input }] as ChatMessage[],
         {
-          systemPrompt, temperature: 0.1, maxTokens: 500, candidates: decision.candidates,
+          // M7-13c-1: was 500 — too small for a reasoning model's hidden tokens plus the JSON plan.
+          systemPrompt, temperature: 0.1, maxTokens: 1200, candidates: decision.candidates,
           usageContext: {
             operation: 'tool_planning',
             agentId,
@@ -124,7 +125,10 @@ Rules:
         provider,
         timestamp: Date.now(),
       });
-      throw new ToolPlanningError(`Tool planning failed: ${message}`, err, provider);
+      // M7-13c-1: the AI call itself failed (every candidate errored, timed out or the planner's own
+      // deadline ran out) — distinct from "the AI answered and no tool fits". Carried as a code so
+      // tool-decision.ts can say the planner was UNAVAILABLE instead of "no matching tool".
+      throw new ToolPlanningError(`Tool planning failed: ${message}`, err, provider, 'planner_unavailable');
     }
   }
 
