@@ -25,6 +25,9 @@ const webSearchTool: ToolDefinition = {
   optionalParams: [{ name: 'maxResults', type: 'number', description: 'Max results', required: false }],
   responseSchema: { type: 'array', fields: { title: 'string', url: 'string', snippet: 'string' } },
   status: 'active', version: '1.0.0', supportedAgents: ['atlas', 'echo', 'nova', 'luna', 'flow', 'temo'],
+  // M7-13c-2a-2: webSearchHandler only reads app settings (SELECT) and sends a Gemini grounded-search
+  // query (a read; nothing is created, changed or sent anywhere), so Demo/sandbox runs it for real.
+  readOnly: true,
 };
 
 // ---- n8n Tools ----

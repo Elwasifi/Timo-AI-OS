@@ -66,6 +66,16 @@ export interface ToolDefinition {
   riskLevel?: 'reversible' | 'irreversible';
   /** M7-04: how far this tool's effect reaches if it runs. */
   blastRadius?: 'self' | 'tenant' | 'external';
+  /**
+   * M7-13c-2a-2: true ONLY for a tool whose handler provably performs no write or side effect in
+   * any system (no DB write, no message/email, no workflow execution/activation, no file/GitHub
+   * write, no external POST/PUT/DELETE with an effect). Sandbox ("Demo") mode runs such a tool for
+   * real instead of degrading it to a simulated result — like a demo trading account that shows
+   * real prices but places no real orders. FAIL-SAFE: absent/false means "not read-only", so a
+   * new tool is simulated in sandbox until someone proves otherwise and flags it. Explicit
+   * simulation (isSimulation / mode 'simulation') ignores this flag and still simulates everything.
+   */
+  readOnly?: boolean;
 }
 
 // M7-05 — Live / Sandbox / Simulation execution mode.

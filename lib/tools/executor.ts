@@ -83,8 +83,15 @@ class ToolExecutorImpl {
     // (confirmed decision — see executionMode.ts's
     // categoryHasRealSandboxIsolation comment for which categories do/
     // don't have one today).
+    //
+    // M7-13c-2a-2: a tool explicitly flagged readOnly (provably no side effect) is the exception —
+    // it runs for real in sandbox, like reading prices on a demo trading account. Anything not
+    // flagged (readOnly absent/false) still degrades. This is evaluated only here: 'simulation'
+    // (isSimulation or mode) is handled by the separate clauses of the check below and still wins.
     const sandboxDegradesToSimulation =
-      effectiveMode === 'sandbox' && !categoryHasRealSandboxIsolation(registered.definition.category);
+      effectiveMode === 'sandbox'
+      && !categoryHasRealSandboxIsolation(registered.definition.category)
+      && registered.definition.readOnly !== true;
 
     // M7-04: simulation is checked BEFORE the approval gate (was after —
     // a simulated call to a gated tool used to create a real pending
