@@ -14,7 +14,7 @@ vi.mock('@/lib/api/authFetch', () => ({ authFetch: h.authFetch }));
 vi.mock('@/lib/tools/webSearchCore', () => ({ searchWithTenantKey: h.search }));
 
 import { webSearchHandler } from '@/lib/tools/webSearch';
-import { ToolNotConfiguredError, type ToolExecutionContext } from '@/lib/tools/types';
+import { ToolNotConfiguredError, ToolQuotaExceededError, type ToolExecutionContext } from '@/lib/tools/types';
 
 const ctx = (tenantId: string | null = 'client-tenant'): ToolExecutionContext => ({
   agentId: 'nova', requestId: 'r1', signal: new AbortController().signal, tenantId, missionId: null, taskId: null,
@@ -69,6 +69,22 @@ describe('browser side (window exists): goes through the authenticated route', (
     const err: any = await webSearchHandler({ query: 'q' }, ctx()).catch((e) => e);
     expect(err).toBeInstanceOf(ToolNotConfiguredError);
     expect(err.message).toBe('web.search needs a Gemini API key for this workspace — add one in Settings → AI Providers.');
+  });
+
+  it('QUOTA_EXCEEDED (HTTP 429) -> ToolQuotaExceededError carrying the readable sentence (M7-13c-2a-5)', async () => {
+    const msg = "Gemini's request limit for model gemini-flash-lite-latest was reached on this workspace's API key. Try again later, pin another model in Settings → AI Providers, or enable billing in Google AI Studio.";
+    h.authFetch.mockResolvedValue(reply(429, { success: false, error: { code: 'QUOTA_EXCEEDED', message: msg } }));
+    const err: any = await webSearchHandler({ query: 'q' }, ctx()).catch((e) => e);
+    expect(err).toBeInstanceOf(ToolQuotaExceededError);
+    expect(err).not.toBeInstanceOf(ToolNotConfiguredError);
+    expect(err.message).toBe(msg);
+  });
+
+  it('a server-side core ToolQuotaExceededError propagates unchanged (no HTTP involved)', async () => {
+    vi.unstubAllGlobals(); // server side: no window
+    h.search.mockRejectedValue(new ToolQuotaExceededError('limit reached'));
+    await expect(webSearchHandler({ query: 'q' }, ctx())).rejects.toBeInstanceOf(ToolQuotaExceededError);
+    expect(h.authFetch).not.toHaveBeenCalled();
   });
 
   it.each([

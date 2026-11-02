@@ -144,6 +144,17 @@ describe('failures carry a specific reason and a kind (deterministic ones are ta
     expect(NON_RETRYABLE_TOOL_FAILURES.has(r.failureKind!)).toBe(true);
   });
 
+  it('provider quota used up -> quota_exceeded, readable message preserved, non-retryable (M7-13c-2a-5)', async () => {
+    const msg = "Gemini's request limit for model gemini-flash-lite-latest was reached on this workspace's API key. Try again later, pin another model in Settings → AI Providers, or enable billing in Google AI Studio.";
+    vi.mocked(toolPlanner.plan).mockResolvedValue(planOf('web.search'));
+    vi.mocked(toolExecutor.execute).mockResolvedValue(fail('web.search', msg, 'quota_exceeded') as never);
+    const r = await decide();
+    expect(r.success).toBe(false);
+    expect(r.failureKind).toBe('quota_exceeded');
+    expect(r.error).toBe(msg);
+    expect(NON_RETRYABLE_TOOL_FAILURES.has(r.failureKind!)).toBe(true);
+  });
+
   it('permission denied -> non-retryable; an uncoded (transient) tool error stays retryable', async () => {
     vi.mocked(toolPlanner.plan).mockResolvedValue(planOf('web.search'));
     vi.mocked(toolExecutor.execute).mockResolvedValueOnce(fail('web.search', 'Agent "x" lacks permission(s): web', 'permission_denied') as never);

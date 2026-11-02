@@ -79,13 +79,13 @@ describe('a client tenant uses ITS OWN Gemini key', () => {
     expect(url).not.toMatch(/[?&]key=/);
   });
 
-  it('uses the tenant\'s pinned model, or the chat default when none is pinned', async () => {
+  it('uses the tenant\'s pinned model, or (none pinned) gemini-flash-lite-latest — the model chat already uses on the key (M7-13c-2a-5)', async () => {
     h.providerRows[0].model = 'gemini-pinned-1';
     await searchWithTenantKey(TENANT, 'q');
     expect(fetchMock.mock.calls[0][0]).toContain('/models/gemini-pinned-1:generateContent');
     h.providerRows[0].model = null;
     await searchWithTenantKey(TENANT, 'q');
-    expect(fetchMock.mock.calls[1][0]).toContain('/models/gemini-3.6-flash:generateContent');
+    expect(fetchMock.mock.calls[1][0]).toContain('/models/gemini-flash-lite-latest:generateContent');
   });
 
   it('another tenant\'s key is never used', async () => {
@@ -161,9 +161,12 @@ describe('Gemini responses are classified: bad key = deterministic, the rest sta
     expect(err.message).toContain(String(status));
   });
 
-  it('a plain HTTP 400 that is NOT about the key stays retryable-class (only API_KEY_INVALID is configuration)', async () => {
+  it('a plain HTTP 400 that is NOT about the key means "this model cannot serve the request": it hops, and when every model does that it is a not-configured error — never a retried plain error (hardening after M7-13c-2a-5 review)', async () => {
     fetchMock.mockResolvedValue(respond(400, { error: { message: 'Unable to process request' } }));
-    expect(await searchWithTenantKey(TENANT, 'q').catch((e) => e)).not.toBeInstanceOf(ToolNotConfiguredError);
+    const err: any = await searchWithTenantKey(TENANT, 'q').catch((e) => e);
+    expect(err).toBeInstanceOf(ToolNotConfiguredError);
+    expect(err.message).toContain('Gemini said: Unable to process request');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

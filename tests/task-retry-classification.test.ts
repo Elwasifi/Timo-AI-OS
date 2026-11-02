@@ -76,6 +76,7 @@ describe('deterministic failures: ONE attempt, specific stored reason', () => {
     ['permission_denied', 'Agent "nova-frontend" lacks permission(s): memory for tool "memory.search"'],
     ['planner_no_tenant', 'Tool planning needs a resolved tenant; none was available, so no AI call was made.'],
     ['not_configured', 'web.search needs a Gemini API key for this workspace — add one in Settings → AI Providers.'],
+    ['quota_exceeded', "Gemini's request limit for model gemini-flash-lite-latest was reached on this workspace's API key. Try again later, pin another model in Settings → AI Providers, or enable billing in Google AI Studio."],
   ])('%s -> decideTools called once, task failed with the exact reason, retries=0', async (failureKind, error) => {
     h.decide.mockResolvedValue(decision({ failureKind, error }));
     const result = await run();

@@ -15,7 +15,7 @@ import type {
   ToolRequest, ToolResultEnvelope, ToolExecutionEvent, ToolExecutionContext,
   ToolParamSchema, RegisteredTool, ToolErrorCode,
 } from './types';
-import { ToolNotImplementedError, ToolNotConfiguredError } from './types';
+import { ToolNotImplementedError, ToolNotConfiguredError, ToolQuotaExceededError } from './types';
 import { toolRegistry } from './registry';
 import { ensureBuiltinToolsRegistered } from './builtin-tools';
 import { permissionEngine } from './permissions';
@@ -249,6 +249,11 @@ class ToolExecutorImpl {
         // deterministic — retrying cannot add a key. Fail once, with the specific message.
         if (err instanceof ToolNotConfiguredError) {
           errorCode = 'not_configured';
+          break;
+        }
+        // M7-13c-2a-5: an exhausted provider quota does not clear by retrying — retrying only burns more of it.
+        if (err instanceof ToolQuotaExceededError) {
+          errorCode = 'quota_exceeded';
           break;
         }
 

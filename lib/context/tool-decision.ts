@@ -67,12 +67,13 @@ export type ToolFailureKind =
   | 'tool_not_found'
   | 'not_implemented' // placeholder tool: no real integration exists yet
   | 'not_configured' // the tool needs configuration that is missing/rejected (e.g. no API key for this workspace)
+  | 'quota_exceeded' // the provider's quota (e.g. Gemini free-tier requests per day) is used up: retrying only burns more
   | 'empty_result' // the tool ran but returned nothing usable (may differ on retry)
   | 'tool_error'; // anything else the tool reported
 
 /** Failures that are deterministic: retrying the same task cannot change the outcome. */
 export const NON_RETRYABLE_TOOL_FAILURES: ReadonlySet<ToolFailureKind> = new Set<ToolFailureKind>([
-  'no_tools_for_agent', 'no_match', 'planner_no_tenant', 'invalid_params', 'permission_denied', 'tool_not_found', 'not_implemented', 'not_configured',
+  'no_tools_for_agent', 'no_match', 'planner_no_tenant', 'invalid_params', 'permission_denied', 'tool_not_found', 'not_implemented', 'not_configured', 'quota_exceeded',
 ]);
 
 /** Text a tool "answer" must never consist of: it means the tool returned nothing real. */
@@ -349,6 +350,8 @@ function failureKindOfExecution(e: ToolExecutionRecord): ToolFailureKind {
       return 'not_implemented';
     case 'not_configured':
       return 'not_configured';
+    case 'quota_exceeded':
+      return 'quota_exceeded';
     default:
       return 'tool_error';
   }

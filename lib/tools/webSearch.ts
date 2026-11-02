@@ -11,7 +11,7 @@
 // "no Gemini API key configured" (and was retried 3 times).
 
 import { authFetch } from '@/lib/api/authFetch';
-import { ToolNotConfiguredError, type ToolHandler } from './types';
+import { ToolNotConfiguredError, ToolQuotaExceededError, type ToolHandler } from './types';
 import type { WebSearchResult } from './webSearchCore';
 
 export const webSearchHandler: ToolHandler = async (args, context) => {
@@ -42,5 +42,7 @@ export const webSearchHandler: ToolHandler = async (args, context) => {
   const message = json?.error?.message ?? `web.search failed (HTTP ${res.status}).`;
   // The route reports missing/rejected configuration as NOT_CONFIGURED: deterministic, never retried.
   if (json?.error?.code === 'NOT_CONFIGURED') throw new ToolNotConfiguredError(message);
+  // ... and an exhausted provider quota as QUOTA_EXCEEDED: also deterministic (M7-13c-2a-5).
+  if (json?.error?.code === 'QUOTA_EXCEEDED') throw new ToolQuotaExceededError(message);
   throw new Error(message);
 };

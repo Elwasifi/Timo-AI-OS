@@ -6,12 +6,13 @@
 //   - resolves the TENANT's own Gemini key with the service role (lib/tools/webSearchCore.ts) and returns ONLY
 //     the search result — never the key, a key fragment or the provider's raw response;
 //   - missing/rejected configuration -> 422 NOT_CONFIGURED (deterministic, the tool reports it as not_configured and
-//     does not retry); any other upstream problem -> 502 UPSTREAM_ERROR (transient, retried as before).
+//     does not retry); an exhausted provider quota -> 429 QUOTA_EXCEEDED (also not retried: retrying burns more of
+//     it); any other upstream problem -> 502 UPSTREAM_ERROR (transient, retried as before).
 
 import { NextResponse } from 'next/server';
 import { requireUser, isTenantMember } from '@/lib/auth/apiAuth';
 import { ok, fail, badRequest } from '@/lib/api/response';
-import { ToolNotConfiguredError } from '@/lib/tools/types';
+import { ToolNotConfiguredError, ToolQuotaExceededError } from '@/lib/tools/types';
 import { searchWithTenantKey } from '@/lib/tools/webSearchCore';
 
 export const runtime = 'nodejs';
@@ -39,6 +40,10 @@ export async function POST(req: Request) {
     } catch (err) {
       if (err instanceof ToolNotConfiguredError) {
         return NextResponse.json(fail('NOT_CONFIGURED', err.message, start), { status: 422 });
+      }
+      // M7-13c-2a-5: the provider's quota is used up — 429 with its own code (the sentence is already readable).
+      if (err instanceof ToolQuotaExceededError) {
+        return NextResponse.json(fail('QUOTA_EXCEEDED', err.message, start), { status: 429 });
       }
       // searchWithTenantKey scrubs the key from every message it throws.
       return NextResponse.json(fail('UPSTREAM_ERROR', err instanceof Error ? err.message : 'Search failed', start), { status: 502 });

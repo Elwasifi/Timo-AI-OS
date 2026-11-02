@@ -117,7 +117,7 @@ export interface ToolRequest {
  * agent does not have, a tool that does not exist or is a placeholder), so the
  * caller can fail fast with a specific reason instead of retrying it.
  */
-export type ToolErrorCode = 'missing_params' | 'invalid_params' | 'permission_denied' | 'tool_not_found' | 'not_implemented' | 'not_configured';
+export type ToolErrorCode = 'missing_params' | 'invalid_params' | 'permission_denied' | 'tool_not_found' | 'not_implemented' | 'not_configured' | 'quota_exceeded';
 
 /** M7-13c-2a: thrown by placeholder handlers (no real integration yet) so the executor can report a typed, non-retryable failure. */
 export class ToolNotImplementedError extends Error {
@@ -137,6 +137,20 @@ export class ToolNotConfiguredError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ToolNotConfiguredError';
+  }
+}
+
+/**
+ * M7-13c-2a-5: thrown when the provider says the account's QUOTA is used up (e.g. Gemini free-tier requests per day).
+ * Deterministic for as long as the quota lasts: retrying the same call only burns more of it, so the executor never
+ * retries it and the task fails on the first attempt. The message is the sentence shown to the user — readable, no raw
+ * provider JSON, never a secret. (A per-minute RATE limit is NOT this: that clears in seconds and stays a plain,
+ * retryable error.)
+ */
+export class ToolQuotaExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ToolQuotaExceededError';
   }
 }
 

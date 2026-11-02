@@ -111,6 +111,30 @@ describe('POST /api/tools/web-search — behaviour', () => {
     expect(text).not.toContain(KEY);
   });
 
+  it('Gemini quota exhausted (429 RESOURCE_EXHAUSTED) on every candidate -> 429 QUOTA_EXCEEDED with the readable sentence, no JSON, no key (M7-13c-2a-5)', async () => {
+    const quotaBody = JSON.stringify({ error: { code: 429, message: `You exceeded your current quota, please check your plan and billing details. key=${KEY}`, status: 'RESOURCE_EXHAUSTED' } });
+    fetchMock.mockResolvedValue(gemini(429, quotaBody));
+    const res = await call('u-member', { tenantId: T, query: 'jarvis' });
+    expect(res.status).toBe(429);
+    const text = await res.text();
+    const json = JSON.parse(text);
+    expect(json.success).toBe(false);
+    expect(json.error.code).toBe('QUOTA_EXCEEDED');
+    expect(json.error.message).toMatch(/^Gemini's request limit for models gemini-flash-lite-latest and gemini-3\.6-flash was reached on this workspace's API key\./);
+    expect(json.error.message).toMatch(/Settings → AI Providers/);
+    expect(json.error.message).not.toMatch(/[{}"]/);
+    expect(text).not.toContain(KEY);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // one hop, each model once
+  });
+
+  it('401/403/NOT_CONFIGURED behaviour is unchanged by the quota handling (a refused key does not hop models)', async () => {
+    fetchMock.mockResolvedValue(gemini(401, 'nope'));
+    const res = await call('u-member', { tenantId: T, query: 'jarvis' });
+    expect(res.status).toBe(422);
+    expect((await res.json()).error.code).toBe('NOT_CONFIGURED');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('Gemini 429/5xx -> 502 UPSTREAM_ERROR (transient, retried as before), key not echoed even if the provider body contains it', async () => {
     fetchMock.mockResolvedValue(gemini(503, `overloaded (key ${KEY})`));
     const res = await call('u-member', { tenantId: T, query: 'jarvis' });

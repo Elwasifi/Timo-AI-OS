@@ -105,6 +105,19 @@ describe('Demo (sandbox) web.search through the real route', () => {
     expect(r.error).not.toContain(KEY);
   }, 15000);
 
+  it('quota exhausted on Gemini (429) in Demo: ONE executor attempt, errorCode quota_exceeded, the readable sentence — never raw JSON — and the key is not in the envelope (M7-13c-2a-5)', async () => {
+    const body = JSON.stringify({ error: { code: 429, message: `You exceeded your current quota, please check your plan and billing details. (key ${KEY})`, status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.QuotaFailure', violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }] }] } });
+    fetchMock.mockResolvedValue({ ok: false, status: 429, statusText: 'Too Many Requests', text: async () => body });
+    const r = await search();
+    expect(r.ok).toBe(false);
+    expect(r.errorCode).toBe('quota_exceeded');
+    expect(r.retries).toBe(1);
+    expect(r.error).toMatch(/^Gemini's request limit for models gemini-flash-lite-latest and gemini-3\.6-flash was reached on this workspace's API key\./);
+    expect(r.error).not.toMatch(/[{}"]/);
+    expect(JSON.stringify(r)).not.toContain(KEY);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // one hop, each model once — not 4 attempts x 2 models
+  });
+
   it('a user who is not a member of the tenant cannot use its key at all (403 from the route; Gemini never called)', async () => {
     h.user = 'u-stranger';
     const r = await search({ retries: 0 });
