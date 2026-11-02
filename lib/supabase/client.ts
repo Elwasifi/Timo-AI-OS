@@ -207,6 +207,18 @@ export function boundedNavigatorLock<R>(name: string, acquireTimeout: number, fn
 const isServer = typeof window === 'undefined';
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
+// M7-13g: boundedNavigatorLock wraps the SDK's own navigatorLock, which calls
+// `navigator.locks.request(...)`. That only exists where the Web Locks API does
+// (every browser; Node >= 24.5). The no-service-role fallback below (anon key)
+// is also reachable in plain Node — tests, scripts, a server started without
+// SUPABASE_SERVICE_ROLE_KEY — and on a Node without Web Locks (e.g. v22) the
+// wrapped call throws "Cannot read properties of undefined (reading 'request')"
+// during GoTrueClient's own initialize(), surfacing as unhandled rejections. This
+// had been claimed "harmless" in M7-13b; it was not. So the custom lock is passed
+// ONLY when Web Locks exist; otherwise the option is left out and auth-js applies
+// its own default (lockNoOp outside a browser) — exactly the pre-M7-13b behavior.
+const hasWebLocks = typeof navigator !== 'undefined' && !!navigator.locks;
+
 export const supabase =
   isServer && serviceRoleKey
     ? createClient(supabaseUrl, serviceRoleKey, {
@@ -214,11 +226,12 @@ export const supabase =
         global: { fetch: timeoutFetch },
       })
     : createClient(supabaseUrl, supabaseAnonKey, {
-        // boundedNavigatorLock only matters in the browser (navigator.locks
-        // doesn't exist in Node) — the server branch above never reaches
-        // here, and even the no-service-role server fallback (anon key,
-        // no session to lock around) is harmless to apply it to.
-        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, lock: boundedNavigatorLock },
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+          ...(hasWebLocks ? { lock: boundedNavigatorLock } : {}),
+        },
         // M7-13e: every auth/REST/functions request gets a ceiling (see timeoutFetch.ts).
         global: { fetch: timeoutFetch },
       });

@@ -16,6 +16,7 @@
 // Also provides an append-only activity feed via runtime_activity.
 
 import { supabase } from '@/lib/supabase/client';
+import { logger } from '@/lib/utils/logger';
 import type { TimelineEntry } from './types';
 
 // ---- Types ----
@@ -160,6 +161,9 @@ export async function updateRuntimeState(
   }
   const { data, error } = await query.select('*').maybeSingle();
 
+  // M7-13g: `data === null` with no error is the legitimate optimistic-lock miss
+  // described above; only a real error is worth a warning.
+  if (error) logger.systemWarn(`runtime_state update failed: ${error.message}`);
   if (error || !data) return null;
   return {
     currentMissionId: data.current_mission_id,
@@ -188,7 +192,11 @@ export interface AddRuntimeActivityInput {
 }
 
 export async function addRuntimeActivity(input: AddRuntimeActivityInput): Promise<void> {
-  await supabase.from('runtime_activity').insert({
+  // M7-13g: postgrest returns failures (including a request timeout) as
+  // `{ error }` instead of throwing, and this used to discard the result — so a
+  // failed or timed-out activity write was completely invisible. Still does not
+  // throw (existing callers rely on that); it just stops being silent.
+  const { error } = await supabase.from('runtime_activity').insert({
     event_type: input.eventType,
     title: input.title,
     detail: input.detail ?? '',
@@ -199,6 +207,7 @@ export async function addRuntimeActivity(input: AddRuntimeActivityInput): Promis
     status: input.status ?? null,
     metadata: input.metadata ?? {},
   });
+  if (error) logger.systemWarn(`runtime_activity insert failed (${input.eventType}): ${error.message}`);
 }
 
 /**

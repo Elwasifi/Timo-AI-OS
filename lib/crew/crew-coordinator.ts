@@ -14,6 +14,7 @@ import { route, classifyTask } from '@/lib/ai/router';
 import { loadSettings } from '@/lib/settings/settings-service';
 import { ConversationService } from '@/lib/ai/conversation-service';
 import { logger } from '@/lib/utils/logger';
+import { traceStep } from '@/lib/utils/sendTrace';
 import { useOrchestrationStore } from '@/stores/orchestrationStore';
 import { executeN8nAction, isN8nRequest } from './n8n-action-handler';
 import { delegateManagerTask, selectWorkerForManager } from './manager-delegation';
@@ -125,6 +126,7 @@ export class CrewCoordinator {
     options?: { announce?: boolean; stream?: boolean; isSimulation?: boolean; isVoice?: boolean }
   ): Promise<{ routing: RoutingResult; response: string; task: TaskRecord }> {
     logger.routing(`Routing input: "${input.slice(0, 60)}"`);
+    traceStep('routing begin');
     const agents = this.registry.getAll();
     const { routing, execution, task } = await this.engine.route(input, agents);
     logger.routing(`Routed to ${routing.selectedAgentName} (${Math.round(routing.confidence * 100)}%)`);

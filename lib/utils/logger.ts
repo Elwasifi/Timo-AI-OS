@@ -57,6 +57,7 @@ export const logger = {
 
   error: (message: string, data?: unknown) => log('error', 'error', message, data),
   system: (message: string, data?: unknown) => log('info', 'system', message, data),
+  systemWarn: (message: string, data?: unknown) => log('warn', 'system', message, data),
 
   n8n: (message: string, data?: unknown) => log('info', 'n8n', message, data),
   n8nDebug: (message: string, data?: unknown) => log('debug', 'n8n', message, data),

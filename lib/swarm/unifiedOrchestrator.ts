@@ -29,6 +29,8 @@ import { route } from '@/lib/ai/router';
 import { chatWithFallback } from '@/lib/ai/ai-provider';
 import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { ConversationService } from '@/lib/ai/conversation-service';
+import { createRuntimeWriteChain } from './runtimeWriteChain';
+import { traceStep } from '@/lib/utils/sendTrace';
 import type { OrchestratorResult, PipelineType } from './executionTypes';
 import type { Mission } from './types';
 import type { RoutingResult, TaskRecord } from '@/types';
@@ -363,6 +365,14 @@ export async function orchestrate(
   options: OrchestrateOptions,
 ): Promise<OrchestrateResult> {
   const startTime = Date.now();
+
+  // M7-13g: runtime_activity / runtime_state bookkeeping must never gate the
+  // reply (see runtimeWriteChain.ts). One ordered background chain per request.
+  const runtimeWrites = createRuntimeWriteChain();
+  const emitBg = (event: Parameters<typeof emitRuntimeEvent>[0]) =>
+    runtimeWrites.enqueue(`event:${event.eventType}`, () => emitRuntimeEvent(event));
+  const stateBg = (patch: Parameters<typeof updateRuntimeState>[0]) =>
+    runtimeWrites.enqueue(`state:${patch.executionState ?? 'patch'}`, () => updateRuntimeState(patch));
   const opts: OrchestrateOptions = {
     announce: options.announce ?? true,
     stream: options.stream ?? false,
@@ -387,7 +397,7 @@ export async function orchestrate(
   }
 
   // 2. Emit thinking event — Temo is analyzing the request
-  await emitRuntimeEvent({
+  emitBg({
     eventType: 'thinking',
     agentId: 'temo',
     workerId: null,
@@ -406,7 +416,7 @@ export async function orchestrate(
   });
 
   // 3. Emit routing event — decision made, routing to pipeline
-  await emitRuntimeEvent({
+  emitBg({
     eventType: 'routing',
     agentId: 'temo',
     workerId: null,
@@ -423,7 +433,7 @@ export async function orchestrate(
   });
 
   // 4. Update runtime state to routing
-  await updateRuntimeState({
+  stateBg({
     executionState: 'routing',
   });
 
@@ -442,10 +452,10 @@ export async function orchestrate(
     routing = result.routing;
     task = result.task;
 
-    await updateRuntimeState({ executionState: 'completed' });
+    stateBg({ executionState: 'completed' });
 
     // Emit synthesizing event — Temo is composing the final response
-    await emitRuntimeEvent({
+    emitBg({
       eventType: 'synthesizing',
       agentId: routing?.selectedAgentId ?? 'temo',
       workerId: null,
@@ -458,7 +468,7 @@ export async function orchestrate(
     });
 
     // Emit speaking event — agent is delivering the response
-    await emitRuntimeEvent({
+    emitBg({
       eventType: 'speaking',
       agentId: routing?.selectedAgentId ?? 'temo',
       workerId: null,
@@ -471,7 +481,7 @@ export async function orchestrate(
     });
 
     // Emit completed event
-    await emitRuntimeEvent({
+    emitBg({
       eventType: 'completed',
       agentId: routing?.selectedAgentId ?? 'temo',
       workerId: null,
@@ -486,6 +496,9 @@ export async function orchestrate(
   } else {
     let missionFailed = false;
     try {
+      // The mission pipeline writes the same runtime_state row; let the queued prologue writes land first,
+      // but never wait more than 3s for them (they are bookkeeping, not part of the mission).
+      await runtimeWrites.settledWithin(3_000);
       const result = await runMissionPipeline(userRequest, opts.tenantId, opts.isSimulation ?? false, options.onMissionProgress);
       response = result.response;
       missionId = result.missionId;
@@ -493,7 +506,7 @@ export async function orchestrate(
       timeline = result.timeline;
 
       // Emit synthesizing event — building response from mission results
-      await emitRuntimeEvent({
+      emitBg({
         eventType: 'synthesizing',
         agentId: 'temo',
         workerId: null,
@@ -506,7 +519,7 @@ export async function orchestrate(
       });
 
       // Emit speaking event — Temo is delivering the response
-      await emitRuntimeEvent({
+      emitBg({
         eventType: 'speaking',
         agentId: 'temo',
         workerId: null,
@@ -519,7 +532,7 @@ export async function orchestrate(
       });
 
       // Emit completed event
-      await emitRuntimeEvent({
+      emitBg({
         eventType: 'completed',
         agentId: 'temo',
         workerId: null,
@@ -537,7 +550,7 @@ export async function orchestrate(
       response = `I encountered an issue processing your mission: ${message}`;
 
       // Emit failed event
-      await emitRuntimeEvent({
+      emitBg({
         eventType: 'failed',
         agentId: 'temo',
         workerId: null,

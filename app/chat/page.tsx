@@ -34,6 +34,9 @@ import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { ConversationService, type MessageRecord } from '@/lib/ai/conversation-service';
 import { orchestrate } from '@/lib/swarm';
 import { CHAT_INACTIVITY_TIMEOUT_MS, MISSION_INACTIVITY_TIMEOUT_MS, ChatWatchdogError, presentChatFailure } from '@/lib/chat/failurePresentation';
+import { ensureConversationBounded } from '@/lib/chat/ensureConversation';
+import { logger } from '@/lib/utils/logger';
+import { startSendTrace, traceStep, endSendTrace } from '@/lib/utils/sendTrace';
 import { useAuthStore } from '@/stores/authStore';
 import type { AgentAnimationState, TimelineEvent, ActivityFeedItem } from '@/types';
 import { ClientTime } from '@/components/temo/client-time';
@@ -138,6 +141,8 @@ export default function ChatPage() {
   const touchActivity = () => { lastActivityRef.current = Date.now(); };
   // True once the in-flight request turned out to be a mission (see MISSION_INACTIVITY_TIMEOUT_MS).
   const missionModeRef = useRef(false);
+  // M7-13g: log the first streamed token once per send (see lib/utils/sendTrace.ts).
+  const firstTokenTracedRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -289,6 +294,10 @@ export default function ChatPage() {
       },
       onStreamDelta: (agentId, delta, full) => {
         lastActivityRef.current = Date.now();
+        if (!firstTokenTracedRef.current) {
+          firstTokenTracedRef.current = true;
+          traceStep('first token');
+        }
         setMessages((prev) =>
           prev.map((m) =>
             m.streaming && m.role === 'assistant'
@@ -332,7 +341,10 @@ export default function ChatPage() {
     // existed (stops speechSynthesis, aborts recognition, resets
     // isProcessingVoice) — it just wasn't called from here. Safe to call
     // unconditionally: a no-op when nothing is speaking/listening.
+    startSendTrace();
+    firstTokenTracedRef.current = false;
     voiceManager.interrupt();
+    traceStep('voice interrupted');
 
     const userMsg: Message = {
       id: `u${Date.now()}`,
@@ -342,18 +354,6 @@ export default function ChatPage() {
     };
     setMessages((m) => [...m, userMsg]);
     setInput('');
-
-    // Ensure a conversation is active for persistence. A new conversation's
-    // id is written to localStorage immediately (M1-05) — not just held in
-    // crewCoordinator's in-memory field — so it survives a refresh right
-    // after the very first message, not only on subsequent visits.
-    if (!crewCoordinator.getConversationId()) {
-      const newId = await crewCoordinator.startConversation(text.slice(0, 40), 'temo');
-      const tenantId = useAuthStore.getState().currentTenantId;
-      if (newId && tenantId && typeof window !== 'undefined') {
-        window.localStorage.setItem(conversationStorageKey(tenantId), newId);
-      }
-    }
 
     // Clear previous timeline and start routing.
     // M6-07: activeWorkerId was never reset between requests anywhere in
@@ -433,6 +433,43 @@ export default function ChatPage() {
 
     // Run the unified orchestrator — the single entry point for all AI execution
     try {
+      // Ensure a conversation is active for persistence. A new conversation's
+      // id is written to localStorage as soon as it exists (M1-05) — not just
+      // held in crewCoordinator's in-memory field — so it survives a refresh
+      // right after the very first message, not only on subsequent visits.
+      //
+      // M7-13g: this used to be a bare `await startConversation()` placed
+      // BEFORE the thinking indicator and the watchdog, so a stalled insert
+      // (stuck auth lock + token refresh + REST) left the chat silent and
+      // unguarded. It now runs after both, waits at most 8s, and on
+      // timeout/failure the reply continues without it. Trade-off for that
+      // single turn: with no conversation id nothing is persisted for it (the
+      // user message is lost; the assistant message only if the late insert
+      // finishes first). The in-flight start is shared, so it can never create
+      // a duplicate conversation. See lib/chat/ensureConversation.ts.
+      const conversation = await Promise.race([
+        ensureConversationBounded(
+          {
+            getConversationId: () => crewCoordinator.getConversationId(),
+            startConversation: (title, agentId) => crewCoordinator.startConversation(title, agentId),
+            onStarted: (id) => {
+              const tenantId = useAuthStore.getState().currentTenantId;
+              if (tenantId && typeof window !== 'undefined') {
+                window.localStorage.setItem(conversationStorageKey(tenantId), id);
+              }
+            },
+          },
+          text.slice(0, 40),
+        ),
+        watchdog,
+      ]);
+      traceStep(`conversation: ${conversation.status}`);
+      if (conversation.status === 'timeout' || conversation.status === 'failed') {
+        logger.systemWarn(
+          `Conversation start ${conversation.status === 'timeout' ? 'timed out' : 'failed'}; answering this turn without saving it (later turns are saved once the conversation exists).`,
+        );
+      }
+
       const pending = orchestrate(text, {
         announce: true,
         stream: true,
@@ -470,6 +507,7 @@ export default function ChatPage() {
       });
       pending.catch(() => {}); // a late failure after the watchdog fired must not become an unhandled rejection
       const result = await Promise.race([pending, watchdog]);
+      traceStep('final reply');
       setMissionProgress(null);
       const routing = result.routing;
       const response = result.response;
@@ -592,6 +630,7 @@ export default function ChatPage() {
     } catch (err) {
       // Once the mission pipeline started, ANY error (watchdog or not) gets the
       // Missions-page message and NO Retry: Retry would relaunch the mission.
+      traceStep('send failed');
       const failure = presentChatFailure(err, missionModeRef.current);
       setMessages((m) =>
         m.map((msg) =>
@@ -610,6 +649,7 @@ export default function ChatPage() {
       useOrchestrationStore.getState().updateAgentStatus('temo', 'available', 'Idle');
     } finally {
       clearInterval(watchdogTimer);
+      endSendTrace();
     }
   };
 
