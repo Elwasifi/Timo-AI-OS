@@ -43,6 +43,8 @@ import {
 } from './missionTimeline';
 import { emitRuntimeEvent } from './runtimeStore';
 import { findWorkerForTask, resolveRoleId } from './workerRouter';
+import { resolvedProgress } from './missionOutcome';
+import { getTenantExecutionMode } from '@/lib/governance/executionMode';
 import type { MissionTask, Mission, MissionObjective } from './types';
 import type { ExecutionResult, ExecutionStep, ExecutionContext, PriorTaskResult, ManagerContext } from './executionTypes';
 import type { AgentRecord } from '@/lib/agents/types';
@@ -108,6 +110,23 @@ export class NonRetryableTaskError extends Error {
     super(message);
     this.name = 'NonRetryableTaskError';
   }
+}
+
+/** M7-13c-2b-1: true when a tool result (single envelope, or a chain of them) is a simulated one. */
+function envelopeSimulated(r: unknown): boolean {
+  if (!r || typeof r !== 'object') return false;
+  const o = r as { simulated?: unknown; results?: unknown };
+  if (o.simulated === true) return true;
+  return Array.isArray(o.results) && o.results.some(envelopeSimulated);
+}
+
+/** M7-13c-2b-1: the execution mode a (real, non-simulated) tool result reports, when it carries one. */
+function envelopeMode(r: unknown): string | undefined {
+  if (!r || typeof r !== 'object') return undefined;
+  const o = r as { executionMode?: unknown; results?: unknown };
+  if (typeof o.executionMode === 'string') return o.executionMode;
+  if (Array.isArray(o.results)) for (const x of o.results) { const m = envelopeMode(x); if (m) return m; }
+  return undefined;
 }
 
 // ---- Timeout helper ----
@@ -402,7 +421,8 @@ export async function executeTask(
         if (toolResult.failureKind && NON_RETRYABLE_TOOL_FAILURES.has(toolResult.failureKind)) {
           throw new NonRetryableTaskError(failureMessage, toolResult.failureKind);
         }
-        throw new Error(failureMessage);
+        // M7-13c-2b-1: carry the kind on the error too, so the failed task's stored record can say what it was.
+        throw Object.assign(new Error(failureMessage), { failureKind: toolResult.failureKind });
       } else {
         // No tool action needed — existing LLM/worker execution, unchanged.
 
@@ -602,9 +622,33 @@ export async function executeTask(
       // Success — record completion
       const durationMs = Date.now() - startTime;
 
+      // M7-13c-2b-1: structured per-task report data (who ran it, the method, the tools, whether it was simulated)
+      // so the mission outcome and both report renderers read facts, not text. Additive jsonb — no migration.
+      // "Simulated" comes from the tool results' structured flag; the mode is the one this task was supposed to run
+      // in (a simulated result while that mode is 'live' is counted as an anomaly, not a success).
+      const fromTool = toolResult.shouldUseTool && toolResult.success && !!toolResult.toolAnswer;
+      const toolIdsUsed = fromTool ? Array.from(new Set(toolResult.executions.map((e) => e.toolId))) : [];
+      const simulated = fromTool && toolResult.executions.some((e) => envelopeSimulated(e.result));
+      let reportMode: string | undefined;
+      if (simulated) {
+        reportMode = mission.isSimulation ? 'simulation' : await getTenantExecutionMode(mission.tenantId);
+      } else if (fromTool) {
+        reportMode = toolResult.executions.map((e) => envelopeMode(e.result)).find(Boolean);
+      } else if (mission.isSimulation) {
+        reportMode = 'simulation';
+      }
+      const resultData: Record<string, unknown> = {
+        output,
+        steps: steps.map((s) => ({ step: s.step, status: s.status, detail: s.detail })),
+        tools: toolIdsUsed,
+        ...(simulated ? { simulated: true } : {}),
+        ...(reportMode ? { executionMode: reportMode } : {}),
+        agent: { manager: managerId, worker: workerId },
+      };
+
       await updateTask(task.id, {
         status: 'completed',
-        result: { output, steps: steps.map((s) => ({ step: s.step, status: s.status, detail: s.detail })) },
+        result: resultData,
         completedAt: new Date().toISOString(),
       });
 
@@ -657,11 +701,14 @@ export async function executeTask(
         delegated: workerId !== null,
         status: 'completed',
         output,
-        result: { output, steps: steps.map((s) => ({ step: s.step, status: s.status, detail: s.detail })) },
+        result: resultData,
         error: null,
         retries,
         durationMs,
         steps,
+        tools: toolIdsUsed,
+        ...(simulated ? { simulated: true } : {}),
+        ...(reportMode ? { executionMode: reportMode } : {}),
       };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown execution error';
@@ -696,9 +743,19 @@ export async function executeTask(
       } else {
         // Exhausted retries — fail gracefully
         const durationMs = Date.now() - startTime;
+        // M7-13c-2b-1: what kind of failure, whether it was deterministic (never retried), and how many attempts were
+        // made — stored beside error_message (whose text is unchanged). No reader of mission_tasks.result needs an
+        // 'output' key (checked), so this lives in `result`.
+        const failureKind = (err as { failureKind?: string }).failureKind
+          ?? (/timed out/i.test(errorMessage) ? 'timeout' : 'execution_error');
+        const failureResult: Record<string, unknown> = {
+          failure: { kind: failureKind, deterministic: nonRetryable, attempts: retries },
+          agent: { manager: managerId, worker: workerId },
+        };
         await updateTask(task.id, {
           status: 'failed',
           errorMessage,
+          result: failureResult,
           completedAt: new Date().toISOString(),
           retries: retries - 1,
         });
@@ -746,7 +803,7 @@ export async function executeTask(
           delegated: workerId !== null,
           status: 'failed',
           output: '',
-          result: {},
+          result: failureResult,
           error: errorMessage,
           retries: retries - 1,
           durationMs,
@@ -787,6 +844,9 @@ export async function executeMissionTasks(
 ): Promise<ExecutionResult[]> {
   const results: ExecutionResult[] = [];
   const priorResults: PriorTaskResult[] = [];
+
+  // M7-13c-2b-1: tasks already finished before this run count as resolved for the shared progress figure.
+  const preResolved = tasks.filter((t) => t.status === 'completed' || t.status === 'cancelled').length;
 
   // Execute tasks sequentially (parallel execution is Phase 4)
   for (const task of tasks) {
@@ -836,17 +896,21 @@ export async function executeMissionTasks(
     // unconditionally overwrote this write anyway. Removed as dead-weight
     // work using a divergent formula that never actually won; these
     // variables are kept only for the timeline event's narrative detail.
+    // M7-13c-2b-1: the same resolved / total figure recalculateProgress() writes (lib/swarm/missionOutcome.ts
+    // resolvedProgress) — this used to be completed / total, a third formula that disagreed with the other two.
+    // A task that failed IS resolved; one whose claim was lost to another executor (status 'cancelled' here) is not.
     const completedCount = results.filter((r) => r.status === 'completed').length;
     const totalCount = tasks.length;
-    const progress = Math.round(((completedCount) / totalCount) * 100);
+    const resolvedCount = preResolved + results.filter((r) => r.status === 'completed' || r.status === 'failed').length;
+    const progress = resolvedProgress(resolvedCount, totalCount);
     await recordEvent(mission.id, 'mission_updated', {
       entityType: 'mission',
       entityId: mission.id,
       title: `Mission progress: ${progress}%`,
-      detail: `${completedCount}/${totalCount} tasks completed`,
-      metadata: { progress, completed: completedCount, total: totalCount },
+      detail: `${resolvedCount}/${totalCount} tasks finished`,
+      metadata: { progress, resolved: resolvedCount, completed: completedCount, total: totalCount },
     });
-    onProgress?.(`Mission progress: ${progress}%`, `${completedCount}/${totalCount} tasks completed`);
+    onProgress?.(`Mission progress: ${progress}%`, `${resolvedCount}/${totalCount} tasks finished`);
 
     // Roll the mission's own status to a terminal value once every task has
     // resolved — this loop only ever wrote progress, never status, so a

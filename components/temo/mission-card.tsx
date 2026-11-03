@@ -4,6 +4,7 @@ import { motion } from 'framer-motion';
 import { Target, Clock, Zap } from 'lucide-react';
 import { ProgressBar, DepartmentBadge } from './primitives';
 import { cn } from '@/lib/utils';
+import { missionStatusDisplay } from '@/lib/swarm/missionStatusDisplay';
 
 // Mirrors lib/swarm/types.ts's real MissionStatus 1:1 (not a lossy 5-bucket
 // subset) so every status the Mission Engine can actually produce renders
@@ -25,18 +26,6 @@ export type Mission = {
   currentStep?: number;
 };
 
-const STATUS_CONFIG: Record<MissionCardStatus, { color: string; label: string }> = {
-  pending: { color: '#F97316', label: 'Pending' },
-  planning: { color: '#F97316', label: 'Planning' },
-  ready: { color: '#EAB308', label: 'Ready' },
-  executing: { color: '#00F3FF', label: 'Executing' },
-  reviewing: { color: '#A855F7', label: 'Reviewing' },
-  completed: { color: '#10B981', label: 'Completed' },
-  failed: { color: '#EF4444', label: 'Failed' },
-  cancelled: { color: '#64748B', label: 'Cancelled' },
-  paused: { color: '#94A3B8', label: 'Paused' },
-};
-
 function formatElapsed(ms?: number): string {
   if (!ms) return '--';
   const s = Math.floor(ms / 1000);
@@ -48,7 +37,8 @@ function formatElapsed(ms?: number): string {
 }
 
 export function MissionCard({ mission, index = 0, onClick }: { mission: Mission; index?: number; onClick?: () => void }) {
-  const statusConf = STATUS_CONFIG[mission.status];
+  // M7-13c-2b-1: never index by the raw status — a status this card has not heard of gets a neutral look, not a TypeError.
+  const statusConf = missionStatusDisplay(mission.status);
   const accentColor = mission.managerColor ?? statusConf.color;
 
   return (

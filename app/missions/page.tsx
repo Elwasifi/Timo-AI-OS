@@ -9,6 +9,7 @@ import { EmptyState, GlassPanel } from '@/components/temo/primitives';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { cn } from '@/lib/utils';
+import { isEndedMissionStatus } from '@/lib/swarm/missionStatusDisplay';
 
 const STATUS_TABS = ['All', 'Active', 'Pending', 'Completed', 'Failed'] as const;
 
@@ -38,7 +39,8 @@ export default function MissionsPage() {
 
   const cardData: MissionCardData[] = missions.map((m) => {
     const startedAt = new Date(m.createdAt).getTime();
-    const endedAt = ['completed', 'failed', 'cancelled'].includes(m.status)
+    // M7-13c-2b-1: any status that is not a still-going one counts as ended, so an unrecognised status never keeps the clock ticking.
+    const endedAt = isEndedMissionStatus(m.status)
       ? new Date(m.updatedAt).getTime()
       : Date.now();
     return {

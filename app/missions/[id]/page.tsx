@@ -10,6 +10,7 @@ import { authFetch } from '@/lib/api/authFetch';
 import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { missionStatusDisplay } from '@/lib/swarm/missionStatusDisplay';
 import type { Mission, MissionObjective, MissionTask, TimelineEntry, Lesson } from '@/lib/swarm/types';
 
 const NON_TERMINAL_MISSION_STATUSES: Mission['status'][] = ['pending', 'planning', 'ready', 'executing', 'reviewing', 'paused'];
@@ -165,7 +166,8 @@ function MissionDetail({
   onRefetch: () => void;
 }) {
   const { mission, objectives, tasks, timeline, lessons } = data;
-  const accent = STATUS_COLOR[mission.status] ?? '#00F3FF';
+  // M7-13c-2b-1: an unrecognised mission status gets the neutral colour, not the "executing" cyan.
+  const accent = missionStatusDisplay(mission.status).color;
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const canCancel = NON_TERMINAL_MISSION_STATUSES.includes(mission.status);

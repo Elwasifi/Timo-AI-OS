@@ -71,6 +71,12 @@ export interface ExecutionResult {
   retries: number;
   durationMs: number;
   steps: ExecutionStep[];
+  /** M7-13c-2b-1: tool ids the task used (tool branch only). */
+  tools?: string[];
+  /** M7-13c-2b-1: the result came from a simulated tool call (see lib/swarm/missionOutcome.ts for how it is counted). */
+  simulated?: boolean;
+  /** M7-13c-2b-1: the mode the task was supposed to run in ('live' | 'sandbox' | 'simulation'), when known. */
+  executionMode?: string;
 }
 
 export interface ExecutionStep {

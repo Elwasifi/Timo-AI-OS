@@ -17,7 +17,7 @@
 import { makeDecision } from './decisionEngine';
 import { launchMission } from './missionEngine';
 import { executeMissionTasks } from './executionLayer';
-import { updateMission, getTimeline } from './missionService';
+import { getTimeline, getFullMission } from './missionService';
 import { recordEvent } from './missionTimeline';
 import {
   updateRuntimeState,
@@ -31,8 +31,10 @@ import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { ConversationService } from '@/lib/ai/conversation-service';
 import { createRuntimeWriteChain } from './runtimeWriteChain';
 import { traceStep } from '@/lib/utils/sendTrace';
-import type { OrchestratorResult, PipelineType } from './executionTypes';
-import type { Mission } from './types';
+import { computeMissionOutcome, executionStateOf, type MissionOutcome } from './missionOutcome';
+import { buildMissionResponse } from './missionMessages';
+import type { OrchestratorResult, PipelineType, ExecutionResult } from './executionTypes';
+import type { MissionTask } from './types';
 import type { RoutingResult, TaskRecord } from '@/types';
 
 // M6-03: the mission pipeline (launchMission + executeMissionTasks) has no
@@ -297,19 +299,10 @@ async function runMissionPipeline(
 
   const executionResults = await executeMissionTasks(mission, tasks, objectives, onProgress);
 
-  // 3. Determine final mission status
-  const completed = executionResults.filter((r) => r.status === 'completed');
-  const failed = executionResults.filter((r) => r.status === 'failed');
-  const allDone = completed.length + failed.length === tasks.length;
-
-  let finalStatus = mission.status;
-  if (allDone) {
-    finalStatus = failed.length === 0 ? 'completed' : (completed.length > 0 ? 'completed' : 'failed');
-    await updateMission(mission.id, {
-      status: finalStatus,
-      progress: 100,
-    });
-  }
+  // 3. The mission's terminal status was already decided and written by recalculateProgress() (after every task,
+  //    via computeMissionOutcome) — this function does NOT decide it again (M7-13c-2b-1: one rule, one writer).
+  //    It reads the resulting task state and builds the report from the same outcome function.
+  const outcome = await readMissionOutcome(mission.id, tasks, executionResults);
 
   // 4. Fetch final timeline
   const timeline = await getTimeline(mission.id);
@@ -319,16 +312,28 @@ async function runMissionPipeline(
   // — if a different mission has since claimed the "current" slot, this
   // stale write is a no-op rather than clobbering the newer mission's
   // live state with this mission's final numbers.
-  const execState: ExecutionState = failed.length === 0 ? 'completed' : 'failed';
+  const execState: ExecutionState = executionStateOf(outcome);
   await updateRuntimeState({
     currentMissionId: mission.id,
     executionState: execState,
     runningTaskIds: [],
-    missionProgress: 100,
+    missionProgress: outcome.progress,
   }, mission.id);
 
   // 6. Build the synthesized response from execution results
-  const response = buildMissionResponse(mission, executionResults, failed.length > 0);
+  const response = buildMissionResponse(outcome, { detail: 'brief', title: mission.title });
+
+  // M7-13c-2b-1: the final reply used to exist only in the chat page's React state, so a reload lost it. Persist it
+  // like the "Mission started" line above — fire-and-forget; a failure here must never fail the mission.
+  if (conversationId) {
+    try {
+      ConversationService.addMessage(conversationId, 'assistant', response, 'temo').catch((e) =>
+        console.error('[orchestrator] persist mission reply:', e),
+      );
+    } catch (e) {
+      console.error('[orchestrator] persist mission reply:', e);
+    }
+  }
 
   return {
     response,
@@ -338,55 +343,45 @@ async function runMissionPipeline(
   };
 }
 
-// ---- Response Synthesis ----
+// ---- Mission outcome (read side) ----
 
-function buildMissionResponse(
-  mission: Mission,
-  results: OrchestratorResult['execution'],
-  hasFailures: boolean,
-): string {
-  if (!results || results.length === 0) {
-    return `Mission "${mission.title}" was created but no tasks were executed.`;
-  }
-
-  const completed = results.filter((r) => r.status === 'completed');
-  const failed = results.filter((r) => r.status === 'failed');
-
-  // Temo returns only the final synthesized result — the last completed
-  // task's output. Earlier task outputs were already threaded into the
-  // review/synthesis step via priorResults, so they are incorporated into
-  // the final output and should not be repeated.
-  const finalResult = completed[completed.length - 1];
-
-  const sections: string[] = [];
-
-  sections.push(`## Mission: ${mission.title}`);
-  sections.push(`**Objective:** ${mission.objective}`);
-  sections.push(`**Complexity:** ${mission.estimatedComplexity} | **Priority:** ${mission.priority}`);
-  sections.push('');
-
-  if (finalResult) {
-    sections.push(finalResult.output);
-  } else {
-    sections.push('No tasks completed successfully.');
-  }
-
-  sections.push('');
-
-  if (failed.length > 0) {
-    sections.push(`### Failed Tasks (${failed.length})`);
-    for (const r of failed) {
-      sections.push(`- ${r.managerName}: ${r.error}`);
+/**
+ * Builds the mission outcome from the tasks as they are NOW in the database (recalculateProgress has already
+ * written the status from the same computeMissionOutcome). If the mission cannot be read back, falls back to the
+ * in-memory results of this run.
+ */
+async function readMissionOutcome(
+  missionId: string,
+  launchedTasks: MissionTask[],
+  results: ExecutionResult[],
+): Promise<MissionOutcome> {
+  try {
+    const full = await getFullMission(missionId);
+    if (full.mission && full.tasks.length > 0) {
+      return computeMissionOutcome(full.tasks, {
+        missionStatus: full.mission.status,
+        missionCancelled: full.mission.status === 'cancelled',
+      });
     }
-    sections.push('');
+  } catch (e) {
+    console.error('[orchestrator] could not read the mission back; using this run\'s results', e);
   }
-
-  if (hasFailures) {
-    sections.push('---');
-    sections.push('Some tasks could not be completed. The mission completed with partial results.');
-  }
-
-  return sections.join('\n');
+  const byId = new Map(results.map((r) => [r.taskId, r]));
+  return computeMissionOutcome(
+    launchedTasks.map((t) => {
+      const r = byId.get(t.id);
+      return {
+        id: t.id,
+        title: t.title,
+        status: r ? r.status : t.status,
+        result: r ? { ...r.result, ...(r.simulated ? { simulated: true } : {}), ...(r.executionMode ? { executionMode: r.executionMode } : {}) } : t.result,
+        errorMessage: r ? r.error : t.errorMessage,
+        assignedManager: r?.managerId ?? t.assignedManager,
+        assignedWorker: r?.workerId ?? t.assignedWorker,
+        retries: r?.retries ?? t.retries,
+      };
+    }),
+  );
 }
 
 // ---- Main Entry Point ----

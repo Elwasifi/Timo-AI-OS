@@ -41,6 +41,7 @@ import {
   classifyComplexity,
 } from './missionPlanner';
 import { dispatchTasks } from './swarmManager';
+import { computeMissionOutcome, dbStatusOf, outcomeMetadata } from './missionOutcome';
 import { checkEntitlement, consumeProjectSlot, checkBudget } from '@/lib/governance/entitlements';
 import {
   recordMissionCreated,
@@ -383,67 +384,66 @@ export async function recalculateProgress(missionId: string): Promise<void> {
   const total = full.tasks.length;
   if (total === 0) return;
 
-  const completed = full.tasks.filter((t) => t.status === 'completed').length;
-  const failed = full.tasks.filter((t) => t.status === 'failed').length;
-  const progress = Math.round(((completed + failed) / total) * 100);
+  // M7-13c-2b-1: the ONE place that decides a mission's terminal status. The rules live in
+  // lib/swarm/missionOutcome.ts (pure); this function only applies the result.
+  const outcome = computeMissionOutcome(full.tasks, {
+    missionStatus: full.mission.status,
+    missionCancelled: full.mission.status === 'cancelled',
+  });
+  const status = dbStatusOf(outcome);
 
-  let status: Mission['status'] = full.mission.status;
-  if (completed + failed === total) {
-    status = 'completed';
-    if (failed > 0 && completed === 0) {
-      status = 'failed';
-    }
+  if (status === null) {
+    // Still in progress: keep the current status, write the shared progress figure (resolved / total).
+    await updateMission(missionId, { progress: outcome.progress, status: full.mission.status });
+    return;
+  }
+  if (outcome.status === 'cancelled') return; // cancelMission() already wrote everything for a cancelled mission
 
-    // M5-04: claim the terminal transition atomically before running any
-    // side effects — if this returns false, a concurrent call already
-    // transitioned this mission out of non-terminal status first, so the
-    // completion/failure bookkeeping below has already run once for this
-    // mission and must not run again.
-    const claimed = await claimMissionTerminalStatus(missionId, status, 100);
-    if (!claimed) return;
+  // M5-04: claim the terminal transition atomically before running any side effects — if this returns false,
+  // a concurrent call already transitioned this mission out of non-terminal status first, so the
+  // completion/failure bookkeeping below has already run once for this mission and must not run again.
+  const claimed = await claimMissionTerminalStatus(missionId, status, outcome.progress);
+  if (!claimed) return;
 
-    if (status === 'failed') {
-      await recordMissionFailed(missionId, full.mission.title, `${failed} of ${total} tasks failed`);
+  // 'partial' is not a database label yet, so it is stored as 'completed'; the truthful outcome travels in
+  // metadata.outcome (merged — every other metadata key is preserved).
+  await updateMission(missionId, {
+    metadata: { ...(full.mission.metadata ?? {}), outcome: outcomeMetadata(outcome) },
+  });
 
-      const errors = full.tasks
-        .filter((t) => t.status === 'failed' && t.errorMessage)
-        .map((t) => `${t.title}: ${t.errorMessage}`)
-        .slice(0, 5)
-        .join('; ');
-      await recordLesson({
-        tenantId: full.mission.tenantId,
-        missionId,
-        category: 'mission_failure',
-        summary: `Mission "${full.mission.title}" failed — ${failed} of ${total} tasks failed`,
-        detail: errors,
-        outcome: 'failure',
-      });
-    } else {
-      await recordMissionCompleted(missionId, full.mission.title, 100);
+  const notDone = outcome.counts.total - outcome.counts.succeeded - outcome.counts.simulated;
+  const errors = full.tasks
+    .filter((t) => t.status === 'failed' && t.errorMessage)
+    .map((t) => `${t.title}: ${t.errorMessage}`)
+    .slice(0, 5)
+    .join('; ');
 
-      // Partial failure: the mission still resolves 'completed' because at
-      // least one task succeeded, but some tasks genuinely failed along the
-      // way — a real signal worth capturing, unlike a fully clean run.
-      if (failed > 0) {
-        const errors = full.tasks
-          .filter((t) => t.status === 'failed' && t.errorMessage)
-          .map((t) => `${t.title}: ${t.errorMessage}`)
-          .slice(0, 5)
-          .join('; ');
-        await recordLesson({
-          tenantId: full.mission.tenantId,
-          missionId,
-          category: 'partial_failure',
-          summary: `Mission "${full.mission.title}" completed with ${failed} of ${total} tasks failing`,
-          detail: errors,
-          outcome: 'partial',
-        });
-      }
-    }
+  if (outcome.status === 'failed') {
+    await recordMissionFailed(missionId, full.mission.title, `${outcome.counts.failed + outcome.counts.anomalous} of ${total} tasks failed`);
+    await recordLesson({
+      tenantId: full.mission.tenantId,
+      missionId,
+      category: 'mission_failure',
+      summary: `Mission "${full.mission.title}" failed — ${outcome.counts.succeeded + outcome.counts.simulated} of ${total} tasks succeeded`,
+      detail: errors,
+      outcome: 'failure',
+    });
     return;
   }
 
-  await updateMission(missionId, { progress, status });
+  await recordMissionCompleted(missionId, full.mission.title, 100);
+
+  // Partial outcome: some tasks genuinely did not succeed — a real signal worth capturing, unlike a fully clean run.
+  if (outcome.status === 'partial') {
+    await recordLesson({
+      tenantId: full.mission.tenantId,
+      missionId,
+      category: 'partial_failure',
+      summary: `Mission "${full.mission.title}" completed with ${notDone} of ${total} tasks not succeeding`,
+      detail: errors,
+      outcome: 'partial',
+    });
+  }
 }
 
 /**
