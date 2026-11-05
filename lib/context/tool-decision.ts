@@ -8,6 +8,7 @@ import { toolPlanner, ToolPlanningError } from '@/lib/tools/planner';
 import { permissionEngine } from '@/lib/tools/permissions';
 import { toolExecutor } from '@/lib/tools/executor';
 import { logger } from '@/lib/utils/logger';
+import { dedupeFailureTexts } from '@/lib/utils/failureText';
 import type { ToolResultEnvelope, ToolRequest } from '@/lib/tools/types';
 import type { ChainResult } from '@/lib/tools/chain';
 import type { DetectedIntent, ToolExecutionRecord } from './types';
@@ -189,8 +190,19 @@ export async function decideTools(
   const executions: ToolExecutionRecord[] = [];
 
   if (plan && plan.tools.length > 0) {
+    // M7-13c-2b-1b: (1) identical planned calls (same tool, deeply-equal arguments) run ONCE — the planner once
+    // emitted five identical web.search calls for one task; (2) after a call fails with a NON-RETRYABLE kind
+    // (quota_exceeded, not_configured, permission_denied, ...), the rest of that tool's calls in this plan are skipped:
+    // they would fail the same way and only burn quota / repeat the same sentence. Other tools in the plan still run;
+    // retryable failures (tool_error, ...) do not block anything.
+    const plannedKeys = new Set<string>();
+    const blockedTools = new Set<string>();
     // Execute the planned tools
     for (const t of plan.tools) {
+      const callKey = `${t.toolId}\u0000${stableStringify(t.arguments)}`;
+      if (plannedKeys.has(callKey)) continue;
+      plannedKeys.add(callKey);
+      if (blockedTools.has(t.toolId)) continue;
       const toolDef = toolRegistry.get(t.toolId);
       if (!toolDef) continue;
 
@@ -221,6 +233,9 @@ export async function decideTools(
           durationMs,
           error: error ?? undefined,
         });
+        if (!success && TOOL_LEVEL_FAILURES.has(failureKindOfExecution(executions[executions.length - 1]))) {
+          blockedTools.add(t.toolId);
+        }
       } catch (err) {
         const durationMs = Date.now() - start;
         executions.push({
@@ -370,7 +385,27 @@ function classifyExecutionFailures(executions: ToolExecutionRecord[]): { kind: T
       ? `Tool "${e.toolId}" is not implemented yet — no real action was taken.`
       : (e.error ?? `Tool "${e.toolId}" failed.`),
   );
-  return { kind: allDeterministic ? kinds[0] : 'tool_error', error: messages.join('; ') };
+  // M7-13c-2b-1b: identical sentences (e.g. the same quota message from several failed calls) appear once.
+  return { kind: allDeterministic ? kinds[0] : 'tool_error', error: dedupeFailureTexts(messages) };
+}
+
+/**
+ * Failures that say something about the TOOL itself, so every later call to it in the same plan would fail the same way.
+ * Deliberately NOT NON_RETRYABLE_TOOL_FAILURES: 'invalid_params' is specific to the arguments of that one call (a later
+ * call with different arguments may be valid), and 'no_tools_for_agent' / 'no_match' / 'planner_no_tenant' never come
+ * from an executed call. The task-level retry rule keeps using NON_RETRYABLE_TOOL_FAILURES.
+ */
+const TOOL_LEVEL_FAILURES: ReadonlySet<ToolFailureKind> = new Set<ToolFailureKind>([
+  'quota_exceeded', 'not_configured', 'permission_denied', 'not_implemented', 'tool_not_found',
+]);
+
+/** JSON with object keys sorted, so two argument objects that are deeply equal give the same string. */
+function stableStringify(value: unknown): string {
+  if (value === undefined) return 'undefined';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 }
 
 function resolveToolIds(category: DetectedIntent['toolCategoryHint']): string[] {

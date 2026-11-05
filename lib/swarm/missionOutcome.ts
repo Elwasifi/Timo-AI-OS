@@ -14,6 +14,8 @@
 // 'partial' is not a database value yet (mission_status has no such label — that needs a migration, a later ticket):
 // the writer stores DB status 'completed' for a partial outcome and keeps the full outcome in missions.metadata.outcome.
 
+import { dedupeJoinedFailureText } from '@/lib/utils/failureText';
+
 export type OutcomeStatus = 'completed' | 'partial' | 'failed' | 'cancelled' | 'in_progress';
 
 export type TaskOutcomeState =
@@ -117,7 +119,8 @@ export function resolvedProgress(resolved: number, total: number): number {
 
 /**
  * Turns an error text into a short human-readable reason: no raw JSON (a provider's JSON body is reduced to its
- * "message" field, or cut at the first brace), whitespace collapsed, capped at 280 characters (REASON_CAP).
+ * "message" field, or cut at the first brace), whitespace collapsed, repeated sentences collapsed to one, capped at
+ * 280 characters (REASON_CAP).
  */
 export function cleanReason(raw: string | null | undefined): string {
   let text = (raw ?? '').trim();
@@ -134,6 +137,8 @@ export function cleanReason(raw: string | null | undefined): string {
   }
   text = text.replace(/[{}]/g, '').replace(/\s+/g, ' ').trim();
   if (!text) return 'No reason was recorded.';
+  // M7-13c-2b-1b: older rows hold the same sentence several times joined by "; " — show each distinct reason once.
+  text = dedupeJoinedFailureText(text);
   return text.length > REASON_CAP ? `${text.slice(0, REASON_CAP - 1).trimEnd()}…` : text;
 }
 
