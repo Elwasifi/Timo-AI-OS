@@ -626,7 +626,7 @@ export async function skipTask(taskId: string, reason: string): Promise<MissionT
 }
 
 /** M7-13c-2b-2b: skipTask() for every still-open (waiting / ready) task of one mission, in ONE conditional UPDATE. Same guarantees; returns the tasks it skipped. */
-export async function skipOpenTasks(missionId: string, reason: string): Promise<MissionTask[]> {
+export async function skipOpenTasks(missionId: string, reason: string, extraMetadata?: Record<string, unknown>): Promise<MissionTask[]> {
   const res = await boundedStatusWrite('Skipping the open tasks', { missionId }, async () => {
     const { data, error } = await supabase
       .from('mission_tasks')
@@ -638,14 +638,130 @@ export async function skipOpenTasks(missionId: string, reason: string): Promise<
     return ((data ?? []) as TaskRow[]).map(mapTask);
   });
   const tasks = res.ok ? res.value : [];
-  for (const task of tasks) await recordTaskSkipped(task, reason);
+  for (const task of tasks) await recordTaskSkipped(task, reason, extraMetadata);
   return tasks;
+}
+
+/**
+ * M7-13c-2b-3 (stale-mission cleanup): marks the given tasks of ONE mission 'failed' with a reason — but ONLY those that are
+ * still 'running' (conditional UPDATE `.eq('status', 'running')`), so a task that finished in the meantime is never overwritten.
+ * Same bounded write as skipOpenTasks; a best-effort 'task_failed' timeline event carries `extraMetadata` (e.g. {cleanup:true}).
+ */
+export async function failRunningTasks(missionId: string, taskIds: string[], reason: string, extraMetadata?: Record<string, unknown>): Promise<MissionTask[]> {
+  if (taskIds.length === 0) return [];
+  const res = await boundedStatusWrite('Failing the interrupted tasks', { missionId }, async () => {
+    const { data, error } = await supabase
+      .from('mission_tasks')
+      .update({ status: 'failed', error_message: reason, completed_at: new Date().toISOString() })
+      .eq('mission_id', missionId)
+      .in('id', taskIds)
+      .eq('status', 'running')
+      .select();
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as TaskRow[]).map(mapTask);
+  });
+  const tasks = res.ok ? res.value : [];
+  for (const task of tasks) {
+    await bestEffort('Recording the task_failed event', { taskId: task.id, missionId }, () =>
+      addTimelineEntry({
+        missionId,
+        eventType: 'task_failed',
+        entityType: 'task',
+        entityId: task.id,
+        title: `Failed: ${task.title}`,
+        detail: reason,
+        metadata: { error: reason, ...(extraMetadata ?? {}) },
+      }),
+    );
+  }
+  return tasks;
+}
+
+/**
+ * M7-13c-2b-3: resolved / total task counts for a set of missions, from ONE light query (mission_id + status only). Used by the
+ * missions list so an ended mission shows real "N of M tasks resolved". RLS-scoped in the browser (the shared client).
+ */
+export async function getTaskCountsForMissions(missionIds: string[]): Promise<Record<string, { resolved: number; total: number }>> {
+  const out: Record<string, { resolved: number; total: number }> = {};
+  if (missionIds.length === 0) return out;
+  const { data, error } = await supabase
+    .from('mission_tasks')
+    .select('mission_id, status')
+    .in('mission_id', missionIds)
+    .limit(5000);
+  // Throws (unlike most readers here) so the caller can tell "no tasks" from "could not load" and not claim a mission had no tasks.
+  if (error) throw new Error(error.message);
+  for (const row of (data ?? []) as Array<{ mission_id: string; status: string }>) {
+    const c = (out[row.mission_id] ??= { resolved: 0, total: 0 });
+    c.total++;
+    if (RESOLVED_STATUSES_FOR_COUNTS.has(row.status)) c.resolved++;
+  }
+  return out;
+}
+const RESOLVED_STATUSES_FOR_COUNTS = new Set(['completed', 'failed', 'cancelled', 'skipped']);
+
+/** M7-13c-2b-3: the first recorded failure text per mission (failed tasks only), for the "Recent missions" block. One light query. */
+export async function getFirstFailureReasons(missionIds: string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  if (missionIds.length === 0) return out;
+  const { data, error } = await supabase
+    .from('mission_tasks')
+    .select('mission_id, error_message')
+    .in('mission_id', missionIds)
+    .eq('status', 'failed')
+    .not('error_message', 'is', null)
+    .order('created_at', { ascending: true })
+    .limit(200);
+  if (error || !data) return out;
+  for (const row of data as Array<{ mission_id: string; error_message: string | null }>) {
+    if (row.error_message && !(row.mission_id in out)) out[row.mission_id] = row.error_message;
+  }
+  return out;
+}
+
+/** M7-13c-2b-3: a runtime_activity row, as the per-task Timeline reads it. */
+export interface RuntimeActivityRow {
+  id: string;
+  eventType: string;
+  title: string;
+  detail: string;
+  agentId: string | null;
+  taskId: string | null;
+  status: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+/**
+ * M7-13c-2b-3: runtime_activity rows of one mission. runtime_activity has a tenant-aware SELECT policy
+ * (`tenant_id IS NULL OR is_tenant_member(tenant_id)`, migration 20260830120000) so the browser's session-scoped client can
+ * read it; a failure returns [] (the Timeline then simply omits runtime events).
+ */
+export async function getRuntimeActivityForMission(missionId: string): Promise<RuntimeActivityRow[]> {
+  const { data, error } = await supabase
+    .from('runtime_activity')
+    .select('id, event_type, title, detail, agent_id, task_id, status, metadata, created_at')
+    .eq('mission_id', missionId)
+    .order('created_at', { ascending: true })
+    .limit(500);
+  if (error || !data) return [];
+  return (data as Array<Record<string, unknown>>).map((r) => ({
+    id: String(r.id),
+    eventType: String(r.event_type ?? ''),
+    title: String(r.title ?? ''),
+    detail: typeof r.detail === 'string' ? r.detail : '',
+    agentId: typeof r.agent_id === 'string' ? r.agent_id : null,
+    taskId: typeof r.task_id === 'string' ? r.task_id : null,
+    status: typeof r.status === 'string' ? r.status : null,
+    metadata: (r.metadata && typeof r.metadata === 'object' ? r.metadata : {}) as Record<string, unknown>,
+    createdAt: String(r.created_at ?? ''),
+  }));
 }
 
 /** Only these pre-run statuses may become 'skipped'. 'running', 'awaiting_approval' and every terminal status are excluded on purpose. */
 export const SKIPPABLE_TASK_STATUSES: TaskQueueStatus[] = ['waiting', 'ready'];
 
-async function recordTaskSkipped(task: MissionTask, reason: string): Promise<void> {
+async function recordTaskSkipped(task: MissionTask, reason: string, extraMetadata?: Record<string, unknown>): Promise<void> {
   await bestEffort('Recording the task_skipped event', { taskId: task.id, missionId: task.missionId }, () =>
     addTimelineEntry({
       missionId: task.missionId,
@@ -654,7 +770,7 @@ async function recordTaskSkipped(task: MissionTask, reason: string): Promise<voi
       entityId: task.id,
       title: `Task skipped: ${task.title}`,
       detail: reason,
-      metadata: { reason },
+      metadata: { reason, ...(extraMetadata ?? {}) },
     }),
   );
 }

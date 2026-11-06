@@ -41,6 +41,7 @@ import { useAuthStore } from '@/stores/authStore';
 import type { AgentAnimationState, TimelineEvent, ActivityFeedItem } from '@/types';
 import { ClientTime } from '@/components/temo/client-time';
 import { cn } from '@/lib/utils';
+import { insertBeforeMessage } from '@/lib/chat/insertBeforeMessage';
 
 interface Message {
   id: string;
@@ -485,19 +486,18 @@ export default function ChatPage() {
         onAcknowledgment: (ackText) => {
           missionModeRef.current = true;
           touchActivity();
-          setMessages((m) => [
-            ...m,
-            {
-              id: `ack${Date.now()}`,
-              role: 'assistant',
-              content: ackText,
-              agentId: 'temo',
-              agentName: 'Temo',
-              agentColor: '#00E5FF',
-              agentIcon: 'Sparkles',
-              time: nowTime(),
-            },
-          ]);
+          // M7-13c-2b-3: insert BEFORE the reply placeholder, so the final reply (which fills that placeholder in place) is the last
+          // message and the transient ack stays above it instead of ending up below the final answer.
+          setMessages((m) => insertBeforeMessage(m, replyId, {
+            id: `ack${Date.now()}`,
+            role: 'assistant',
+            content: ackText,
+            agentId: 'temo',
+            agentName: 'Temo',
+            agentColor: '#00E5FF',
+            agentIcon: 'Sparkles',
+            time: nowTime(),
+          }));
         },
         onMissionProgress: (title, detail) => {
           missionModeRef.current = true;

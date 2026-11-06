@@ -68,9 +68,90 @@ const RESOLVED_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled', 'ski
  */
 export function missionProgressLabel(tasks: ReadonlyArray<{ status: string }>, missionStatus: string | null | undefined): string {
   if (tasks.length === 0) return 'No tasks yet';
-  const resolved = tasks.filter((t) => RESOLVED_TASK_STATUSES.has(t.status)).length;
-  const outcome = isEndedMissionStatus(missionStatus) || missionStatus === 'paused' || missionStatus === 'pending' ? missionStatusDisplay(missionStatus).label : 'In progress';
-  return `${resolved} of ${tasks.length} tasks resolved · ${outcome}`;
+  return missionProgressLabelFromCounts(countResolvedTasks(tasks), missionStatus);
+}
+
+/** M7-13c-2b-3: real task counts of one mission (resolved = completed / failed / cancelled / skipped). */
+export interface MissionTaskCounts {
+  resolved: number;
+  total: number;
+}
+
+export function countResolvedTasks(tasks: ReadonlyArray<{ status: string }>): MissionTaskCounts {
+  return { resolved: tasks.filter((t) => RESOLVED_TASK_STATUSES.has(t.status)).length, total: tasks.length };
+}
+
+function outcomeWordOf(missionStatus: string | null | undefined): string {
+  return isEndedMissionStatus(missionStatus) || missionStatus === 'paused' || missionStatus === 'pending' ? missionStatusDisplay(missionStatus).label : 'In progress';
+}
+
+/** "N of M tasks resolved · <outcome>" from counts (shared by the detail page and the list card). */
+export function missionProgressLabelFromCounts(counts: MissionTaskCounts, missionStatus: string | null | undefined): string {
+  if (counts.total === 0) return 'No tasks yet';
+  return `${counts.resolved} of ${counts.total} tasks resolved · ${outcomeWordOf(missionStatus)}`;
+}
+
+export interface MissionCardProgress {
+  /** The mission is over (completed / partial / failed / cancelled / unknown status). */
+  ended: boolean;
+  /** An ended mission must NOT show a bare "100%" (a failed mission at "100%" read as success): it shows the caption instead. */
+  showPercent: boolean;
+  /** Outcome label and real task counts, e.g. "Failed · 0 of 2 tasks resolved". Empty for a running mission (it keeps its live progress). */
+  caption: string;
+}
+
+/**
+ * M7-13c-2b-3: what the mission list card shows under its progress bar. Ended missions show the outcome label and the REAL
+ * "N of M tasks resolved" (counts come from mission_tasks); if the counts are not available it falls back to the mission's
+ * estimated_tasks and says so ("~M tasks planned"). Running missions keep their live progress.
+ */
+export function missionCardProgress(input: {
+  status: string | null | undefined;
+  estimatedTasks?: number | null;
+  counts?: MissionTaskCounts | null;
+}): MissionCardProgress {
+  if (!isEndedMissionStatus(input.status)) return { ended: false, showPercent: true, caption: '' };
+  const label = missionStatusDisplay(input.status).label;
+  const counts = input.counts;
+  if (counts && counts.total > 0) return { ended: true, showPercent: false, caption: `${label} · ${counts.resolved} of ${counts.total} tasks resolved` };
+  if (counts && counts.total === 0) return { ended: true, showPercent: false, caption: `${label} · no tasks were created` };
+  const planned = input.estimatedTasks ?? 0;
+  return { ended: true, showPercent: false, caption: planned > 0 ? `${label} · ~${planned} tasks planned` : label };
+}
+
+export const MISSION_TABS = ['All', 'Active', 'Pending', 'Completed', 'Partial', 'Failed'] as const;
+
+/**
+ * M7-13c-2b-3: the empty-state text of the missions list. It names the tab ("No partial missions"); "All" keeps the original
+ * "No Active Missions" text and is only used when there are truly no missions at all; a search with no hit says so.
+ */
+export function missionsEmptyState(tab: string, opts: { totalMissions: number; query?: string }): { title: string; description: string } {
+  const how = 'Missions are launched by asking Temo to build, create, or automate something from Chat.';
+  const q = (opts.query ?? '').trim();
+  if (q) return { title: 'No matching missions', description: `No missions in this view match "${q}".` };
+  switch (tab) {
+    case 'Active': return { title: 'No active missions', description: `Nothing is being planned or executed right now. ${how}` };
+    case 'Pending': return { title: 'No pending missions', description: `No mission is waiting or paused. ${how}` };
+    case 'Completed': return { title: 'No completed missions', description: `No mission has completed yet. ${how}` };
+    case 'Partial': return { title: 'No partial missions', description: 'No mission has finished with only some of its tasks succeeding.' };
+    case 'Failed': return { title: 'No failed missions', description: 'No mission has failed or been cancelled.' };
+    default:
+      return opts.totalMissions === 0
+        ? { title: 'No Active Missions', description: `No autonomous goals match your filters. ${how}` }
+        : { title: 'No missions in this view', description: how };
+  }
+}
+
+/** Which statuses belong to which list tab (moved out of the page so it is unit-testable). */
+export function missionMatchesTab(tab: string, status: string): boolean {
+  switch (tab) {
+    case 'Active': return status === 'planning' || status === 'ready' || status === 'executing' || status === 'reviewing';
+    case 'Pending': return status === 'pending' || status === 'paused';
+    case 'Completed': return status === 'completed';
+    case 'Partial': return status === 'partial';
+    case 'Failed': return status === 'failed' || status === 'cancelled';
+    default: return true;
+  }
 }
 
 /** True for every status except the still-going ones — so an unrecognised status never keeps an elapsed clock ticking. */

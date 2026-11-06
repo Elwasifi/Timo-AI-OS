@@ -4,7 +4,7 @@ import { motion } from 'framer-motion';
 import { Target, Clock, Zap } from 'lucide-react';
 import { ProgressBar, DepartmentBadge } from './primitives';
 import { cn } from '@/lib/utils';
-import { missionStatusDisplay } from '@/lib/swarm/missionStatusDisplay';
+import { missionStatusDisplay, missionCardProgress, type MissionTaskCounts } from '@/lib/swarm/missionStatusDisplay';
 
 // Mirrors lib/swarm/types.ts's real MissionStatus 1:1 (not a lossy 5-bucket
 // subset) so every status the Mission Engine can actually produce renders
@@ -24,6 +24,8 @@ export type Mission = {
   elapsedMs?: number;
   stepCount?: number;
   currentStep?: number;
+  /** M7-13c-2b-3: real task counts (mission_tasks); null/undefined = not loaded (an ended mission then falls back to the planned task count). */
+  taskCounts?: MissionTaskCounts | null;
 };
 
 function formatElapsed(ms?: number): string {
@@ -40,6 +42,8 @@ export function MissionCard({ mission, index = 0, onClick }: { mission: Mission;
   // M7-13c-2b-1: never index by the raw status — a status this card has not heard of gets a neutral look, not a TypeError.
   const statusConf = missionStatusDisplay(mission.status);
   const accentColor = mission.managerColor ?? statusConf.color;
+  // M7-13c-2b-3: an ended mission shows its outcome and real task counts, never a bare "100%" (red 100% on a failed mission read as success).
+  const progress = missionCardProgress({ status: mission.status, estimatedTasks: mission.stepCount, counts: mission.taskCounts });
 
   return (
     <motion.div
@@ -73,7 +77,12 @@ export function MissionCard({ mission, index = 0, onClick }: { mission: Mission;
       {/* Progress bar with step nodes */}
       <div className="relative mt-4">
         <ProgressBar value={mission.progress} color={accentColor} />
-        {mission.stepCount && mission.stepCount > 0 && (
+        {!progress.showPercent && (
+          <p className="mt-1 font-mono text-[11px] font-medium" style={{ color: statusConf.color }}>
+            {progress.caption}
+          </p>
+        )}
+        {progress.showPercent && (mission.stepCount ?? 0) > 0 && (
           <div className="mt-1 flex items-center justify-between">
             <span className="font-mono text-[11px] text-temo-titanium">
               Step {mission.currentStep ?? '?'}/{mission.stepCount}

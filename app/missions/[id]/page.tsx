@@ -12,6 +12,8 @@ import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { missionStatusDisplay, taskStatusDisplay, missionProgressLabel } from '@/lib/swarm/missionStatusDisplay';
 import { cleanReason } from '@/lib/swarm/missionOutcome';
+import { getRuntimeActivityForMission, type RuntimeActivityRow } from '@/lib/swarm/missionService';
+import { TaskTimeline } from '@/components/temo/task-timeline';
 import { NON_TERMINAL_MISSION_STATUSES, type Mission, type MissionObjective, type MissionTask, type TimelineEntry, type Lesson } from '@/lib/swarm/types';
 
 // M3-08: missions execute synchronously in the browser tab that triggered
@@ -169,6 +171,15 @@ function MissionDetail({
   const accent = missionStatusDisplay(mission.status).color;
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  // M7-13c-2b-3: runtime_activity (RLS-readable by tenant members) is loaded once, the first time any task Timeline is opened.
+  // null = not loaded / could not be read: the Timeline then simply omits runtime events.
+  const [activity, setActivity] = useState<RuntimeActivityRow[] | null>(null);
+  const [activityRequested, setActivityRequested] = useState(false);
+  const loadActivity = () => {
+    if (activityRequested) return;
+    setActivityRequested(true);
+    getRuntimeActivityForMission(mission.id).then(setActivity).catch(() => setActivity(null));
+  };
   const canCancel = NON_TERMINAL_MISSION_STATUSES.includes(mission.status);
   const stalledTasks = tasks.filter(isTaskStalled);
   // M4-03: the one honest "this mission didn't fully succeed" signal
@@ -325,6 +336,7 @@ function MissionDetail({
                   ) : (
                     t.errorMessage && <p className="mt-1 font-mono text-[10px] text-red-400">{cleanReason(t.errorMessage)}</p>
                   )}
+                  <TaskTimeline task={t} timeline={timeline} activity={activity} onOpen={loadActivity} />
                 </div>
               );
             })}

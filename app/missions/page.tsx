@@ -9,9 +9,10 @@ import { EmptyState, GlassPanel } from '@/components/temo/primitives';
 import { useDashboardStore } from '@/stores/dashboardStore';
 import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { cn } from '@/lib/utils';
-import { isEndedMissionStatus } from '@/lib/swarm/missionStatusDisplay';
+import { isEndedMissionStatus, missionMatchesTab, missionsEmptyState, MISSION_TABS, type MissionTaskCounts } from '@/lib/swarm/missionStatusDisplay';
+import { getTaskCountsForMissions } from '@/lib/swarm/missionService';
 
-const STATUS_TABS = ['All', 'Active', 'Pending', 'Completed', 'Partial', 'Failed'] as const;
+const STATUS_TABS = MISSION_TABS;
 
 export default function MissionsPage() {
   const router = useRouter();
@@ -20,6 +21,8 @@ export default function MissionsPage() {
   const loadMissions = useDashboardStore((s) => s.loadMissions);
   const [tab, setTab] = useState<string>('All');
   const [query, setQuery] = useState('');
+  // M7-13c-2b-3: real per-mission task counts (one light query) so an ended mission shows "N of M tasks resolved" instead of a bare percentage.
+  const [taskCounts, setTaskCounts] = useState<Record<string, MissionTaskCounts> | null>(null);
 
   // Real missions from the missions table (lib/swarm/missionService.listMissions),
   // via the same shared store slice the Homepage's Mission Control widget can
@@ -37,6 +40,16 @@ export default function MissionsPage() {
   }, [loadMissions]);
   useRealtimeRefetch([{ table: 'missions' }], loadMissions);
 
+  useEffect(() => {
+    let cancelled = false;
+    const endedIds = missions.filter((m) => isEndedMissionStatus(m.status)).map((m) => m.id);
+    if (endedIds.length === 0) return;
+    getTaskCountsForMissions(endedIds)
+      .then((counts) => { if (!cancelled) setTaskCounts(counts); })
+      .catch(() => { /* counts are optional: the card falls back to the planned task count */ });
+    return () => { cancelled = true; };
+  }, [missions]);
+
   const cardData: MissionCardData[] = missions.map((m) => {
     const startedAt = new Date(m.createdAt).getTime();
     // M7-13c-2b-1: any status that is not a still-going one counts as ended, so an unrecognised status never keeps the clock ticking.
@@ -51,18 +64,15 @@ export default function MissionsPage() {
       elapsedMs: Number.isFinite(startedAt) ? Math.max(0, endedAt - startedAt) : undefined,
       stepCount: m.estimatedTasks,
       currentStep: m.estimatedTasks > 0 ? Math.round((m.progress / 100) * m.estimatedTasks) : undefined,
+      // Counts loaded: a mission with no task rows is {0 of 0}. Not loaded (yet / query failed): null -> the card falls back to the planned task count.
+      taskCounts: taskCounts ? (taskCounts[m.id] ?? { resolved: 0, total: 0 }) : null,
     };
   });
 
-  const filtered = cardData.filter((m) => {
-    if (tab === 'All') return true;
-    if (tab === 'Active') return m.status === 'planning' || m.status === 'ready' || m.status === 'executing' || m.status === 'reviewing';
-    if (tab === 'Pending') return m.status === 'pending' || m.status === 'paused';
-    if (tab === 'Completed') return m.status === 'completed';
-    if (tab === 'Partial') return m.status === 'partial';
-    if (tab === 'Failed') return m.status === 'failed' || m.status === 'cancelled';
-    return true;
-  }).filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));
+  const filtered = cardData
+    .filter((m) => missionMatchesTab(tab, m.status))
+    .filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));
+  const empty = missionsEmptyState(tab, { totalMissions: missions.length, query });
 
   return (
     <AppShell>
@@ -128,8 +138,8 @@ export default function MissionsPage() {
           <GlassPanel className="p-8">
             <EmptyState
               icon={<Target className="h-12 w-12" />}
-              title="No Active Missions"
-              description="No autonomous goals match your filters. Missions are launched by asking Temo to build, create, or automate something from Chat."
+              title={empty.title}
+              description={empty.description}
               actionLabel="Go to Chat"
               onAction={() => router.push('/chat')}
             />

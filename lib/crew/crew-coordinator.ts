@@ -9,6 +9,7 @@ import { AgentState } from './agent-state';
 import { AgentMemory } from './agent-memory';
 import { getAgentGreeting } from './agent-responses';
 import { buildSystemPrompt, buildTemoCoordinatorPrompt } from './agent-system-prompts';
+import { loadRecentMissionsBlock } from './recentMissions';
 import { chatWithFallback, streamWithFallback, type ChatMessage } from '@/lib/ai/ai-provider';
 import { route, classifyTask } from '@/lib/ai/router';
 import { loadSettings } from '@/lib/settings/settings-service';
@@ -436,6 +437,17 @@ export class CrewCoordinator {
     return systemPrompt + buildIdentityDirective(profile);
   }
 
+  /**
+   * M7-13c-2b-3: Temo's own chat prompt gets a compact "Recent missions" block (<= ~120 tokens, tenant-scoped, titles/reasons
+   * treated as data) so it can answer "how did my last mission go?" truthfully. Other agents and the tool-result formatter are
+   * unchanged. Returns the prompt untouched when there is no tenant, no mission, or the read fails/is slow.
+   */
+  private async withRecentMissions(systemPrompt: string, agent: Agent): Promise<string> {
+    if (agent.id !== 'temo') return systemPrompt;
+    const block = await loadRecentMissionsBlock(useAuthStore.getState().currentTenantId);
+    return block ? `${systemPrompt}\n\n${block}` : systemPrompt;
+  }
+
   private async generateResponse(
     agent: Agent | undefined,
     currentInput: string,
@@ -452,7 +464,7 @@ export class CrewCoordinator {
       : buildSystemPrompt(agent);
 
     const fullSystemPrompt = await this.withIdentity(
-      ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt,
+      await this.withRecentMissions(ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt, agent),
     );
 
     const messages: ChatMessage[] = [
@@ -542,7 +554,7 @@ ${payload}`;
       : buildSystemPrompt(agent);
 
     const fullSystemPrompt = await this.withIdentity(
-      ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt,
+      await this.withRecentMissions(ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt, agent),
     );
 
     const messages: ChatMessage[] = [
