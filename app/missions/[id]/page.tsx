@@ -10,10 +10,9 @@ import { authFetch } from '@/lib/api/authFetch';
 import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { toast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
-import { missionStatusDisplay } from '@/lib/swarm/missionStatusDisplay';
-import type { Mission, MissionObjective, MissionTask, TimelineEntry, Lesson } from '@/lib/swarm/types';
-
-const NON_TERMINAL_MISSION_STATUSES: Mission['status'][] = ['pending', 'planning', 'ready', 'executing', 'reviewing', 'paused'];
+import { missionStatusDisplay, taskStatusDisplay, missionProgressLabel } from '@/lib/swarm/missionStatusDisplay';
+import { cleanReason } from '@/lib/swarm/missionOutcome';
+import { NON_TERMINAL_MISSION_STATUSES, type Mission, type MissionObjective, type MissionTask, type TimelineEntry, type Lesson } from '@/lib/swarm/types';
 
 // M3-08: missions execute synchronously in the browser tab that triggered
 // them (lib/swarm/unifiedOrchestrator.ts's runMissionPipeline) — there is
@@ -45,7 +44,7 @@ interface FullMission {
 
 const STATUS_COLOR: Record<string, string> = {
   pending: '#F97316', planning: '#F97316', ready: '#EAB308', executing: '#00F3FF',
-  reviewing: '#A855F7', completed: '#10B981', failed: '#EF4444', cancelled: '#64748B', paused: '#94A3B8',
+  reviewing: '#A855F7', completed: '#10B981', failed: '#EF4444', cancelled: '#64748B', paused: '#94A3B8', partial: '#F59E0B',
   waiting: '#94A3B8', running: '#00F3FF',
 };
 
@@ -213,7 +212,7 @@ function MissionDetail({
               className="rounded-full border px-3 py-1 font-mono text-[11px] font-bold uppercase tracking-wider"
               style={{ borderColor: `${accent}40`, color: accent, backgroundColor: `${accent}15` }}
             >
-              {mission.status}
+              {missionStatusDisplay(mission.status).label}
             </span>
             {mission.isSimulation && (
               <span className="rounded-full border border-temo-purple/40 bg-temo-purple/10 px-2 py-0.5 font-mono text-[10px] text-temo-purple">
@@ -256,9 +255,9 @@ function MissionDetail({
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-400" />
             <div className="min-w-0">
               <p className="font-mono text-[11px] font-bold uppercase tracking-wide text-orange-300">Completed with failures</p>
-              <p className="mt-1 font-mono text-[11px] text-orange-200">{partialFailure.summary}</p>
+              <p className="mt-1 font-mono text-[11px] text-orange-200">{cleanReason(partialFailure.summary)}</p>
               {partialFailure.detail && (
-                <p className="mt-1 font-mono text-[10px] text-orange-200/70">{partialFailure.detail}</p>
+                <p className="mt-1 font-mono text-[10px] text-orange-200/70">{cleanReason(partialFailure.detail)}</p>
               )}
             </div>
           </div>
@@ -268,9 +267,9 @@ function MissionDetail({
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
             <div className="min-w-0">
               <p className="font-mono text-[11px] font-bold uppercase tracking-wide text-red-300">Mission failed</p>
-              <p className="mt-1 font-mono text-[11px] text-red-200">{fullFailure.summary}</p>
+              <p className="mt-1 font-mono text-[11px] text-red-200">{cleanReason(fullFailure.summary)}</p>
               {fullFailure.detail && (
-                <p className="mt-1 font-mono text-[10px] text-red-200/70">{fullFailure.detail}</p>
+                <p className="mt-1 font-mono text-[10px] text-red-200/70">{cleanReason(fullFailure.detail)}</p>
               )}
             </div>
           </div>
@@ -280,7 +279,7 @@ function MissionDetail({
           <ProgressBar value={mission.progress} color={accent} />
           <div className="mt-1 flex items-center justify-between font-mono text-[11px] text-temo-titanium">
             <span>{objectives.length} objectives · {tasks.length} tasks</span>
-            <span style={{ color: accent }}>{mission.progress}%</span>
+            <span style={{ color: accent }}>{missionProgressLabel(tasks, mission.status)}</span>
           </div>
         </div>
 
@@ -298,7 +297,8 @@ function MissionDetail({
           <div className="mt-3 space-y-2">
             {tasks.length === 0 && <p className="font-mono text-xs text-temo-titanium">No tasks yet.</p>}
             {tasks.map((t) => {
-              const c = STATUS_COLOR[t.status] ?? '#94A3B8';
+              const taskDisplay = taskStatusDisplay(t.status);
+              const c = taskDisplay.color;
               const stalled = isTaskStalled(t);
               return (
                 <div key={t.id} className="rounded-lg border border-white/[0.06] bg-white/[0.015] p-3">
@@ -311,7 +311,7 @@ function MissionDetail({
                         </span>
                       )}
                       <span className="rounded-full px-2 py-0.5 font-mono text-[10px] uppercase" style={{ color: c, backgroundColor: `${c}15` }}>
-                        {t.status}
+                        {taskDisplay.label}
                       </span>
                     </span>
                   </div>
@@ -320,7 +320,11 @@ function MissionDetail({
                     {t.assignedWorker && <span>Worker: <b className="text-temo-led">{t.assignedWorker}</b></span>}
                     {t.retries > 0 && <span>Retries: {t.retries}/{t.maxRetries}</span>}
                   </div>
-                  {t.errorMessage && <p className="mt-1 font-mono text-[10px] text-red-400">{t.errorMessage}</p>}
+                  {t.status === 'skipped' ? (
+                    <p className="mt-1 font-mono text-[10px] text-temo-titanium">Skipped — {cleanReason(t.errorMessage)}</p>
+                  ) : (
+                    t.errorMessage && <p className="mt-1 font-mono text-[10px] text-red-400">{cleanReason(t.errorMessage)}</p>
+                  )}
                 </div>
               );
             })}

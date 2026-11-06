@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-  computeMissionOutcome, cleanReason, readSimulation, resolvedProgress, dbStatusOf, executionStateOf, outcomeMetadata,
+  computeMissionOutcome, cleanReason, readSimulation, resolvedProgress, dbStatusOf, executionStateOf, outcomeMetadata, isInvalidEnumValueError,
   type OutcomeTaskInput,
 } from '@/lib/swarm/missionOutcome';
 
@@ -94,9 +94,9 @@ describe('progress = resolved / total (one helper)', () => {
 
 describe('mappings used by the writers', () => {
   const mk = (status: Parameters<typeof dbStatusOf>[0]['status']) => ({ status } as Parameters<typeof dbStatusOf>[0]);
-  it('dbStatusOf: partial is stored as completed (no DB label yet); in_progress has no terminal status', () => {
+  it('dbStatusOf: partial is its OWN database status (migration 20261106120000); in_progress has no terminal status', () => {
     expect(dbStatusOf(mk('completed'))).toBe('completed');
-    expect(dbStatusOf(mk('partial'))).toBe('completed');
+    expect(dbStatusOf(mk('partial'))).toBe('partial');
     expect(dbStatusOf(mk('failed'))).toBe('failed');
     expect(dbStatusOf(mk('cancelled'))).toBe('cancelled');
     expect(dbStatusOf(mk('in_progress'))).toBeNull();
@@ -202,5 +202,19 @@ describe('TaskReport — structured report data', () => {
   it('open tasks say why they are open', () => {
     const o = computeMissionOutcome([open('awaiting_approval'), open('running'), open('ready')]);
     expect(o.parts.tasks.map((t) => t.reason)).toEqual(['Waiting for a human approval.', 'Still running.', 'Not started yet.']);
+  });
+});
+
+describe('isInvalidEnumValueError (the \'partial\' safety-net detector)', () => {
+  it('recognises Postgres 22P02 and the "invalid input value for enum" text', () => {
+    expect(isInvalidEnumValueError({ code: '22P02', message: 'x' })).toBe(true);
+    expect(isInvalidEnumValueError({ message: 'invalid input value for enum mission_status: "partial"' })).toBe(true);
+    expect(isInvalidEnumValueError(new Error('Invalid input value for enum task_queue_status'))).toBe(true);
+  });
+  it('does NOT swallow any other error', () => {
+    expect(isInvalidEnumValueError({ code: '23505', message: 'duplicate key' })).toBe(false);
+    expect(isInvalidEnumValueError(new Error('network down'))).toBe(false);
+    expect(isInvalidEnumValueError(null)).toBe(false);
+    expect(isInvalidEnumValueError('invalid input value for enum')).toBe(false);
   });
 });

@@ -90,6 +90,7 @@ export type StreamEvent =
   | 'mission_progress'
   | 'mission_completed'
   | 'mission_failed'
+  | 'mission_partial'
   | 'decision_made'
   | 'response_delivered';
 

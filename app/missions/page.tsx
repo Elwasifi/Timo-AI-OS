@@ -11,7 +11,7 @@ import { useRealtimeRefetch } from '@/lib/hooks/useRealtimeRefetch';
 import { cn } from '@/lib/utils';
 import { isEndedMissionStatus } from '@/lib/swarm/missionStatusDisplay';
 
-const STATUS_TABS = ['All', 'Active', 'Pending', 'Completed', 'Failed'] as const;
+const STATUS_TABS = ['All', 'Active', 'Pending', 'Completed', 'Partial', 'Failed'] as const;
 
 export default function MissionsPage() {
   const router = useRouter();
@@ -59,6 +59,7 @@ export default function MissionsPage() {
     if (tab === 'Active') return m.status === 'planning' || m.status === 'ready' || m.status === 'executing' || m.status === 'reviewing';
     if (tab === 'Pending') return m.status === 'pending' || m.status === 'paused';
     if (tab === 'Completed') return m.status === 'completed';
+    if (tab === 'Partial') return m.status === 'partial';
     if (tab === 'Failed') return m.status === 'failed' || m.status === 'cancelled';
     return true;
   }).filter((m) => m.name.toLowerCase().includes(query.toLowerCase()));

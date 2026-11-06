@@ -78,7 +78,7 @@ describe('the reply is the BRIEF report of the outcome', () => {
   });
 
   it('it is BRIEF: no agent names, workers, tool ids or step names', async () => {
-    h.dbMission = { id: 'm-1', status: 'completed' };
+    h.dbMission = { id: 'm-1', status: 'partial' };
     h.dbTasks = [doneTask('a', 'Optimize for search engines', 'Use semantic HTML.'), failedTask('b', 'Review code quality')];
     const r = await run();
     for (const hidden of ['nova', 'nova-frontend', 'web.search', 'Tool Execution', 'Executed by']) expect(r.response).not.toContain(hidden);

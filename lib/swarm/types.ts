@@ -18,7 +18,16 @@ export type MissionStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
-  | 'paused';
+  | 'paused'
+  /** M7-13c-2b-2b: terminal — some tasks succeeded, others failed / were skipped / cancelled. Added by migration 20261106120000. */
+  | 'partial';
+
+/**
+ * M7-13c-2b-2b: the statuses a mission may still be claimed OUT OF by claimMissionTerminalStatus (and that the detail page
+ * treats as cancellable). A POSITIVE list on purpose: it never names 'partial', so a database whose mission_status enum
+ * lacks that label still accepts the claim filter (a negative list naming 'partial' is rejected with 22P02).
+ */
+export const NON_TERMINAL_MISSION_STATUSES: MissionStatus[] = ['pending', 'planning', 'ready', 'executing', 'reviewing', 'paused'];
 
 export type MissionComplexity = 'simple' | 'medium' | 'complex';
 
@@ -40,6 +49,8 @@ export type TaskQueueStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
+  /** M7-13c-2b-2b: never ran and never will (set only on a waiting/ready task of a settled or abandoned mission). Counts as resolved. */
+  | 'skipped'
   /** M7-04: paused mid-loop on a gated tool call, waiting on a human decision in approval_requests. Not a retry-consuming failure — claim_ready_tasks() naturally excludes it until approval flips it back to 'ready'. */
   | 'awaiting_approval';
 
@@ -54,6 +65,8 @@ export type TimelineEventType =
   | 'task_failed'
   | 'mission_completed'
   | 'mission_failed'
+  | 'mission_partial'
+  | 'task_skipped'
   | 'mission_cancelled'
   | 'mission_paused'
   | 'mission_resumed'

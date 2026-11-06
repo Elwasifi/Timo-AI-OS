@@ -5,6 +5,9 @@
 // mission engine — no business logic lives here.
 
 import { supabase } from '@/lib/supabase/client';
+import { isInvalidEnumValueError } from './missionOutcome';
+import { boundedStatusWrite, bestEffort } from './taskDeadlines';
+import { NON_TERMINAL_MISSION_STATUSES } from './types';
 import type {
   Mission,
   MissionObjective,
@@ -267,16 +270,22 @@ export async function updateMission(
  */
 export async function claimMissionTerminalStatus(
   id: string,
-  status: Extract<Mission['status'], 'completed' | 'failed' | 'cancelled'>,
+  status: Extract<Mission['status'], 'completed' | 'partial' | 'failed' | 'cancelled'>,
   progress: number,
 ): Promise<boolean> {
   const { data, error } = await supabase
     .from('missions')
     .update({ status, progress })
     .eq('id', id)
-    .not('status', 'in', '(completed,failed,cancelled)')
+    // M7-13c-2b-2b: claimable only FROM a non-terminal status (positive list). Every terminal status — completed, failed,
+    // cancelled, partial — is excluded without being named, so the filter is valid even where the enum has no 'partial'.
+    .in('status', NON_TERMINAL_MISSION_STATUSES)
     .select('id')
     .maybeSingle();
+
+  // The ONE error that is rethrown: the database rejected the 'partial' label (an environment without migration
+  // 20261106120000). recalculateProgress catches it and falls back to 'completed' so the mission still settles.
+  if (error && status === 'partial' && isInvalidEnumValueError(error)) throw error;
 
   return !error && !!data;
 }
@@ -590,6 +599,64 @@ export async function claimTask(id: string, assignedWorker?: string | null): Pro
 
   if (error || !data) return null;
   return mapTask(data as TaskRow);
+}
+
+/**
+ * M7-13c-2b-2b: marks ONE task 'skipped' (it never ran and never will) with a reason. Conditional UPDATE: only a task
+ * currently 'waiting' or 'ready' is touched — never a 'running' or already-terminal task — so a skip can never
+ * overwrite a result. Returns the skipped task, or null if it was not in an open pre-run status (or the write failed).
+ * Bounded (status write deadline + one retry); the 'task_skipped' timeline event is best-effort.
+ * NOT called from any production path yet — the stale-mission cleanup (2b-3) is its first caller.
+ */
+export async function skipTask(taskId: string, reason: string): Promise<MissionTask | null> {
+  const res = await boundedStatusWrite('Skipping the task', { taskId }, async () => {
+    const { data, error } = await supabase
+      .from('mission_tasks')
+      .update({ status: 'skipped', error_message: reason, completed_at: new Date().toISOString() })
+      .eq('id', taskId)
+      .in('status', SKIPPABLE_TASK_STATUSES)
+      .select()
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? mapTask(data as TaskRow) : null;
+  });
+  const task = res.ok ? res.value : null;
+  if (task) await recordTaskSkipped(task, reason);
+  return task;
+}
+
+/** M7-13c-2b-2b: skipTask() for every still-open (waiting / ready) task of one mission, in ONE conditional UPDATE. Same guarantees; returns the tasks it skipped. */
+export async function skipOpenTasks(missionId: string, reason: string): Promise<MissionTask[]> {
+  const res = await boundedStatusWrite('Skipping the open tasks', { missionId }, async () => {
+    const { data, error } = await supabase
+      .from('mission_tasks')
+      .update({ status: 'skipped', error_message: reason, completed_at: new Date().toISOString() })
+      .eq('mission_id', missionId)
+      .in('status', SKIPPABLE_TASK_STATUSES)
+      .select();
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as TaskRow[]).map(mapTask);
+  });
+  const tasks = res.ok ? res.value : [];
+  for (const task of tasks) await recordTaskSkipped(task, reason);
+  return tasks;
+}
+
+/** Only these pre-run statuses may become 'skipped'. 'running', 'awaiting_approval' and every terminal status are excluded on purpose. */
+export const SKIPPABLE_TASK_STATUSES: TaskQueueStatus[] = ['waiting', 'ready'];
+
+async function recordTaskSkipped(task: MissionTask, reason: string): Promise<void> {
+  await bestEffort('Recording the task_skipped event', { taskId: task.id, missionId: task.missionId }, () =>
+    addTimelineEntry({
+      missionId: task.missionId,
+      eventType: 'task_skipped',
+      entityType: 'task',
+      entityId: task.id,
+      title: `Task skipped: ${task.title}`,
+      detail: reason,
+      metadata: { reason },
+    }),
+  );
 }
 
 export async function appendExecutionLog(

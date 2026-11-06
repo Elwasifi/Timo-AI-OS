@@ -360,3 +360,33 @@ describe('E — the mission settles with an honest outcome', () => {
     expect(computeMissionOutcome([row('a', 'running'), row('b', 'ready')]).status).toBe('in_progress');
   });
 });
+
+describe("M7-13c-2b-2b: a 'skipped' task is resolved — executeMissionTasks never re-runs it", () => {
+  const withStatus = (t: unknown, status: string) => ({ ...(t as object), status }) as never;
+
+  it('skipped / completed / cancelled tasks are not executed, claimed, or announced; only the open one runs', async () => {
+    h.decide.mockResolvedValue(answer);
+    const skipped = withStatus(mk('task-s', 'Skipped task'), 'skipped');
+    const done = withStatus(mk('task-d', 'Done task'), 'completed');
+    const cancelled = withStatus(mk('task-c', 'Cancelled task'), 'cancelled');
+    const p = executeMissionTasks(mission, [skipped, done, cancelled, task2], [], undefined);
+    await vi.advanceTimersByTimeAsync(5_000);
+    const results = await p;
+
+    expect(results).toHaveLength(1);
+    expect(h.claimTask.mock.calls.map((c) => c[0])).toEqual(['task-2']);
+    expect(h.decide).toHaveBeenCalledTimes(1);
+    expect(h.updateTask.mock.calls.some((c) => c[0] === 'task-s')).toBe(false);
+  });
+
+  it('progress counts the skipped task as already resolved (resolved / total, not 0%)', async () => {
+    h.decide.mockResolvedValue(answer);
+    const progress: string[] = [];
+    const skipped = withStatus(mk('task-s', 'Skipped task'), 'skipped');
+    const p = executeMissionTasks(mission, [skipped, task2], [], (title) => progress.push(title));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await p;
+    // 1 skipped (pre-resolved) + the task that just ran = 2 of 2 -> 100%
+    expect(progress).toContain('Mission progress: 100%');
+  });
+});

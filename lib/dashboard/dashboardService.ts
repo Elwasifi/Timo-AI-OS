@@ -43,6 +43,8 @@ export interface MissionSummary {
   completed: number;
   failed: number;
   cancelled: number;
+  /** M7-13c-2b-2b: settled with some tasks not succeeding. */
+  partial: number;
   paused: number;
   averageProgress: number;
 }
@@ -55,6 +57,8 @@ export interface TaskQueueSummary {
   completed: number;
   failed: number;
   cancelled: number;
+  /** M7-13c-2b-2b: never ran and never will. */
+  skipped: number;
 }
 
 export interface DepartmentInfo {
@@ -149,12 +153,13 @@ export async function getMissionSummary(tenantId?: string | null): Promise<Missi
   const completed = missions.filter((m) => m.status === 'completed').length;
   const failed = missions.filter((m) => m.status === 'failed').length;
   const cancelled = missions.filter((m) => m.status === 'cancelled').length;
+  const partial = missions.filter((m) => m.status === 'partial').length;
   const paused = missions.filter((m) => m.status === 'paused').length;
   const avgProgress = missions.length > 0
     ? Math.round(missions.reduce((sum, m) => sum + m.progress, 0) / missions.length)
     : 0;
 
-  return { total: missions.length, running, completed, failed, cancelled, paused, averageProgress: avgProgress };
+  return { total: missions.length, running, completed, failed, cancelled, partial, paused, averageProgress: avgProgress };
 }
 
 export async function getRecentMissions(limit = 10, tenantId?: string | null): Promise<Mission[]> {
@@ -215,6 +220,7 @@ export async function getTaskQueueSummary(tenantId?: string | null): Promise<Tas
     completed: tasks.filter((t) => t.status === 'completed').length,
     failed: tasks.filter((t) => t.status === 'failed').length,
     cancelled: tasks.filter((t) => t.status === 'cancelled').length,
+    skipped: tasks.filter((t) => t.status === 'skipped').length,
   };
 }
 

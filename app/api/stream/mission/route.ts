@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { getMission, getTimeline } from '@/lib/swarm/missionService';
 import { formatSSE, type StreamEvent } from '@/lib/api/realtime';
 import { requireUser, isTenantMember } from '@/lib/auth/apiAuth';
+import { mapTimelineEventToStreamEvent, settledOutcomeOf } from '@/lib/swarm/missionStreamEvents';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -88,11 +89,10 @@ export async function GET(req: NextRequest) {
           }
 
           // Check if mission is complete
-          const hasCompleted = timeline.some(
-            (t) => t.eventType === 'mission_completed' || t.eventType === 'mission_failed',
-          );
-          if (hasCompleted) {
-            controller.enqueue(encoder.encode(formatSSE('mission_completed' as StreamEvent, { missionId, finalEventCount: timeline.length })));
+          // M7-13c-2b-2b: 'mission_partial' settles a mission too — without it a partial mission's stream would poll for the full 5 minutes.
+          const settledOutcome = settledOutcomeOf(timeline);
+          if (settledOutcome) {
+            controller.enqueue(encoder.encode(formatSSE('mission_completed' as StreamEvent, { missionId, finalEventCount: timeline.length, outcome: settledOutcome })));
             controller.close();
             return;
           }
@@ -116,32 +116,4 @@ export async function GET(req: NextRequest) {
       'Access-Control-Allow-Origin': '*',
     },
   });
-}
-
-function mapTimelineEventToStreamEvent(timelineEventType: string): StreamEvent {
-  const map: Record<string, StreamEvent> = {
-    mission_created: 'mission_started',
-    mission_planned: 'mission_started',
-    objectives_generated: 'mission_started',
-    tasks_created: 'task_started',
-    task_assigned: 'manager_assigned',
-    task_started: 'task_started',
-    task_completed: 'task_finished',
-    task_failed: 'mission_failed',
-    tool_selected: 'tool_executed',
-    workflow_executed: 'workflow_executed',
-    memory_retrieved: 'memory_loaded',
-    knowledge_retrieved: 'knowledge_retrieved',
-    provider_selected: 'provider_selected',
-    execution_started: 'task_started',
-    execution_finished: 'task_finished',
-    execution_failed: 'mission_failed',
-    execution_retried: 'task_started',
-    mission_completed: 'mission_completed',
-    mission_failed: 'mission_failed',
-    decision_made: 'decision_made',
-    pipeline_selected: 'mission_started',
-    mission_updated: 'mission_progress',
-  };
-  return map[timelineEventType] ?? 'mission_progress';
 }

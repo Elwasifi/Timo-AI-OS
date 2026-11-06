@@ -11,7 +11,7 @@ import { missionStatusDisplay } from '@/lib/swarm/missionStatusDisplay';
 // correctly instead of falling through to `undefined` config.
 export type MissionCardStatus =
   | 'pending' | 'planning' | 'ready' | 'executing' | 'reviewing'
-  | 'completed' | 'failed' | 'cancelled' | 'paused';
+  | 'completed' | 'failed' | 'cancelled' | 'paused' | 'partial';
 
 export type Mission = {
   id: string;

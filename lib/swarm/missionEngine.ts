@@ -41,7 +41,7 @@ import {
   classifyComplexity,
 } from './missionPlanner';
 import { dispatchTasks } from './swarmManager';
-import { computeMissionOutcome, dbStatusOf, outcomeMetadata } from './missionOutcome';
+import { computeMissionOutcome, dbStatusOf, outcomeMetadata, isInvalidEnumValueError } from './missionOutcome';
 import { checkEntitlement, consumeProjectSlot, checkBudget } from '@/lib/governance/entitlements';
 import {
   recordMissionCreated,
@@ -52,6 +52,7 @@ import {
   recordTaskCompleted,
   recordTaskFailed,
   recordMissionCompleted,
+  recordMissionPartial,
   recordMissionFailed,
   recordMissionCancelled,
 } from './missionTimeline';
@@ -389,7 +390,7 @@ export async function recalculateProgress(missionId: string): Promise<void> {
     missionStatus: full.mission.status,
     missionCancelled: full.mission.status === 'cancelled',
   });
-  const status = dbStatusOf(outcome);
+  let status = dbStatusOf(outcome);
 
   if (status === null) {
     // Still in progress: keep the current status, write the shared progress figure (resolved / total).
@@ -401,11 +402,23 @@ export async function recalculateProgress(missionId: string): Promise<void> {
   // M5-04: claim the terminal transition atomically before running any side effects — if this returns false,
   // a concurrent call already transitioned this mission out of non-terminal status first, so the
   // completion/failure bookkeeping below has already run once for this mission and must not run again.
-  const claimed = await claimMissionTerminalStatus(missionId, status, outcome.progress);
+  // M7-13c-2b-2b: a partial outcome is stored as mission_status 'partial'. SAFETY NET: if the database rejects that
+  // label (invalid enum value — an environment without migration 20261106120000) fall back to the pre-migration
+  // storage (status 'completed' + metadata.outcome) so the mission can never stay unsettled.
+  let partialStoredAsCompleted = false;
+  let claimed: boolean;
+  try {
+    claimed = await claimMissionTerminalStatus(missionId, status, outcome.progress);
+  } catch (err) {
+    if (status !== 'partial' || !isInvalidEnumValueError(err)) throw err;
+    console.error(`[swarm] mission_status 'partial' rejected by the database (${err instanceof Error ? err.message : String(err)}) — falling back to status 'completed' + metadata.outcome (mission=${missionId})`);
+    status = 'completed';
+    partialStoredAsCompleted = true;
+    claimed = await claimMissionTerminalStatus(missionId, status, outcome.progress);
+  }
   if (!claimed) return;
 
-  // 'partial' is not a database label yet, so it is stored as 'completed'; the truthful outcome travels in
-  // metadata.outcome (merged — every other metadata key is preserved).
+  // The truthful outcome travels in metadata.outcome (merged — every other metadata key is preserved) in every case.
   await updateMission(missionId, {
     metadata: { ...(full.mission.metadata ?? {}), outcome: outcomeMetadata(outcome) },
   });
@@ -430,7 +443,11 @@ export async function recalculateProgress(missionId: string): Promise<void> {
     return;
   }
 
-  await recordMissionCompleted(missionId, full.mission.title, 100);
+  if (outcome.status === 'partial' && !partialStoredAsCompleted) {
+    await recordMissionPartial(missionId, full.mission.title, `${notDone} of ${total} tasks did not succeed`, outcome.progress);
+  } else {
+    await recordMissionCompleted(missionId, full.mission.title, 100);
+  }
 
   // Partial outcome: some tasks genuinely did not succeed — a real signal worth capturing, unlike a fully clean run.
   if (outcome.status === 'partial') {
@@ -467,19 +484,21 @@ export async function recalculateObjectiveStatus(missionId: string, objectiveId:
   const total = objectiveTasks.length;
   const completed = objectiveTasks.filter((t) => t.status === 'completed').length;
   const failed = objectiveTasks.filter((t) => t.status === 'failed').length;
+  // M7-13c-2b-2b: a skipped task is resolved (it will never run); it is neither a success nor a failure.
+  const skipped = objectiveTasks.filter((t) => t.status === 'skipped').length;
 
-  if (completed + failed === total) {
-    const status = failed > 0 && completed === 0 ? 'failed' : 'completed';
+  if (completed + failed + skipped === total) {
+    const status = completed === 0 ? 'failed' : 'completed';
     await updateObjective(objectiveId, { status });
     return;
   }
 
-  if (completed + failed > 0 || objectiveTasks.some((t) => t.status === 'running')) {
+  if (completed + failed + skipped > 0 || objectiveTasks.some((t) => t.status === 'running')) {
     await updateObjective(objectiveId, { status: 'in_progress' });
   }
 }
 
-const TERMINAL_MISSION_STATUSES: Mission['status'][] = ['completed', 'failed', 'cancelled'];
+const TERMINAL_MISSION_STATUSES: Mission['status'][] = ['completed', 'failed', 'cancelled', 'partial'];
 const NON_TERMINAL_TASK_STATUSES: MissionTask['status'][] = ['waiting', 'ready', 'running'];
 
 /**

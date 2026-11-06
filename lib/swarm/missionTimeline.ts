@@ -176,6 +176,22 @@ export async function recordMissionFailed(
   });
 }
 
+/** M7-13c-2b-2b: the settle event for a PARTIAL mission (some tasks succeeded, others did not) — never mission_completed. */
+export async function recordMissionPartial(
+  missionId: string,
+  title: string,
+  detail: string,
+  progress = 100,
+): Promise<void> {
+  await recordEvent(missionId, 'mission_partial', {
+    entityType: 'mission',
+    entityId: missionId,
+    title: `Mission partially completed: ${title}`,
+    detail,
+    metadata: { progress, reason: detail },
+  });
+}
+
 export async function recordMissionCancelled(
   missionId: string,
   title: string,

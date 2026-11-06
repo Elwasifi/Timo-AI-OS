@@ -11,8 +11,9 @@
 //   - A simulated result while the task ran in LIVE mode is an ANOMALY: it is NOT a success.
 //   - Failure reasons stay visible everywhere (honesty).
 //
-// 'partial' is not a database value yet (mission_status has no such label — that needs a migration, a later ticket):
-// the writer stores DB status 'completed' for a partial outcome and keeps the full outcome in missions.metadata.outcome.
+// 'partial' is a database value since migration 20261106120000 (M7-13c-2b-2a): the writer stores DB status 'partial' for
+// a partial outcome and keeps the full outcome in missions.metadata.outcome. If a database ever rejects the label (an
+// environment without the migration), recalculateProgress falls back to status 'completed' + metadata.outcome.
 
 import { dedupeJoinedFailureText } from '@/lib/utils/failureText';
 
@@ -31,7 +32,7 @@ export type TaskOutcomeState =
 export interface OutcomeTaskInput {
   id: string;
   title: string;
-  /** task_queue_status value, plus 'skipped' (not a DB value yet). Anything unknown is treated as 'open'. */
+  /** A task_queue_status value ('skipped' included since migration 20261106120000). Anything unknown is treated as 'open'. */
   status: string;
   result?: Record<string, unknown> | null;
   errorMessage?: string | null;
@@ -301,18 +302,29 @@ export function outcomeMetadata(outcome: MissionOutcome, computedAt: string = ne
   return { status: outcome.status, simulatedTag: outcome.simulatedTag, counts: outcome.counts, computedAt };
 }
 
+/**
+ * True when a database error is Postgres rejecting an enum label it does not have (SQLSTATE 22P02,
+ * "invalid input value for enum ..."). Used ONLY by the 'partial' safety fallback in recalculateProgress.
+ */
+export function isInvalidEnumValueError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: unknown; message?: unknown };
+  return e.code === '22P02' || (typeof e.message === 'string' && /invalid input value for enum/i.test(e.message));
+}
+
 /** The runtime-state label (lib/swarm/runtimeStore.ts ExecutionState) for an outcome. */
 export function executionStateOf(outcome: MissionOutcome): 'executing' | 'completed' | 'failed' {
   if (outcome.status === 'in_progress') return 'executing';
   return outcome.status === 'completed' || outcome.status === 'partial' ? 'completed' : 'failed';
 }
 
-/** Today's database status for an outcome: 'partial' is not a DB label yet, so it is stored as 'completed'. */
-export function dbStatusOf(outcome: MissionOutcome): 'completed' | 'failed' | 'cancelled' | null {
+/** The mission_status a settled outcome is stored as. 'partial' is its own label (migration 20261106120000). */
+export function dbStatusOf(outcome: MissionOutcome): 'completed' | 'partial' | 'failed' | 'cancelled' | null {
   switch (outcome.status) {
     case 'completed':
-    case 'partial':
       return 'completed';
+    case 'partial':
+      return 'partial';
     case 'failed':
       return 'failed';
     case 'cancelled':

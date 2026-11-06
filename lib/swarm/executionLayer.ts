@@ -1061,6 +1061,9 @@ async function failTaskOutOfBand(
 
 // ---- Execute All Tasks for a Mission ----
 
+/** M7-13c-2b-2b: a task in one of these statuses is already resolved before this run — it is never (re)executed. 'skipped' = it will never run. */
+const RESOLVED_BEFORE_RUN: ReadonlyArray<MissionTask['status']> = ['completed', 'cancelled', 'skipped'];
+
 export async function executeMissionTasks(
   mission: Mission,
   tasks: MissionTask[],
@@ -1074,11 +1077,11 @@ export async function executeMissionTasks(
   const priorResults: PriorTaskResult[] = [];
 
   // M7-13c-2b-1: tasks already finished before this run count as resolved for the shared progress figure.
-  const preResolved = tasks.filter((t) => t.status === 'completed' || t.status === 'cancelled').length;
+  const preResolved = tasks.filter((t) => RESOLVED_BEFORE_RUN.includes(t.status)).length;
 
   // Execute tasks sequentially (parallel execution is Phase 4)
   for (const task of tasks) {
-    if (task.status === 'completed' || task.status === 'cancelled') {
+    if (RESOLVED_BEFORE_RUN.includes(task.status)) {
       continue;
     }
 

@@ -221,7 +221,7 @@ export function buildStaticGraph(input: StaticGraphInput): GBrainGraph {
       mission.status === 'executing' ? 'executing' :
       mission.status === 'planning' ? 'thinking' :
       mission.status === 'reviewing' ? 'thinking' :
-      mission.status === 'completed' ? 'completed' :
+      mission.status === 'completed' || mission.status === 'partial' ? 'completed' :
       mission.status === 'failed' ? 'error' : 'idle';
 
     const taskCount = missionTasks.filter((t) => t.missionId === mission.id).length;
@@ -512,19 +512,20 @@ export function normalizeMissions(
   steps: number;
   lastRun: string;
 }[] {
+  // M7-13c-2b-2b: 'partial' is a settled status like completed / failed — it is NOT active.
   const active = missions
-    .filter((m) => m.status !== 'completed' && m.status !== 'cancelled' && m.status !== 'failed')
+    .filter((m) => m.status !== 'completed' && m.status !== 'cancelled' && m.status !== 'failed' && m.status !== 'partial')
     .slice(0, 4);
 
   if (active.length === 0) {
     // Show recently completed if no active
     return missions
-      .filter((m) => m.status === 'completed' || m.status === 'failed')
+      .filter((m) => m.status === 'completed' || m.status === 'failed' || m.status === 'partial')
       .slice(0, 2)
       .map((m) => ({
         id: m.id,
         name: m.title,
-        status: m.status === 'completed' ? 'idle' : 'error',
+        status: m.status === 'failed' ? 'error' : 'idle',
         progress: m.progress,
         steps: tasks.filter((t) => t.missionId === m.id).length,
         lastRun: timeAgo(new Date(m.updatedAt).getTime()),
