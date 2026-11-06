@@ -187,12 +187,11 @@ export async function launchMission(
     }
   }
 
-  // 8. Update progress based on dispatch
+  // 8. Dispatch bookkeeping. M7-13c-2b-1c: this used to write progress = dispatched / total * 50, so a mission whose
+  //    tasks were only ASSIGNED showed 50% with nothing finished. Progress is now written only by recalculateProgress()
+  //    (resolved / total, lib/swarm/missionOutcome.ts resolvedProgress) — 0% until a task resolves.
   const dispatchedCount = assignments.length;
   const totalTasks = tasks.length;
-  const progress = totalTasks > 0 ? Math.round((dispatchedCount / totalTasks) * 50) : 0;
-
-  await updateMission(mission.id, { progress });
 
   // 9. Fetch final state
   const full = await getFullMission(mission.id);

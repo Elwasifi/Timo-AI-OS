@@ -33,19 +33,32 @@ import { executeWorker, managerReview, type WorkerTask } from '@/lib/crew/manage
 import { detectIntent } from '@/lib/context/intent-detector';
 import { decideTools, isPlaceholderAnswer, NON_RETRYABLE_TOOL_FAILURES } from '@/lib/context/tool-decision';
 import { buildManagerContext } from './managerContext';
-import { updateTask, claimTask, appendExecutionLog, getTasks } from './missionService';
+import { updateTask, claimTask, appendExecutionLog as appendExecutionLogRaw, getTasks } from './missionService';
 import { recalculateProgress, recalculateObjectiveStatus } from './missionEngine';
 import {
-  recordEvent,
-  recordTaskStarted,
-  recordTaskCompleted,
-  recordTaskFailed,
+  recordEvent as recordEventRaw,
+  recordTaskStarted as recordTaskStartedRaw,
+  recordTaskCompleted as recordTaskCompletedRaw,
+  recordTaskFailed as recordTaskFailedRaw,
 } from './missionTimeline';
-import { emitRuntimeEvent } from './runtimeStore';
+import { emitRuntimeEvent as emitRuntimeEventRaw } from './runtimeStore';
+import {
+  DeadlineError,
+  withDeadline,
+  bestEffort,
+  boundedStatusWrite,
+  createTaskRunGuard,
+  taskHardDeadlineMs,
+  TOOL_STEP_MAX_MS,
+  STATUS_WRITE_TIMEOUT_MS,
+  DEFAULT_TASK_TIMEOUT_MS,
+  type TaskRunGuard,
+  type DeadlineContext,
+} from './taskDeadlines';
 import { findWorkerForTask, resolveRoleId } from './workerRouter';
 import { resolvedProgress } from './missionOutcome';
 import { getTenantExecutionMode } from '@/lib/governance/executionMode';
-import type { MissionTask, Mission, MissionObjective } from './types';
+import type { MissionTask, Mission, MissionObjective, TaskQueueStatus } from './types';
 import type { ExecutionResult, ExecutionStep, ExecutionContext, PriorTaskResult, ManagerContext } from './executionTypes';
 import type { AgentRecord } from '@/lib/agents/types';
 import type { Intent } from '@/types';
@@ -112,6 +125,20 @@ export class NonRetryableTaskError extends Error {
   }
 }
 
+/**
+ * M7-13c-2b-1c: the Tool Decision step (planner + tool runs) hit its deadline. NOT retried: the abandoned decideTools
+ * call cannot be cancelled, so a live, non-read-only tool action (an email send, a workflow trigger) may still complete
+ * in the background — running the step again could execute the same side effect twice. Not "deterministic" either: the
+ * same request may well succeed later, so the stored failure says deterministic:false and a human can run it again.
+ */
+export class ToolStepTimeoutError extends NonRetryableTaskError {
+  readonly deterministic = false;
+  constructor(seconds: number) {
+    super(`Tool step timed out after ${seconds} s — the task was stopped without retrying so a tool action is not run twice.`, 'timeout');
+    this.name = 'ToolStepTimeoutError';
+  }
+}
+
 /** M7-13c-2b-1: true when a tool result (single envelope, or a chain of them) is a simulated one. */
 function envelopeSimulated(r: unknown): boolean {
   if (!r || typeof r !== 'object') return false;
@@ -128,6 +155,60 @@ function envelopeMode(r: unknown): string | undefined {
   if (Array.isArray(o.results)) for (const x of o.results) { const m = envelopeMode(x); if (m) return m; }
   return undefined;
 }
+
+// ---- Bounded side-effect writes (M7-13c-2b-1c) ----
+//
+// Every timeline / execution-log / runtime-activity write in this file goes through these wrappers (same names as the
+// functions they wrap, so the many call sites below read as before). Each runs under a 15 s deadline and is NON-FATAL:
+// a timeout or error is logged with the step name and the task carries on. Before, an `await recordEvent(...)` that
+// never settled held the task in 'running' for ever (live: mission d2145ef1, the write right after a failed web.search).
+
+const recordEvent = async (missionId: string, type: Parameters<typeof recordEventRaw>[1], options: Parameters<typeof recordEventRaw>[2]): Promise<void> => {
+  await bestEffort(`timeline event ${type}`, { missionId, taskId: options.entityType === 'task' ? options.entityId ?? null : null }, () => recordEventRaw(missionId, type, options));
+};
+const recordTaskStarted = async (missionId: string, taskId: string, title: string, manager: string): Promise<void> => {
+  await bestEffort('timeline event task_started', { missionId, taskId }, () => recordTaskStartedRaw(missionId, taskId, title, manager));
+};
+const recordTaskCompleted = async (missionId: string, taskId: string, title: string, manager: string): Promise<void> => {
+  await bestEffort('timeline event task_completed', { missionId, taskId }, () => recordTaskCompletedRaw(missionId, taskId, title, manager));
+};
+const recordTaskFailed = async (missionId: string, taskId: string, title: string, error: string): Promise<void> => {
+  await bestEffort('timeline event task_failed', { missionId, taskId }, () => recordTaskFailedRaw(missionId, taskId, title, error));
+};
+const appendExecutionLog = async (taskId: string, entry: Parameters<typeof appendExecutionLogRaw>[1], ctx: DeadlineContext = {}): Promise<void> => {
+  await bestEffort('execution log append', { ...ctx, taskId }, () => appendExecutionLogRaw(taskId, entry));
+};
+const emitRuntimeEvent = async (event: Parameters<typeof emitRuntimeEventRaw>[0]): Promise<void> => {
+  await bestEffort('runtime activity write', { missionId: event.missionId, taskId: event.taskId }, () => emitRuntimeEventRaw(event));
+};
+
+/**
+ * A status-changing task write: bounded (20 s, one retry) and CONDITIONAL on the row still being in one of
+ * `expected`. Returns true only when the UPDATE matched. A run that has been superseded (hard deadline fired) does not
+ * even try — together with the conditional UPDATE this is what stops a late completion overwriting the timed-out state.
+ */
+async function writeTaskStatus(
+  step: string,
+  ctx: { taskId: string; missionId: string },
+  patch: Parameters<typeof updateTask>[1],
+  expected: TaskQueueStatus[],
+  guard?: TaskRunGuard,
+): Promise<boolean> {
+  if (guard?.superseded) {
+    console.warn(`[swarm] ${step} skipped: this run was superseded after a timeout (task=${ctx.taskId} mission=${ctx.missionId})`);
+    return false;
+  }
+  const res = await boundedStatusWrite(step, ctx, () => updateTask(ctx.taskId, patch, { onlyIfStatus: expected }));
+  if (!res.ok) return false;
+  if (res.value === null) {
+    console.warn(`[swarm] ${step} did not apply: the task is no longer ${expected.join('/')} or the write was rejected (task=${ctx.taskId} mission=${ctx.missionId})`);
+    return false;
+  }
+  return true;
+}
+
+const taskTimeoutMsOf = (task: MissionTask): number =>
+  (task as MissionTask & { task_timeout_ms?: number }).task_timeout_ms ?? DEFAULT_TASK_TIMEOUT_MS;
 
 // ---- Timeout helper ----
 
@@ -150,18 +231,23 @@ export async function executeTask(
   mission: Mission,
   objective: MissionObjective | null,
   priorResults: PriorTaskResult[] = [],
+  /** M7-13c-2b-1c: shared with the supervisor in executeMissionTasks(); see TaskRunGuard. */
+  guard: TaskRunGuard = createTaskRunGuard(),
 ): Promise<ExecutionResult> {
   const startTime = Date.now();
   const steps: ExecutionStep[] = [];
   const managerId = task.assignedManager ?? 'temo';
   const managerName = managerId;
+  const taskCtx = { taskId: task.id, missionId: mission.id };
 
-  // Resolve the manager's stable identifier from the agent registry
-  const managerRecord = await getAgentById(managerId);
+  // Resolve the manager's stable identifier from the agent registry. Bounded: a lookup that never answers is treated
+  // as "not found" (the same degradation getAgentById / findWorkerForTask already have on a database error).
+  guard.step = 'looking up the assigned agent';
+  const managerRecord = (await bestEffort('agent lookup', taskCtx, () => getAgentById(managerId))) ?? null;
   const managerRoleId = resolveRoleId(managerRecord);
 
   // Attempt role-based worker selection for this manager's hierarchy
-  const workerMatch = await findWorkerForTask(managerId, task.requiredCapability);
+  const workerMatch = (await bestEffort('worker lookup', taskCtx, () => findWorkerForTask(managerId, task.requiredCapability))) ?? null;
   const workerRecord: AgentRecord | null = workerMatch?.agent ?? null;
   const workerId = workerRecord?.id ?? null;
   const workerRoleId = workerRecord ? resolveRoleId(workerRecord) : null;
@@ -171,7 +257,17 @@ export async function executeTask(
   // pipeline and the background task-queue processor pick up the same
   // task — whichever caller wins the UPDATE proceeds; the other bails out
   // immediately below instead of re-running the same work.
-  const claimed = await claimTask(task.id, workerId);
+  guard.step = 'claiming the task';
+  let claimed: Awaited<ReturnType<typeof claimTask>> = null;
+  try {
+    claimed = await withDeadline('Claiming the task', STATUS_WRITE_TIMEOUT_MS, () => claimTask(task.id, workerId));
+  } catch (err) {
+    // The claim neither succeeded nor failed within the deadline, so the row's real state is unknown. Do not run the
+    // task and do not leave it where it is: fail it (conditional on it not having finished) and let the pipeline move on.
+    const message = `${err instanceof Error ? err.message : 'The task could not be claimed'} — the task was not started.`;
+    console.error(`[swarm] claim task failed: ${message} (task=${task.id} mission=${mission.id})`);
+    return failTaskOutOfBand(task, mission, message, 'timeout', guard, Date.now() - startTime);
+  }
   if (!claimed) {
     return {
       taskId: task.id,
@@ -244,7 +340,27 @@ export async function executeTask(
   // column default (see 20260904160000_raise_task_timeout_default.sql).
   const timeoutMs = (task as MissionTask & { task_timeout_ms?: number }).task_timeout_ms ?? 90000;
 
+  const supersededResult = (): ExecutionResult => ({
+    taskId: task.id,
+    missionId: mission.id,
+    managerId,
+    managerName,
+    managerRoleId,
+    workerId,
+    workerRoleId,
+    delegated: workerId !== null,
+    status: 'cancelled',
+    output: '',
+    result: {},
+    error: 'This run was abandoned after a timeout; its outcome was discarded.',
+    retries,
+    durationMs: Date.now() - startTime,
+    steps,
+  });
+
   while (retries <= maxRetries) {
+    if (guard.superseded) return supersededResult();
+    guard.attempts = retries + 1;
     try {
       // Tool Decision — same gate the chat path already runs via
       // decideTools() (lib/context/tool-decision.ts), reused here rather
@@ -266,26 +382,50 @@ export async function executeTask(
       // and the AI tool planner (which also reads this same text) the real
       // request to work from, not just the paraphrase.
       const taskText = `${task.title}. ${task.description}\n\nOriginal user request: ${mission.userRequest}`;
-      const toolStep = await trackStep('Tool Decision', async () => {
-        const routingIntentStub: Intent = {
-          category: 'general',
-          confidence: 0.5,
-          matchedKeywords: [],
-          reason: 'mission-task',
-          needsClarification: false,
-        };
-        const detectedIntent = detectIntent(taskText, routingIntentStub);
-        // M5-11: workerId (resolved above via findWorkerForTask, before
-        // this point) is who will actually execute the delegated work —
-        // this used to always pass managerId here regardless, so a
-        // worker's own AGENT_PERMISSIONS scope (M5-10) was never actually
-        // checked; tool access for delegated work was gated entirely on
-        // the manager's broader permissions (Deep Integrity Audit,
-        // Section B).
-        return decideTools(taskText, detectedIntent, workerId ?? managerId, mission.tenantId, mission.isSimulation, mission.id, task.id);
-      });
+      guard.step = 'the tool decision';
+      const toolStepMs = Math.min(timeoutMs, TOOL_STEP_MAX_MS);
+      let toolStepAbandoned = false;
+      const toolStep = await (async () => {
+        try {
+          return await trackStep('Tool Decision', () => withDeadline('Tool step', toolStepMs, async () => {
+            const routingIntentStub: Intent = {
+              category: 'general',
+              confidence: 0.5,
+              matchedKeywords: [],
+              reason: 'mission-task',
+              needsClarification: false,
+            };
+            const detectedIntent = detectIntent(taskText, routingIntentStub);
+            // M5-11: workerId (resolved above via findWorkerForTask, before
+            // this point) is who will actually execute the delegated work —
+            // this used to always pass managerId here regardless, so a
+            // worker's own AGENT_PERMISSIONS scope (M5-10) was never actually
+            // checked; tool access for delegated work was gated entirely on
+            // the manager's broader permissions (Deep Integrity Audit,
+            // Section B).
+            const decided = await decideTools(taskText, detectedIntent, workerId ?? managerId, mission.tenantId, mission.isSimulation, mission.id, task.id);
+            // The call outlived its deadline (the step already failed, see below). Whatever it returns now is discarded:
+            // nothing downstream of this point runs for it, so no status or timeline write can follow the failure write.
+            if (toolStepAbandoned) {
+              console.warn(`[swarm] late tool-step result discarded after timeout (task=${task.id} mission=${mission.id})`);
+            }
+            return decided;
+          }).catch((err) => {
+            if (err instanceof DeadlineError) toolStepAbandoned = true;
+            throw err;
+          }));
+        } catch (err) {
+          // Not retried — see ToolStepTimeoutError. Everything after this goes through the ordinary failure path
+          // (failed status write, task_failed + execution_failed events, runtime event), then the mission rollup.
+          if (toolStepAbandoned) throw new ToolStepTimeoutError(Math.round(toolStepMs / 1000));
+          throw err;
+        }
+      })();
       steps.push(toolStep.step);
       const toolResult = toolStep.value;
+      // M7-13c-2b-1c: an abandoned run that wakes up late must not go on to write events or results for a task the
+      // supervisor already failed (checked again before every later status write).
+      if (guard.superseded) return supersededResult();
 
       // M7-03: make the tri-state tool-decision outcome ('handled' /
       // 'declined_no_match' / 'attempted_failed' — lib/context/tool-decision.ts)
@@ -347,7 +487,7 @@ export async function executeTask(
       // tool execution in app/api/approvals/[id]/confirm/route.ts,
       // independent of this task-resume mechanism entirely.
       if (toolResult.outcome === 'pending_approval' && toolResult.pendingApprovalId) {
-        await updateTask(task.id, { status: 'awaiting_approval' });
+        await writeTaskStatus('task awaiting_approval', taskCtx, { status: 'awaiting_approval' }, ['running'], guard);
         await recordEvent(mission.id, 'tool_decision_outcome', {
           entityType: 'task',
           entityId: task.id,
@@ -427,8 +567,9 @@ export async function executeTask(
         // No tool action needed — existing LLM/worker execution, unchanged.
 
         // Build manager context (memory, knowledge, tools, workflows, prior results)
+        guard.step = 'building the task context';
         const ctxStep = trackStep('Context Building', async () => {
-          const ctx = await buildManagerContext(task, mission, objective, priorResults);
+          const ctx = await withDeadline('Context building', Math.min(timeoutMs, TOOL_STEP_MAX_MS), () => buildManagerContext(task, mission, objective, priorResults));
           if (!ctx) throw new Error('Failed to build manager context');
           return ctx;
         });
@@ -466,10 +607,11 @@ export async function executeTask(
         // trackStep resolves, before the fake-success guard below (which
         // would otherwise reject the empty output this branch returns).
         let awaitingApprovalId: string | null = null;
+        guard.step = 'the model call';
         const llmStep = await trackStep(
           workerId ? 'Worker Execution' : 'LLM Execution',
           async () => {
-            const settings = await loadSettings();
+            const settings = await withDeadline('Loading settings', Math.min(timeoutMs, TOOL_STEP_MAX_MS), () => loadSettings());
 
             if (workerId && workerRecord) {
               // Worker execution and manager review are each independently
@@ -499,7 +641,7 @@ export async function executeTask(
               missionComplexity: mission.estimatedComplexity,
               requiredCapability: task.requiredCapability,
             });
-            const decision = await route({ classification, tenantId: mission.tenantId });
+            const decision = await withDeadline('Model routing', Math.min(timeoutMs, TOOL_STEP_MAX_MS), () => route({ classification, tenantId: mission.tenantId }));
 
             await recordEvent(mission.id, 'provider_selected', {
               entityType: 'task',
@@ -535,8 +677,8 @@ export async function executeTask(
                 taskId: task.id,
                 maxSteps: task.maxLoopSteps,
                 initialLoopState: task.loopState,
-                onCheckpoint: async (state) => { await updateTask(task.id, { loopState: state }); },
-                onClearCheckpoint: async () => { await updateTask(task.id, { loopState: null }); },
+                onCheckpoint: async (state) => { await bestEffort('agent-loop checkpoint', taskCtx, () => updateTask(task.id, { loopState: state })); },
+                onClearCheckpoint: async () => { await bestEffort('agent-loop checkpoint clear', taskCtx, () => updateTask(task.id, { loopState: null })); },
               }, {
                 temperature: settings.temperature,
                 maxTokens: settings.max_tokens,
@@ -564,6 +706,7 @@ export async function executeTask(
         steps.push(llmStep.step);
         steps.push(...loopSteps);
         output = llmStep.value;
+        if (guard.superseded) return supersededResult();
 
         // M7-04: the loop paused on a gated tool call — this is not a
         // completion and not a failure. Stop here: mark the task
@@ -574,7 +717,7 @@ export async function executeTask(
         // task.retries at all — a real approval decision resumes or fails
         // this task next, not the whole-task retry/backoff loop below.
         if (awaitingApprovalId) {
-          await updateTask(task.id, { status: 'awaiting_approval' });
+          await writeTaskStatus('task awaiting_approval', taskCtx, { status: 'awaiting_approval' }, ['running'], guard);
           await recordEvent(mission.id, 'tool_decision_outcome', {
             entityType: 'task',
             entityId: task.id,
@@ -631,7 +774,7 @@ export async function executeTask(
       const simulated = fromTool && toolResult.executions.some((e) => envelopeSimulated(e.result));
       let reportMode: string | undefined;
       if (simulated) {
-        reportMode = mission.isSimulation ? 'simulation' : await getTenantExecutionMode(mission.tenantId);
+        reportMode = mission.isSimulation ? 'simulation' : await withDeadline('Reading the execution mode', Math.min(timeoutMs, TOOL_STEP_MAX_MS), () => getTenantExecutionMode(mission.tenantId));
       } else if (fromTool) {
         reportMode = toolResult.executions.map((e) => envelopeMode(e.result)).find(Boolean);
       } else if (mission.isSimulation) {
@@ -646,11 +789,14 @@ export async function executeTask(
         agent: { manager: managerId, worker: workerId },
       };
 
-      await updateTask(task.id, {
+      // M7-13c-2b-1c: a run the supervisor already gave up on must not write a second terminal status.
+      guard.step = 'saving the result';
+      if (guard.superseded) return supersededResult();
+      await writeTaskStatus('task completed', taskCtx, {
         status: 'completed',
         result: resultData,
         completedAt: new Date().toISOString(),
-      });
+      }, ['running'], guard);
 
       await recordTaskCompleted(mission.id, task.id, task.title, managerName);
       await recordEvent(mission.id, 'execution_finished', {
@@ -711,6 +857,7 @@ export async function executeTask(
         ...(reportMode ? { executionMode: reportMode } : {}),
       };
     } catch (err) {
+      if (guard.superseded) return supersededResult();
       const errorMessage = err instanceof Error ? err.message : 'Unknown execution error';
       const nonRetryable = err instanceof NonRetryableTaskError;
       retries++;
@@ -718,7 +865,7 @@ export async function executeTask(
       await appendExecutionLog(task.id, {
         timestamp: new Date().toISOString(),
         event: 'execution_failed',
-        detail: `Attempt ${retries}/${maxRetries + 1} failed: ${errorMessage}${nonRetryable ? ' (deterministic failure — not retried)' : ''}`,
+        detail: `Attempt ${retries}/${maxRetries + 1} failed: ${errorMessage}${nonRetryable ? (err instanceof ToolStepTimeoutError ? ' (not retried — a tool action may still be running)' : ' (deterministic failure — not retried)') : ''}`,
         agentId: managerId,
       });
 
@@ -749,16 +896,16 @@ export async function executeTask(
         const failureKind = (err as { failureKind?: string }).failureKind
           ?? (/timed out/i.test(errorMessage) ? 'timeout' : 'execution_error');
         const failureResult: Record<string, unknown> = {
-          failure: { kind: failureKind, deterministic: nonRetryable, attempts: retries },
+          failure: { kind: failureKind, deterministic: nonRetryable && (err as { deterministic?: boolean }).deterministic !== false, attempts: retries },
           agent: { manager: managerId, worker: workerId },
         };
-        await updateTask(task.id, {
+        await writeTaskStatus('task failed', taskCtx, {
           status: 'failed',
           errorMessage,
           result: failureResult,
           completedAt: new Date().toISOString(),
           retries: retries - 1,
-        });
+        }, ['running'], guard);
 
         await recordTaskFailed(mission.id, task.id, task.title, errorMessage);
         await recordEvent(mission.id, 'execution_failed', {
@@ -833,6 +980,85 @@ export async function executeTask(
   };
 }
 
+// ---- Failing a task from outside its own run (M7-13c-2b-1c) ----
+
+/**
+ * Marks a task failed when its own run cannot do it: the claim never answered, the run hit its hard deadline, or it
+ * threw something the retry loop does not handle. Everything here is bounded, so it cannot itself become the next hang.
+ *
+ * Late-completion guard: `guard.superseded` is set FIRST, so the abandoned run (which keeps going — a promise cannot be
+ * cancelled) stops before its next status write, and the UPDATE below is conditional on the task not being finished yet,
+ * so a write the abandoned run already had in flight cannot flip it back either. The failure carries the existing
+ * result shape ({ failure: { kind, deterministic, attempts }, agent }).
+ */
+async function failTaskOutOfBand(
+  task: MissionTask,
+  mission: Mission,
+  reason: string,
+  kind: string,
+  guard: TaskRunGuard,
+  elapsedMs: number,
+): Promise<ExecutionResult> {
+  guard.superseded = true;
+  const managerId = task.assignedManager ?? 'temo';
+  const workerId = task.assignedWorker ?? null;
+  const ctx = { taskId: task.id, missionId: mission.id };
+  console.error(`[swarm] task ${kind}: ${reason} (task=${task.id} mission=${mission.id} step="${guard.step}" elapsed=${elapsedMs}ms)`);
+
+  const failureResult: Record<string, unknown> = {
+    failure: { kind, deterministic: false, attempts: Math.max(guard.attempts, 1) },
+    agent: { manager: managerId, worker: workerId },
+  };
+  // Not guarded by `guard` (it is superseded by design): this IS the one terminal write. Conditional on the task not
+  // having finished already.
+  await boundedStatusWrite('task failed (timeout)', ctx, () => updateTask(task.id, {
+    status: 'failed',
+    errorMessage: reason,
+    result: failureResult,
+    completedAt: new Date().toISOString(),
+    retries: Math.max(guard.attempts - 1, 0),
+  }, { onlyIfStatus: ['waiting', 'ready', 'running'] }));
+
+  await recordTaskFailed(mission.id, task.id, task.title, reason);
+  await recordEvent(mission.id, 'execution_failed', {
+    entityType: 'task',
+    entityId: task.id,
+    title: `Execution failed: ${task.title}`,
+    detail: reason,
+    metadata: { error: reason, kind, step: guard.step, elapsedMs },
+  });
+  await emitRuntimeEvent({
+    eventType: 'failed',
+    agentId: managerId,
+    workerId,
+    missionId: mission.id,
+    taskId: task.id,
+    timestamp: new Date().toISOString(),
+    status: 'failed',
+    title: `Task failed: ${task.title}`,
+    detail: reason,
+    metadata: { error: reason, kind, step: guard.step, elapsedMs },
+  });
+
+  return {
+    taskId: task.id,
+    missionId: mission.id,
+    managerId,
+    managerName: managerId,
+    managerRoleId: managerId,
+    workerId,
+    workerRoleId: null,
+    delegated: workerId !== null,
+    status: 'failed',
+    output: '',
+    result: failureResult,
+    error: reason,
+    retries: Math.max(guard.attempts - 1, 0),
+    durationMs: elapsedMs,
+    steps: [],
+  };
+}
+
 // ---- Execute All Tasks for a Mission ----
 
 export async function executeMissionTasks(
@@ -841,6 +1067,8 @@ export async function executeMissionTasks(
   objectives: MissionObjective[],
   /** M7-12: real, incremental progress — see OrchestrateOptions.onMissionProgress's comment (unifiedOrchestrator.ts) for why this is a direct callback rather than a Realtime subscription. */
   onProgress?: (title: string, detail: string) => void,
+  /** M7-13c-2b-1c: hard-deadline override (tests); production uses taskHardDeadlineMs(task_timeout_ms). */
+  options: { hardDeadlineMs?: (task: MissionTask) => number } = {},
 ): Promise<ExecutionResult[]> {
   const results: ExecutionResult[] = [];
   const priorResults: PriorTaskResult[] = [];
@@ -862,7 +1090,23 @@ export async function executeMissionTasks(
     );
 
     const objective = objectives.find((o) => o.id === task.objectiveId) ?? null;
-    const result = await executeTask(task, mission, objective, [...priorResults]);
+
+    // M7-13c-2b-1c: the safety net. executeTask() bounds its own steps, but if ANYTHING in it still never settles the
+    // whole run is abandoned at the hard deadline (2x task_timeout_ms), the task is failed with an honest reason, and
+    // the loop moves on — so the mission can reach recalculateProgress() and settle instead of staying 'executing'.
+    const guard = createTaskRunGuard();
+    const hardMs = options.hardDeadlineMs ? options.hardDeadlineMs(task) : taskHardDeadlineMs(taskTimeoutMsOf(task));
+    const runStarted = Date.now();
+    let result: ExecutionResult;
+    try {
+      result = await withDeadline('Task run', hardMs, () => executeTask(task, mission, objective, [...priorResults], guard));
+    } catch (err) {
+      const elapsed = Date.now() - runStarted;
+      const reason = err instanceof DeadlineError
+        ? `Task timed out after ${Math.round(hardMs / 1000)} s — no response from ${guard.step}.`
+        : `Task stopped unexpectedly while ${guard.step}: ${err instanceof Error ? err.message : 'unknown error'}`;
+      result = await failTaskOutOfBand(task, mission, reason, err instanceof DeadlineError ? 'timeout' : 'execution_error', guard, elapsed);
+    }
     results.push(result);
 
     // M7-06: roll this task's outcome up into its objective's status —
@@ -871,7 +1115,7 @@ export async function executeMissionTasks(
     // permanently on PENDING). Mirrors the mission-level
     // recalculateProgress() call below, scoped to one objective.
     if (objective) {
-      await recalculateObjectiveStatus(mission.id, objective.id);
+      await bestEffort('objective status rollup', { missionId: mission.id, taskId: task.id }, () => recalculateObjectiveStatus(mission.id, objective.id));
     }
 
     // Thread completed results to subsequent tasks so review/synthesis
@@ -881,7 +1125,7 @@ export async function executeMissionTasks(
         taskId: result.taskId,
         taskTitle: task.title,
         managerId: result.managerId,
-        managerRoleId: resolveRoleId(await getAgentById(result.managerId)),
+        managerRoleId: resolveRoleId((await bestEffort('agent lookup', { missionId: mission.id, taskId: task.id }, () => getAgentById(result.managerId))) ?? null),
         workerId: result.workerId ?? null,
         workerRoleId: result.workerRoleId ?? null,
         output: result.output,
@@ -922,7 +1166,7 @@ export async function executeMissionTasks(
     // task — reusing it here (rather than duplicating its status logic)
     // also picks up its mission_completed/mission_failed timeline events and
     // lessons-learned recording for free.
-    await recalculateProgress(mission.id);
+    await boundedStatusWrite('mission status rollup', { missionId: mission.id, taskId: task.id }, () => recalculateProgress(mission.id));
   }
 
   return results;

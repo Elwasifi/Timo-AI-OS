@@ -530,6 +530,12 @@ export async function updateTask(
     /** M7-01: pass null to clear an in-progress checkpoint (loop finished or definitively failed). */
     loopState?: MissionTask['loopState'];
   },
+  /**
+   * M7-13c-2b-1c: when given, the UPDATE only matches a row currently in one of these statuses (same idea as claimTask's
+   * conditional UPDATE). A run that was abandoned after a timeout can therefore never overwrite the state that
+   * superseded it: its late write matches nothing and this returns null.
+   */
+  opts?: { onlyIfStatus?: TaskQueueStatus[] },
 ): Promise<MissionTask | null> {
   const update: Record<string, unknown> = {};
   if (patch.status !== undefined) update.status = patch.status;
@@ -543,12 +549,12 @@ export async function updateTask(
   if (patch.completedAt !== undefined) update.completed_at = patch.completedAt;
   if (patch.loopState !== undefined) update.loop_state = patch.loopState;
 
-  const { data, error } = await supabase
+  let query = supabase
     .from('mission_tasks')
     .update(update)
-    .eq('id', id)
-    .select()
-    .maybeSingle();
+    .eq('id', id);
+  if (opts?.onlyIfStatus && opts.onlyIfStatus.length > 0) query = query.in('status', opts.onlyIfStatus);
+  const { data, error } = await query.select().maybeSingle();
 
   if (error || !data) return null;
   return mapTask(data as TaskRow);
