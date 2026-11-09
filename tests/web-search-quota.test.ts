@@ -31,6 +31,14 @@ import { searchWithTenantKey } from '@/lib/tools/webSearchCore';
 import { toolExecutor } from '@/lib/tools/executor';
 import { ensureBuiltinToolsRegistered } from '@/lib/tools/builtin-tools';
 import { ToolQuotaExceededError, ToolNotConfiguredError } from '@/lib/tools/types';
+import { geminiCooldown } from '@/lib/tools/webSearchCooldown';
+// M7-13c-2a-6: the per-tenant Gemini cooldown is process-wide state — every test starts without one.
+beforeEach(() => {
+  geminiCooldown.reset();
+  // Hermetic: vitest.config.ts loads .env.local into process.env — no real Tavily key / allow-list may reach a test.
+  vi.stubEnv('TAVILY_API_KEY', '');
+  vi.stubEnv('TAVILY_ALLOWED_TENANT_IDS', '');
+});
 
 const KEY = 'AIzaSy-QUOTA-SECRET-777';
 const T = 'client-tenant';
@@ -74,8 +82,8 @@ describe('a quota 429 is a ToolQuotaExceededError with a readable sentence', () 
     fetchMock.mockResolvedValue(respond(429, body));
     const err: any = await searchWithTenantKey(T, 'q').catch((e) => e);
     expect(err).toBeInstanceOf(ToolQuotaExceededError);
-    expect(err.message).toBe(`Gemini's request limit for models ${LITE} and ${FLASH} was reached on this workspace's API key. Try again later, pin another model in Settings → AI Providers, or enable billing in Google AI Studio.`);
-    expect(err.message.length).toBeLessThan(250);
+    expect(err.message).toBe(`Gemini: Gemini's request limit for models ${LITE} and ${FLASH} was reached on this workspace's API key. Try again later, pin another model in Settings → AI Providers, or enable billing in Google AI Studio. Tavily: not configured for this workspace.`);
+    expect(err.message.length).toBeLessThan(250 + ' Tavily: not configured for this workspace.'.length);
     expect(err.message).not.toMatch(/[{}"]/);          // no JSON, ever
     expect(err.message).not.toMatch(/https?:\/\//);    // no URLs
     expect(err.message).not.toContain(KEY);
@@ -109,7 +117,7 @@ describe('a RATE-limit 429 (or an unclear one) stays a plain, retryable error', 
   it('the error text for a retryable failure is the readable message, not a raw JSON dump', async () => {
     fetchMock.mockResolvedValue(respond(503, JSON.stringify({ error: { code: 503, message: 'The model is overloaded. Please try again later.', status: 'UNAVAILABLE' } })));
     const err: any = await searchWithTenantKey(T, 'q').catch((e) => e);
-    expect(err.message).toBe('Gemini grounding request failed (503): The model is overloaded. Please try again later.');
+    expect(err.message).toBe('Gemini: Gemini grounding request failed (503): The model is overloaded. Please try again later. Tavily: not configured for this workspace.');
     expect(err.message).not.toMatch(/[{}]/);
   });
 });
@@ -140,7 +148,7 @@ describe('readable error text for the failures that stay retryable', () => {
   it('a TRUNCATED JSON body still yields just its message, with no braces or quotes', async () => {
     fetchMock.mockResolvedValue(respond(503, '{\n  "error": {\n    "code": 503,\n    "message": "The model is overloaded. Please try aga'));
     const err: any = await searchWithTenantKey(T, 'q').catch((e) => e);
-    expect(err.message).toBe('Gemini grounding request failed (503): The model is overloaded. Please try aga');
+    expect(err.message).toBe('Gemini: Gemini grounding request failed (503): The model is overloaded. Please try aga. Tavily: not configured for this workspace.');
     expect(err.message).not.toMatch(/[{}"]/);
   });
 
@@ -232,33 +240,40 @@ describe('model order and the one-hop fallback', () => {
     expect(err).toBeInstanceOf(ToolNotConfiguredError);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(err.message).toContain(LITE);
-    expect(err.message).toContain(FLASH);
-    expect(err.message).toContain('Gemini said: Request contains an invalid argument. See for details (key [redacted]).');
+    expect(geminiCooldown.active(T)!.message).toContain(FLASH); // Fix 2: the combined text shows the first model when space is short; the full list is on the cooldown entry
+    // Fix 2: the combined text drops " Gemini said: ..." to stay within 280 characters; the full, sanitized message is kept on the cooldown entry.
+    const full = geminiCooldown.active(T)!.message;
+    expect(full).toContain('Gemini said: Request contains an invalid argument. See for details (key [redacted]).');
+    expect(full).not.toMatch(/[{}]/);
+    expect(full).not.toMatch(/https?:\/\//);
+    expect(full).not.toContain(KEY);
     expect(err.message).not.toMatch(/[{}]/);
     expect(err.message).not.toMatch(/https?:\/\//);
     expect(err.message).not.toContain(KEY);
   });
 
-  it('the all-unavailable message has the exact final wording, with the LAST reason appended', async () => {
+  it('the all-unavailable message has the exact final wording; the LAST reason is kept on the cooldown entry (the combined text drops it to fit 280 characters)', async () => {
     fetchMock
       .mockResolvedValueOnce(respond(400, JSON.stringify({ error: { message: 'first reason' } })))
       .mockResolvedValueOnce(respond(400, JSON.stringify({ error: { message: 'Request contains an invalid argument.' } })));
     const err: any = await searchWithTenantKey(T, 'q').catch((e) => e);
-    expect(err.message).toBe(`web.search: none of the Gemini models tried (${LITE}, ${FLASH}) can run Google Search with this workspace's API key — pin a supported model in Settings → AI Providers. Gemini said: Request contains an invalid argument.`);
+    expect(err.message).toBe(`Gemini: search grounding is not available on this workspace's Gemini key (models tried: ${LITE},…) — a free-tier key cannot run Google Search; pin a supported model or use a paid key in Settings → AI Providers. Tavily: not configured for this workspace.`);
+    expect(err.message.length).toBeLessThanOrEqual(280);
+    expect(geminiCooldown.active(T)!.message).toContain('Gemini said: Request contains an invalid argument.');
   });
 
   it('404 with an EMPTY body on both models -> "Gemini said: HTTP 404"', async () => {
     fetchMock.mockResolvedValue(respond(404, ''));
     const err: any = await searchWithTenantKey(T, 'q').catch((e) => e);
     expect(err).toBeInstanceOf(ToolNotConfiguredError);
-    expect(err.message).toContain('Gemini said: HTTP 404');
+    expect(geminiCooldown.active(T)!.message).toContain('Gemini said: HTTP 404'); // Fix 2: kept on the cooldown entry, dropped from the 280-character combined text
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('a 400 with an empty body uses the status as the reason: "Gemini said: HTTP 400"', async () => {
     fetchMock.mockResolvedValue(respond(400, ''));
     const err: any = await searchWithTenantKey(T, 'q').catch((e) => e);
-    expect(err.message).toContain('Gemini said: HTTP 400');
+    expect(geminiCooldown.active(T)!.message).toContain('Gemini said: HTTP 400'); // Fix 2: kept on the cooldown entry, dropped from the 280-character combined text
   });
 
   it('the mixed case is unchanged: one model out of quota + one unavailable is still the QUOTA error naming only the quota model (no "Gemini said")', async () => {
@@ -283,7 +298,7 @@ describe('model order and the one-hop fallback', () => {
     const err: any = await searchWithTenantKey(T, 'q').catch((e) => e);
     expect(err).toBeInstanceOf(ToolNotConfiguredError);
     expect(err.message).toContain(LITE);
-    expect(err.message).toContain(FLASH);
+    expect(geminiCooldown.active(T)!.message).toContain(FLASH); // Fix 2: the combined text shows the first model when space is short; the full list is on the cooldown entry
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -330,7 +345,7 @@ describe('through the real executor (Demo mode): a quota failure is ONE attempt 
     expect(r.ok).toBe(false);
     expect(r.errorCode).toBe('quota_exceeded');
     expect(r.retries).toBe(1);
-    expect(r.error).toMatch(/^Gemini's request limit for models/);
+    expect(r.error).toMatch(/^Gemini: Gemini's request limit for models/);
     expect(r.error).not.toMatch(/[{}"]/);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(r)).not.toContain(KEY);

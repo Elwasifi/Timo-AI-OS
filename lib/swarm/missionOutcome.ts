@@ -104,7 +104,7 @@ export interface OutcomeOptions {
 export const OPEN_TASK_STATUSES: readonly string[] = ['waiting', 'ready', 'running', 'awaiting_approval'];
 // About 200 in the brief; 280 so the app's OWN readable sentences (e.g. the Gemini quota message, ~220 characters, whose
 // last clause tells the user what to do) are never cut off mid-sentence. Provider text is far longer than this and is capped.
-const REASON_CAP = 280;
+export const REASON_CAP = 280;
 const SIMULATED_NOTE_PREFIX = 'Simulated execution of "';
 
 /** Successes for the "every task succeeded" / "at least one succeeded" rules: real work OR intended simulation. */

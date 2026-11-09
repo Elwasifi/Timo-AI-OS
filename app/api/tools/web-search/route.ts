@@ -8,6 +8,10 @@
 //   - missing/rejected configuration -> 422 NOT_CONFIGURED (deterministic, the tool reports it as not_configured and
 //     does not retry); an exhausted provider quota -> 429 QUOTA_EXCEEDED (also not retried: retrying burns more of
 //     it); any other upstream problem -> 502 UPSTREAM_ERROR (transient, retried as before).
+//   - M7-13c-2a-6: the core runs a provider chain (Gemini with the tenant's key, then Tavily for allow-listed tenants). When every
+//     provider fails it throws ONE combined error naming each provider; its class follows the last REAL cause (quota -> 429,
+//     upstream -> 502, otherwise nothing is configured -> 422). The result carries `provider` ('gemini' | 'tavily'). Neither key
+//     is ever part of a message or of the response.
 
 import { NextResponse } from 'next/server';
 import { requireUser, isTenantMember } from '@/lib/auth/apiAuth';

@@ -31,6 +31,14 @@ import { toolPlanner } from '@/lib/tools/planner';
 import { ensureBuiltinToolsRegistered } from '@/lib/tools/builtin-tools';
 import { cleanReason } from '@/lib/swarm/missionOutcome';
 import type { DetectedIntent } from '@/lib/context/types';
+import { geminiCooldown } from '@/lib/tools/webSearchCooldown';
+// M7-13c-2a-6: the per-tenant Gemini cooldown is process-wide state — every test starts without one.
+beforeEach(() => {
+  geminiCooldown.reset();
+  // Hermetic: vitest.config.ts loads .env.local into process.env — no real Tavily key / allow-list may reach a test.
+  vi.stubEnv('TAVILY_API_KEY', '');
+  vi.stubEnv('TAVILY_ALLOWED_TENANT_IDS', '');
+});
 
 const KEY = 'AIzaSy-PLAN-SECRET-999';
 const fetchMock = vi.fn();

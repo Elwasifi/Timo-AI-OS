@@ -39,6 +39,14 @@ vi.mock('@/lib/api/authFetch', async () => {
 
 import { toolExecutor } from '@/lib/tools/executor';
 import { ensureBuiltinToolsRegistered } from '@/lib/tools/builtin-tools';
+import { geminiCooldown } from '@/lib/tools/webSearchCooldown';
+// M7-13c-2a-6: the per-tenant Gemini cooldown is process-wide state — every test starts without one.
+beforeEach(() => {
+  geminiCooldown.reset();
+  // Hermetic: vitest.config.ts loads .env.local into process.env — no real Tavily key / allow-list may reach a test.
+  vi.stubEnv('TAVILY_API_KEY', '');
+  vi.stubEnv('TAVILY_ALLOWED_TENANT_IDS', '');
+});
 
 const KEY = 'AIzaSy-DEMO-FLOW-SECRET-424242';
 const T = 'client-tenant';
@@ -83,7 +91,7 @@ describe('Demo (sandbox) web.search through the real route', () => {
     const r = await search();
     expect(r.ok).toBe(false);
     expect(r.errorCode).toBe('not_configured');
-    expect(r.error).toBe('web.search needs a Gemini API key for this workspace — add one in Settings → AI Providers.');
+    expect(r.error).toBe('Gemini: web.search needs a Gemini API key for this workspace — add one in Settings → AI Providers. Tavily: not configured for this workspace.');
     expect(r.retries).toBe(1);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(h.appSettingsReads).toBe(0);
@@ -112,7 +120,7 @@ describe('Demo (sandbox) web.search through the real route', () => {
     expect(r.ok).toBe(false);
     expect(r.errorCode).toBe('quota_exceeded');
     expect(r.retries).toBe(1);
-    expect(r.error).toMatch(/^Gemini's request limit for models gemini-flash-lite-latest and gemini-3\.6-flash was reached on this workspace's API key\./);
+    expect(r.error).toMatch(/^Gemini: Gemini's request limit for models gemini-flash-lite-latest and gemini-3\.6-flash was reached on this workspace's API key\./);
     expect(r.error).not.toMatch(/[{}"]/);
     expect(JSON.stringify(r)).not.toContain(KEY);
     expect(fetchMock).toHaveBeenCalledTimes(2); // one hop, each model once — not 4 attempts x 2 models

@@ -11,6 +11,11 @@
 // global app_settings key; only the grandfathered internal tenant keeps using app_settings. A missing key is a
 // ToolNotConfiguredError — a deterministic failure that is not retried.
 //
+// Provider chain (M7-13c-2a-6): Gemini (tenant BYOK) first; if it fails (quota, grounding unavailable on a free-tier key, not
+// configured, upstream error) the search falls back to Tavily when the server has TAVILY_API_KEY and the tenant is in
+// TAVILY_ALLOWED_TENANT_IDS; if everything fails ONE combined error names every provider's failure. A per-tenant Gemini
+// cooldown (webSearchCooldown.ts) skips Gemini after a quota / unavailable failure so later tasks go straight to Tavily.
+//
 // Which model (M7-13c-2a-5): free-tier Gemini keys have tiny PER-MODEL daily quotas (live, Amro's key: gemini-3.6-flash
 // 20 requests/day, gemini-3.1-flash-lite 500/day), and web.search used to burn the 20/day. So the candidates are, in
 // order: the model pinned for this key (tenant_provider_keys.model / app_settings.gemini_model), then
@@ -20,6 +25,10 @@
 
 import { ToolNotConfiguredError, ToolQuotaExceededError } from './types';
 import { INTERNAL_TENANT_ID } from '@/lib/governance/internalTenant';
+import { DeadlineError, withDeadline } from '@/lib/swarm/taskDeadlines';
+import { REASON_CAP } from '@/lib/swarm/missionOutcome';
+import { geminiCooldown } from './webSearchCooldown';
+import { TAVILY_NOT_AVAILABLE_MESSAGE, TAVILY_TIMEOUT_MS, searchWithTavily, tavilyAvailability } from './tavilySearch';
 
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -38,6 +47,8 @@ export interface WebSearchResult {
   query: string;
   count: number;
   summary?: string;
+  /** M7-13c-2a-6: which provider produced this result (the chain is Gemini -> Tavily). */
+  provider?: 'gemini' | 'tavily';
 }
 
 interface GeminiConfig {
@@ -209,12 +220,28 @@ function quotaMessage(models: string[]): string {
   return `Gemini's request limit for ${which} was reached on this workspace's API key. Try again later, pin another model in Settings → AI Providers, or enable billing in Google AI Studio.`;
 }
 
+/**
+ * Time budget (M7-13c-2a-6). The whole tool step is bounded by min(task_timeout_ms, 60 s) (lib/swarm/taskDeadlines.ts
+ * TOOL_STEP_MAX_MS), and a timeout there is never retried. Gemini used to have no deadline of its own, so a hung Gemini call
+ * could eat the entire step and the fallback would never run. Now: each Gemini attempt is capped at 12 s and the whole Gemini
+ * phase at 30 s (config read included); Tavily is capped at 15 s and never past the 50 s chain budget; if less than 2 s of the
+ * budget is left Tavily is not tried and that is said. Worst case: 2 × 12 s (Gemini) + 15 s (Tavily) = 39 s plus the key read
+ * (itself bounded by the Supabase client's 15 s REST timeout, counted inside the 30 s Gemini phase) — always under 60 s.
+ */
+export const GEMINI_ATTEMPT_TIMEOUT_MS = 12_000;
+export const GEMINI_PHASE_BUDGET_MS = 30_000;
+export const WEB_SEARCH_CHAIN_BUDGET_MS = 50_000;
+const TAVILY_MIN_USEFUL_MS = 2_000;
+
+/** Every Gemini model tried says it cannot run Google Search with this key (a free-tier key): permanent for this key tier. */
+class GeminiGroundingUnavailableError extends ToolNotConfiguredError {}
+
 type Attempt =
   | { kind: 'ok'; data: GeminiGenerateContentResponse }
   | { kind: 'quota' }
   | { kind: 'model_unavailable'; reason: string };
 
-async function callGemini(apiKey: string, model: string, query: string): Promise<Attempt> {
+async function callGeminiOnce(apiKey: string, model: string, query: string, signal: AbortSignal): Promise<Attempt> {
   let res: Response;
   try {
     res = await fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
@@ -226,6 +253,7 @@ async function callGemini(apiKey: string, model: string, query: string): Promise
         tools: [{ google_search: {} }],
         generationConfig: { temperature: 0, maxOutputTokens: 1024 },
       }),
+      signal,
     });
   } catch (err) {
     throw new Error(redact(`Gemini grounding request failed: ${err instanceof Error ? err.message : String(err)}`, apiKey));
@@ -247,14 +275,22 @@ async function callGemini(apiKey: string, model: string, query: string): Promise
   throw new Error(redact(`Gemini grounding request failed (${res.status}): ${parsed.message || res.statusText}`, apiKey));
 }
 
-export async function searchWithTenantKey(
-  tenantId: string | null | undefined,
-  query: string,
-  maxResultsArg?: number,
-): Promise<WebSearchResult> {
-  const maxResults = typeof maxResultsArg === 'number' ? Math.min(Math.max(maxResultsArg, 1), 20) : 5;
-  if (!query || !query.trim()) throw new Error('web.search requires a non-empty query.');
+/** One Gemini call, bounded by its own deadline (a timeout is a plain, retryable upstream error). */
+async function callGemini(apiKey: string, model: string, query: string, timeoutMs: number): Promise<Attempt> {
+  const controller = new AbortController();
+  try {
+    return await withDeadline('Gemini grounding request', timeoutMs, () => callGeminiOnce(apiKey, model, query, controller.signal));
+  } catch (err) {
+    if (err instanceof DeadlineError) {
+      controller.abort();
+      throw new Error(`Gemini grounding request timed out after ${Math.round(timeoutMs / 1000)} s.`);
+    }
+    throw err;
+  }
+}
 
+/** The Gemini grounded search with the tenant's own key — exactly the pre-chain behaviour, plus per-attempt deadlines. */
+async function searchGemini(tenantId: string | null | undefined, query: string, maxResults: number, geminiDeadlineAt: number): Promise<WebSearchResult> {
   const { apiKey, pinnedModel } = await resolveGeminiConfig(tenantId);
 
   const tried: string[] = [];
@@ -263,7 +299,8 @@ export async function searchWithTenantKey(
   let data: GeminiGenerateContentResponse | null = null;
   for (const model of candidateModels(pinnedModel)) {
     tried.push(model);
-    const attempt = await callGemini(apiKey, model, query);
+    const timeoutMs = Math.max(1_000, Math.min(GEMINI_ATTEMPT_TIMEOUT_MS, geminiDeadlineAt - Date.now()));
+    const attempt = await callGemini(apiKey, model, query, timeoutMs);
     if (attempt.kind === 'ok') { data = attempt.data; break; }
     if (attempt.kind === 'quota') quotaHit.push(model);
     if (attempt.kind === 'model_unavailable') lastUnavailableReason = attempt.reason;
@@ -272,8 +309,8 @@ export async function searchWithTenantKey(
 
   if (!data) {
     if (quotaHit.length > 0) throw new ToolQuotaExceededError(quotaMessage(quotaHit));
-    throw new ToolNotConfiguredError(
-      `web.search: none of the Gemini models tried (${tried.join(', ')}) can run Google Search with this workspace's API key — pin a supported model in Settings → AI Providers.` +
+    throw new GeminiGroundingUnavailableError(
+      `search grounding is not available on this workspace's Gemini key (models tried: ${tried.join(', ')}) — a free-tier key cannot run Google Search; pin a supported model or use a paid key in Settings → AI Providers.` +
         (lastUnavailableReason ? ` Gemini said: ${lastUnavailableReason}` : ''),
     );
   }
@@ -288,5 +325,145 @@ export async function searchWithTenantKey(
     .slice(0, maxResults)
     .map((c) => ({ title: c.web?.title ?? c.web?.uri ?? 'Untitled', url: c.web!.uri!, snippet: '' }));
 
-  return { results, query, count: results.length, summary: answerText || undefined };
+  return { results, query, count: results.length, summary: answerText || undefined, provider: 'gemini' };
+}
+
+// ---- The provider chain ----------------------------------------------------------------------------------------------
+
+interface ChainFailure {
+  provider: 'Gemini' | 'Tavily';
+  kind: 'not_configured' | 'quota_exceeded' | 'upstream_error';
+  message: string;
+  /** A real cause (the provider actually answered: quota / upstream problem) as opposed to "nothing is configured here". */
+  real: boolean;
+}
+
+function failureOf(provider: ChainFailure['provider'], err: unknown): ChainFailure {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof ToolQuotaExceededError) return { provider, kind: 'quota_exceeded', message, real: true };
+  if (err instanceof ToolNotConfiguredError) return { provider, kind: 'not_configured', message, real: false };
+  return { provider, kind: 'upstream_error', message, real: true };
+}
+
+const asSentence = (t: string) => {
+  const s = t.trim();
+  return /[.!?…]$/.test(s) ? s : `${s}.`;
+};
+
+/**
+ * Shortens `text` to at most `max` characters with an ellipsis, keeping the ACTIONABLE END: if it has several sentences the
+ * last one stays whole and the part before it is shortened; a single sentence keeps its start and its end.
+ */
+export function ellipsize(text: string, max: number): string {
+  if (text.length <= max) return text;
+  if (max <= 1) return '…';
+  // Cuts land on word boundaries, so no word is left half-written.
+  const headOf = (t: string, n: number) => { const i = t.lastIndexOf(' ', n); return t.slice(0, i >= n * 0.5 ? i : n).trimEnd(); };
+  // First choice: shorten only what is least useful, the last parenthetical ("(models tried: a, b)"), just as much as needed.
+  const parenRe = /\(([^()]*)\)/g;
+  let paren: RegExpExecArray | null = null;
+  for (let m = parenRe.exec(text); m !== null; m = parenRe.exec(text)) paren = m;
+  if (paren) {
+    const keep = paren[1].length - (text.length - max) - 1; // room left for the ellipsis
+    if (keep >= 8) {
+      return `${text.slice(0, paren.index)}(${headOf(paren[1], keep)}…)${text.slice(paren.index + paren[0].length)}`;
+    }
+  }
+  const cut = text.lastIndexOf('. ', text.length - 2);
+  if (cut > 0) {
+    const tail = text.slice(cut + 2);
+    const headRoom = max - tail.length - 2; // the ellipsis and one space
+    if (headRoom >= 24) return `${headOf(text.slice(0, cut + 1), headRoom)}… ${tail}`;
+  }
+  const head = Math.ceil((max - 1) * 0.55);
+  const tailLen = max - 1 - head;
+  const from = text.length - tailLen;
+  const j = text.indexOf(' ', from);
+  return `${headOf(text, head)}…${text.slice(j !== -1 && j - from <= tailLen * 0.5 ? j : from).trimEnd()}`;
+}
+
+/** Gemini's own explanation appended to the "grounding unavailable" sentence: the first thing to give up when space is short. */
+const GEMINI_SAID_DETAIL = /\s+Gemini said:[\s\S]*$/;
+
+/**
+ * "Gemini: ... Tavily: ..." is always at most REASON_CAP (cleanReason's cap, 280) characters, so the task card and the mission
+ * panel still show EVERY provider. Priority when too long: (1) drop the " Gemini said: ..." detail, (2) shorten the earlier
+ * segments (keeping their actionable end). The LAST segment (Tavily) is never shortened or dropped.
+ */
+function combinedText(failures: ChainFailure[]): string {
+  let messages = failures.map((f) => f.message);
+  const build = () => failures.map((f, i) => `${f.provider}: ${asSentence(messages[i])}`).join(' ');
+  if (build().length <= REASON_CAP) return build();
+  messages = messages.map((m) => m.replace(GEMINI_SAID_DETAIL, ''));
+  if (build().length <= REASON_CAP) return build();
+  const last = failures.length - 1;
+  const lastSegment = `${failures[last].provider}: ${asSentence(messages[last])}`;
+  const earlier = failures.slice(0, last);
+  const budget = REASON_CAP - lastSegment.length - earlier.length; // one space between segments
+  const share = Math.max(24, Math.floor(budget / earlier.length));
+  const parts = earlier.map((f, i) => {
+    const label = `${f.provider}: `;
+    return label + ellipsize(asSentence(messages[i]), share - label.length);
+  });
+  return [...parts, lastSegment].join(' ');
+}
+
+/** ONE honest error naming every provider's failure; its CLASS follows the last real cause (quota -> 429, upstream -> 502, else 422). */
+function combinedError(failures: ChainFailure[], tavilyKey: string | null): Error {
+  const lastReal = [...failures].reverse().find((f) => f.real);
+  const text = combinedText(failures);
+  const safe = tavilyKey ? redact(text, tavilyKey) : text;
+  if (lastReal?.kind === 'quota_exceeded') return new ToolQuotaExceededError(safe);
+  if (lastReal?.kind === 'upstream_error') return new Error(safe);
+  return new ToolNotConfiguredError(safe);
+}
+
+/**
+ * web.search, server side. Order: (a) Gemini grounding with the tenant's own key (skipped while that tenant's Gemini
+ * cooldown is active); (b) on a Gemini failure — quota, not configured / grounding unavailable, upstream error — Tavily, if the
+ * server has a key AND this tenant is allow-listed; (c) if nothing worked, one combined error naming each provider's failure.
+ * The result records which provider produced it (`provider`).
+ */
+export async function searchWithTenantKey(
+  tenantId: string | null | undefined,
+  query: string,
+  maxResultsArg?: number,
+): Promise<WebSearchResult> {
+  const maxResults = typeof maxResultsArg === 'number' ? Math.min(Math.max(maxResultsArg, 1), 20) : 5;
+  if (!query || !query.trim()) throw new Error('web.search requires a non-empty query.');
+
+  const startedAt = Date.now();
+  const failures: ChainFailure[] = [];
+
+  // (a) Gemini
+  const cooling = tenantId ? geminiCooldown.active(tenantId) : null;
+  if (cooling) {
+    failures.push({ provider: 'Gemini', kind: cooling.reason === 'quota' ? 'quota_exceeded' : 'not_configured', message: cooling.message, real: cooling.reason === 'quota' });
+  } else {
+    try {
+      return await searchGemini(tenantId, query, maxResults, startedAt + GEMINI_PHASE_BUDGET_MS);
+    } catch (err) {
+      failures.push(failureOf('Gemini', err));
+      if (tenantId && err instanceof ToolQuotaExceededError) geminiCooldown.start(tenantId, 'quota', err.message);
+      else if (tenantId && err instanceof GeminiGroundingUnavailableError) geminiCooldown.start(tenantId, 'unavailable', err.message);
+    }
+  }
+
+  // (b) Tavily
+  const tavily = tavilyAvailability(tenantId);
+  if (!tavily.available) {
+    failures.push({ provider: 'Tavily', kind: 'not_configured', message: TAVILY_NOT_AVAILABLE_MESSAGE, real: false });
+    throw combinedError(failures, null);
+  }
+  const remainingMs = startedAt + WEB_SEARCH_CHAIN_BUDGET_MS - Date.now();
+  if (remainingMs < TAVILY_MIN_USEFUL_MS) {
+    failures.push({ provider: 'Tavily', kind: 'upstream_error', message: 'was not tried — the time budget for this search was used up.', real: true });
+    throw combinedError(failures, tavily.apiKey);
+  }
+  try {
+    return await searchWithTavily(tavily.apiKey, query, maxResults, Math.min(TAVILY_TIMEOUT_MS, remainingMs));
+  } catch (err) {
+    failures.push(failureOf('Tavily', err));
+    throw combinedError(failures, tavily.apiKey);
+  }
 }

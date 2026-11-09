@@ -29,6 +29,14 @@ vi.mock('@/lib/supabase/serverClient', () => ({
 }));
 
 import { POST } from '@/app/api/tools/web-search/route';
+import { geminiCooldown } from '@/lib/tools/webSearchCooldown';
+// M7-13c-2a-6: the per-tenant Gemini cooldown is process-wide state — every test starts without one.
+beforeEach(() => {
+  geminiCooldown.reset();
+  // Hermetic: vitest.config.ts loads .env.local into process.env — no real Tavily key / allow-list may reach a test.
+  vi.stubEnv('TAVILY_API_KEY', '');
+  vi.stubEnv('TAVILY_ALLOWED_TENANT_IDS', '');
+});
 
 const KEY = 'AIzaSy-ROUTE-SECRET-987654';
 const T = 'tenant-T';
@@ -85,7 +93,7 @@ describe('POST /api/tools/web-search — behaviour', () => {
     const text = await res.text();
     const json = JSON.parse(text);
     expect(json.success).toBe(true);
-    expect(json.data).toEqual({ results: [{ title: 'E', url: 'https://e.com', snippet: '' }], query: 'jarvis', count: 1, summary: 'Found.' });
+    expect(json.data).toEqual({ results: [{ title: 'E', url: 'https://e.com', snippet: '' }], query: 'jarvis', count: 1, summary: 'Found.', provider: 'gemini' });
     expect(text).not.toContain(KEY);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect((fetchMock.mock.calls[0][1] as RequestInit).headers).toMatchObject({ 'x-goog-api-key': KEY });
@@ -98,7 +106,7 @@ describe('POST /api/tools/web-search — behaviour', () => {
     const json = await res.json();
     expect(json.success).toBe(false);
     expect(json.error.code).toBe('NOT_CONFIGURED');
-    expect(json.error.message).toBe('web.search needs a Gemini API key for this workspace — add one in Settings → AI Providers.');
+    expect(json.error.message).toBe('Gemini: web.search needs a Gemini API key for this workspace — add one in Settings → AI Providers. Tavily: not configured for this workspace.');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -120,7 +128,7 @@ describe('POST /api/tools/web-search — behaviour', () => {
     const json = JSON.parse(text);
     expect(json.success).toBe(false);
     expect(json.error.code).toBe('QUOTA_EXCEEDED');
-    expect(json.error.message).toMatch(/^Gemini's request limit for models gemini-flash-lite-latest and gemini-3\.6-flash was reached on this workspace's API key\./);
+    expect(json.error.message).toMatch(/^Gemini: Gemini's request limit for models gemini-flash-lite-latest and gemini-3\.6-flash was reached on this workspace's API key\./);
     expect(json.error.message).toMatch(/Settings → AI Providers/);
     expect(json.error.message).not.toMatch(/[{}"]/);
     expect(text).not.toContain(KEY);

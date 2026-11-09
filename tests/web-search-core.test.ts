@@ -38,6 +38,14 @@ vi.mock('@/lib/supabase/serverClient', () => ({
 import { searchWithTenantKey, WEB_SEARCH_NO_KEY_MESSAGE } from '@/lib/tools/webSearchCore';
 import { ToolNotConfiguredError } from '@/lib/tools/types';
 import { INTERNAL_TENANT_ID } from '@/lib/governance/internalTenant';
+import { geminiCooldown } from '@/lib/tools/webSearchCooldown';
+// M7-13c-2a-6: the per-tenant Gemini cooldown is process-wide state — every test starts without one.
+beforeEach(() => {
+  geminiCooldown.reset();
+  // Hermetic: vitest.config.ts loads .env.local into process.env — no real Tavily key / allow-list may reach a test.
+  vi.stubEnv('TAVILY_API_KEY', '');
+  vi.stubEnv('TAVILY_ALLOWED_TENANT_IDS', '');
+});
 
 const TENANT = 'client-tenant';
 const TENANT_KEY = 'AIzaSy-TENANT-SECRET-123456';
@@ -68,7 +76,7 @@ describe('a client tenant uses ITS OWN Gemini key', () => {
     const r = await searchWithTenantKey(TENANT, 'open source jarvis');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(h.queries).toEqual([{ table: 'tenant_provider_keys', filters: { tenant_id: TENANT, provider: 'gemini' } }]);
-    expect(r).toEqual({ results: [{ title: 'Open-JARVIS', url: 'https://github.com/x/jarvis', snippet: '' }], query: 'open source jarvis', count: 1, summary: 'Three projects found.' });
+    expect(r).toEqual({ results: [{ title: 'Open-JARVIS', url: 'https://github.com/x/jarvis', snippet: '' }], query: 'open source jarvis', count: 1, summary: 'Three projects found.', provider: 'gemini' });
   });
 
   it('sends the key in the x-goog-api-key HEADER — never in the URL', async () => {
@@ -100,7 +108,7 @@ describe('missing configuration is a ToolNotConfiguredError (no fallback to the 
     h.providerRows = [{ tenant_id: TENANT, provider: 'groq', api_key: 'groq-key', model: null }]; // other providers don't count
     const err = await searchWithTenantKey(TENANT, 'q').catch((e) => e);
     expect(err).toBeInstanceOf(ToolNotConfiguredError);
-    expect(err.message).toBe(WEB_SEARCH_NO_KEY_MESSAGE);
+    expect(err.message).toBe(`Gemini: ${WEB_SEARCH_NO_KEY_MESSAGE} Tavily: not configured for this workspace.`); // M7-13c-2a-6: the combined, honest error names both providers
     expect(err.message).toMatch(/Settings → AI Providers/);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(h.queries.map((q) => q.table)).toEqual(['tenant_provider_keys']); // the global app_settings key (which exists) is not even read
@@ -165,7 +173,8 @@ describe('Gemini responses are classified: bad key = deterministic, the rest sta
     fetchMock.mockResolvedValue(respond(400, { error: { message: 'Unable to process request' } }));
     const err: any = await searchWithTenantKey(TENANT, 'q').catch((e) => e);
     expect(err).toBeInstanceOf(ToolNotConfiguredError);
-    expect(err.message).toContain('Gemini said: Unable to process request');
+    // Fix 2: the combined text drops " Gemini said: ..." to stay within 280 characters; the full message is on the cooldown entry.
+    expect(geminiCooldown.active(TENANT)!.message).toContain('Gemini said: Unable to process request');
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
@@ -200,6 +209,6 @@ describe('unchanged behaviour', () => {
 
   it('grounding that finds nothing is an honest empty result, not an error', async () => {
     fetchMock.mockResolvedValue(respond(200, { candidates: [{ content: { parts: [{ text: '' }] } }] }));
-    expect(await searchWithTenantKey(TENANT, 'q')).toEqual({ results: [], query: 'q', count: 0, summary: undefined });
+    expect(await searchWithTenantKey(TENANT, 'q')).toEqual({ results: [], query: 'q', count: 0, summary: undefined, provider: 'gemini' });
   });
 });
