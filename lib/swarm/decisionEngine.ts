@@ -15,6 +15,7 @@
 import { classifyComplexity, resolveCapabilities } from './missionPlanner';
 import type { DecisionResult, PipelineType } from './executionTypes';
 import { asksToRememberInput } from '@/lib/context/intent-detector';
+import { arabicDecisionSignals } from './arabicDecisionSignals';
 
 // ---- Signal Detection ----
 
@@ -47,29 +48,33 @@ export function makeDecision(userRequest: string): DecisionResult {
   let missionScore = 0;
   let simpleScore = 0;
 
+  // M7-13c-2c-a: Arabic twins of the English lists (empty for text with no Arabic character -> English scoring is unchanged).
+  // Explicit mission nouns ("ميشن", "المهمة الأولى", ...) are scored like verbs.
+  const ar = arabicDecisionSignals(userRequest);
+
   // Signal 1: Mission verbs
-  const matchedVerbs = MISSION_VERBS.filter((v) => lower.includes(v));
+  const matchedVerbs = [...MISSION_VERBS.filter((v) => lower.includes(v)), ...ar.verbs, ...ar.nouns];
   if (matchedVerbs.length > 0) {
     missionScore += matchedVerbs.length * 2;
     signals.push(`mission verbs: ${matchedVerbs.join(', ')}`);
   }
 
   // Signal 2: Multi-step indicators
-  const matchedMultipliers = MISSION_MULTIPLIERS.filter((m) => lower.includes(m));
+  const matchedMultipliers = [...MISSION_MULTIPLIERS.filter((m) => lower.includes(m)), ...ar.multipliers];
   if (matchedMultipliers.length > 0) {
     missionScore += matchedMultipliers.length * 2;
     signals.push(`multi-step indicators: ${matchedMultipliers.join(', ')}`);
   }
 
   // Signal 3: Simple request indicators
-  const matchedSimple = SIMPLE_INDICATORS.filter((s) => lower.includes(s));
+  const matchedSimple = [...SIMPLE_INDICATORS.filter((s) => lower.includes(s)), ...ar.simple];
   if (matchedSimple.length > 0) {
     simpleScore += matchedSimple.length * 2;
     signals.push(`simple indicators: ${matchedSimple.join(', ')}`);
   }
 
   // Signal 4: Question markers
-  const matchedQuestions = QUESTION_MARKERS.filter((q) => lower.includes(q));
+  const matchedQuestions = [...QUESTION_MARKERS.filter((q) => lower.includes(q)), ...ar.questions];
   if (matchedQuestions.length > 0 && matchedVerbs.length === 0) {
     simpleScore += 1;
     signals.push('question format detected');

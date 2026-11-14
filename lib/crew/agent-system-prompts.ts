@@ -1,6 +1,16 @@
 import type { Agent } from '@/types';
 
 /**
+ * M7-13c-2c-a: what every chat reply may and may not claim about the platform. One constant, appended to Temo's prompt and to the
+ * generic agent template, so no routed agent can make up provider status ("the API limit is exhausted") or pretend to be searching.
+ * Live, before this existed, Temo and Flow told the user the Gemini quota was gone while the same model was answering.
+ */
+export const OPERATING_FACTS = `## Operating Facts
+You cannot see provider quotas, rate limits, outages or API status — never state or guess them, and never tell the user that a model or API is exhausted or limited.
+You cannot browse the web or call tools yourself inside a reply: tools run only when the platform runs them, and their output appears under TOOL RESULTS in your context — never say you are searching, or that a search failed or was blocked, unless that section says so.
+Real research and tool work happens in missions: when the user wants something that needs web research or tools and no tool results are present, say so briefly and offer to start a mission, in the user's language.`;
+
+/**
  * AgentSystemPrompts — builds the system prompt for each agent based on
  * their personality, role, skills, and capabilities. Used when calling
  * the AI provider so each specialist responds in-character.
@@ -31,7 +41,9 @@ ${agent.personality.bio}
 - If a request is outside your expertise, say so and suggest which crew member would be better suited.
 - You are part of a crew coordinated by Temo, the Chief AI. You may reference other specialists when collaboration makes sense.
 - Take a stance. Lead with the actual answer or recommendation, not a preamble about the question. Never pad a short answer with "I'd be happy to help with that" or "If you have any other questions, feel free to ask" — say the thing, then stop.
-- Skip disclaimers and hedging you don't actually mean ("I'm just an AI, but..."). You have real expertise in your domain — sound like it.`;
+- Skip disclaimers and hedging you don't actually mean ("I'm just an AI, but..."). You have real expertise in your domain — sound like it.
+
+${OPERATING_FACTS}`;
 }
 
 /**
@@ -72,5 +84,7 @@ Examples of the range, not a script to follow verbatim:
 - "[Just the answer, no opener at all]" (often the best choice for a quick factual question)
 - "Tamam — [answer]. One thing to flag though: [caveat]" (confirms, answers, adds a real caveat)
 - "Three things going on here: [answer]" (when there's genuine structure to signal)
-The point isn't the specific phrases — it's that a real person doesn't open every message the same way, and neither should you.`;
+The point isn't the specific phrases — it's that a real person doesn't open every message the same way, and neither should you.
+
+${OPERATING_FACTS}`;
 }

@@ -5,6 +5,7 @@
 
 import type { Intent } from '@/types';
 import type { DetectedIntent, MemoryClassification } from './types';
+import { buildLexicon, matchLexicon } from '@/lib/utils/arabicText';
 
 // ---- Memory Query Patterns (questions about stored facts) ----
 const MEMORY_QUERY_PATTERNS = [
@@ -119,6 +120,18 @@ const TOOL_ACTION_PATTERNS = [
   { pattern: /\b(show|list|get|view)\b.*\b(memor|timeline|history|event)/i, category: 'memory' as const },
 ];
 
+// M7-13c-2c-a: Arabic twins of the English `search|google|look up` trigger above — the search VERBS and "google" only. The bare
+// nouns ("الانترنت", "ويب", "أحدث الأخبار") are deliberately not triggers: their English equivalents ("internet", "web", "latest
+// news") do not trigger either, and they would turn "ايه احسن ويب فريمورك" into a tool call. Tried only when no English pattern
+// matched, so English input is classified exactly as before.
+const ARABIC_WEB_SEARCH = buildLexicon([
+  'ابحث', 'ابحثي', 'ابحثلي', 'دور على', 'دوري على', 'دورلي على', 'فتش على', 'جوجل',
+]);
+
+export function asksToSearchWebArabic(input: string): boolean {
+  return matchLexicon(input, ARABIC_WEB_SEARCH).length > 0;
+}
+
 // ---- Timeline Patterns ----
 const TIMELINE_PATTERNS = [
   /\b(recent|recent memories|timeline|history|what happened|past events|what did i do)\b/i,
@@ -227,6 +240,11 @@ export function detectIntent(input: string, routingIntent: Intent): DetectedInte
       toolCategoryHint = category;
       break;
     }
+  }
+
+  if (toolCategoryHint === 'none' && asksToSearchWebArabic(input)) {
+    asksForToolAction = true;
+    toolCategoryHint = 'web';
   }
 
   // Memory tool actions (show memories, timeline) are tool actions

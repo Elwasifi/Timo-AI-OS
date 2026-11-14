@@ -4,6 +4,7 @@ import { chatWithFallback } from '@/lib/ai/ai-provider';
 import { route, classifyTask } from '@/lib/ai/router';
 import { useAuthStore } from '@/stores/authStore';
 import type { Intent, TaskCategory } from '@/types';
+import { hasArabic, normalizeArabic } from '@/lib/utils/arabicText';
 
 const AGENT_CATEGORY_MAP: Record<string, string> = {
   nova: 'code',
@@ -187,9 +188,14 @@ Rules:
 // alternative.
 const GREETING_PATTERN = /^(hi+|hey+|hello+|yo|sup|howdy|good (morning|afternoon|evening)|what'?s up|how(’|')?s it going|(al)?ham[du]*[iael]*llah|ahlan(?: wa ?sahlan)?|marhaba|sal[ae]{1,2}m(?: ?alaikum)?|thanks?(?: you)?(?: a lot| so much)?|shukr[ae]n)[.!?\s]*$/i;
 
-/** M7-13e: true for a bare greeting/pleasantry ("Hi", "hamdellah", "thanks") — used by the chat pipeline to skip stale conversation history for small talk. */
+// M7-13c-2c-a: Arabic greetings (MSA + Egyptian), same rule as the Latin pattern — the WHOLE message must be one greeting,
+// optionally followed by punctuation. Matched against the normalized text (no tashkeel, alef forms unified, teh marbuta -> heh).
+const ARABIC_GREETING_PATTERN = /^(اهلا|مرحبا|هلا|السلام عليكم|صباح الخير|مساء الخير|ازيك|عامل ايه|هاي)[.!?؟،\s]*$/;
+
+/** M7-13e: true for a bare greeting/pleasantry ("Hi", "hamdellah", "thanks", "أهلاً") — used by the chat pipeline to skip stale conversation history for small talk. */
 export function isGreeting(text: string): boolean {
-  return GREETING_PATTERN.test(text.trim());
+  const trimmed = text.trim();
+  return GREETING_PATTERN.test(trimmed) || (hasArabic(trimmed) && ARABIC_GREETING_PATTERN.test(normalizeArabic(trimmed)));
 }
 
 /**
@@ -208,7 +214,7 @@ export class KeywordFallbackAnalyzer implements IntentAnalyzer {
 
   async analyze(input: string): Promise<Intent> {
     const trimmed = input.trim();
-    if (GREETING_PATTERN.test(trimmed)) {
+    if (isGreeting(trimmed)) {
       return {
         category: 'general',
         confidence: 0.95,
