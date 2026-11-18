@@ -38,6 +38,7 @@ const ROUTING_TASK_TYPES: TaskType[] = [
 ];
 import { useAuthStore } from '@/stores/authStore';
 import { supabase } from '@/lib/supabase/client';
+import { invalidateClientProfile } from '@/lib/ai/chatReads';
 
 const SECTIONS = [
   { id: 'profile', label: 'Profile', icon: User },
@@ -462,6 +463,7 @@ function WorkspaceSection() {
       preferred_language: language,
       updated_at: new Date().toISOString(),
     });
+    invalidateClientProfile(currentTenantId); // M7-13c-2c-b: the next chat turn must see the new name/language, not the cached one
     setSaving(false);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);

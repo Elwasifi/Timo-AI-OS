@@ -8,7 +8,7 @@
 // already knows how to walk through (same fallback/retry mechanics as
 // today, just fed a smarter order).
 
-import type { ProviderId } from '@/lib/settings/settings-service';
+import type { ProviderId, AppSettings } from '@/lib/settings/settings-service';
 
 // ---- Task classification ----
 
@@ -101,6 +101,8 @@ export interface RoutingRequest {
   /** Rough token estimate for budget filtering — callers rarely know this precisely, an order-of-magnitude guess is fine. */
   estimatedInputTokens?: number;
   estimatedOutputTokens?: number;
+  /** M7-13c-2c-b: app settings the caller has ALREADY loaded for this turn; route() uses them instead of reading app_settings again. */
+  settings?: AppSettings;
 }
 
 export interface ScoredCandidate {

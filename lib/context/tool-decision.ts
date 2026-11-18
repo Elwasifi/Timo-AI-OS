@@ -6,6 +6,7 @@ import { toolRegistry } from '@/lib/tools/registry';
 import { ensureBuiltinToolsRegistered } from '@/lib/tools/builtin-tools';
 import { toolPlanner, ToolPlanningError } from '@/lib/tools/planner';
 import { permissionEngine } from '@/lib/tools/permissions';
+import { isMemoryWriteTool } from '@/lib/tools/memoryWriteGuard';
 import { toolExecutor } from '@/lib/tools/executor';
 import { logger } from '@/lib/utils/logger';
 import { dedupeFailureTexts } from '@/lib/utils/failureText';
@@ -162,8 +163,10 @@ export async function decideTools(
   // M7-13c-2a: how many tools this agent may use at all — distinguishes "nothing is available to it"
   // from "something was available and nothing fit" when the planner returns no plan.
   const availableToolCount = toolRegistry.listForAgent(agentId, permissions).length;
+  // M7-13c-2c-b: memory WRITE tools are planned/executed only when the user asked to remember/save (DetectedIntent.asksToRemember).
+  const allowMemoryWrite = intent.asksToRemember === true;
   try {
-    plan = await toolPlanner.plan(input, agentId, permissions, tenantId);
+    plan = await toolPlanner.plan(input, agentId, permissions, tenantId, { allowMemoryWrite });
   } catch (err) {
     if (err instanceof ToolPlanningError) {
       plannerFailureKind = err.code === 'planner_unavailable' ? 'planner_unavailable' : err.code === 'no_tenant' ? 'planner_no_tenant' : 'planner_unusable';
@@ -205,6 +208,11 @@ export async function decideTools(
       if (blockedTools.has(t.toolId)) continue;
       const toolDef = toolRegistry.get(t.toolId);
       if (!toolDef) continue;
+      // M7-13c-2c-b: second guard (the planner already does not offer these): a memory write the user did not ask for is dropped, never executed.
+      if (!allowMemoryWrite && isMemoryWriteTool(toolDef.definition)) {
+        logger.n8nWarn('decideTools: dropped a planned memory write tool - the user did not ask to remember anything', { toolId: t.toolId, agentId });
+        continue;
+      }
 
       const start = Date.now();
       const request: ToolRequest = {

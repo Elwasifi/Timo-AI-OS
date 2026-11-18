@@ -1,4 +1,5 @@
 import { supabase } from '@/lib/supabase/client';
+import { clearAllTtlCaches } from '@/lib/utils/ttlCache';
 
 /**
  * AppSettings — the single source of truth for all AI provider configuration.
@@ -206,6 +207,7 @@ export async function saveSettings(patch: Partial<AppSettings>): Promise<AppSett
     console.error('[settings] save error:', error.message);
     throw new Error(`Failed to save settings: ${error.message}`);
   }
+  clearAllTtlCaches(); // M7-13c-2c-b: a saved setting must be visible to the next chat turn, not 20 s later
   return data;
 }
 

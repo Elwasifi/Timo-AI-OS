@@ -25,6 +25,7 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    setupFiles: ['tests/setup/clearReadCaches.ts'], // M7-13c-2c-b
     include: ['tests/**/*.test.ts'],
     testTimeout: 30000,
     hookTimeout: 30000,

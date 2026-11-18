@@ -10,8 +10,10 @@ import type { ToolDefinition, ToolRequest, ToolResultEnvelope, ToolPermission } 
 import { toolRegistry } from './registry';
 import { toolExecutor } from './executor';
 import { createChain, type ChainStep, type ChainResult } from './chain';
+import { isMemoryWriteTool } from './memoryWriteGuard';
 import { chatWithFallback, AIProviderError, type ChatMessage } from '@/lib/ai/ai-provider';
 import { route, classifyTask } from '@/lib/ai/router';
+import type { ProviderId } from '@/lib/settings/settings-service';
 import { logger } from '@/lib/utils/logger';
 
 interface PlannerPlan {
@@ -39,6 +41,12 @@ export class ToolPlanningError extends Error {
   }
 }
 
+/** M7-13c-2c-b: planner options. Memory WRITE tools are offered only when the caller says the user asked to remember. */
+export interface ToolPlanOptions {
+  /** true only when the detected intent says the user asked to remember/save something (DetectedIntent.asksToRemember). Default false = fail closed. */
+  allowMemoryWrite?: boolean;
+}
+
 export class ToolPlanner {
   /**
    * Ask the AI to choose tool(s) for a natural-language request.
@@ -49,8 +57,13 @@ export class ToolPlanner {
     agentId: string,
     permissions: ToolPermission[],
     tenantId?: string | null,
+    options?: ToolPlanOptions,
   ): Promise<PlannerResponse | null> {
-    const available = toolRegistry.listForAgent(agentId, permissions);
+    // M7-13c-2c-b: memory write tools are not even OFFERED to the model unless the user asked to remember
+    // (a code-level control — the planner cannot choose a tool it was never shown, and parse() only accepts offered ids).
+    const available = toolRegistry
+      .listForAgent(agentId, permissions)
+      .filter((t) => options?.allowMemoryWrite === true || !isMemoryWriteTool(t));
     if (available.length === 0) return null;
 
     // M7-13e: this used to pass tenantId: null, which the ai-chat edge function
@@ -89,21 +102,43 @@ Rules:
       // Tool selection is a small, structured-JSON task — the router's
       // STRUCTURED_OUTPUT/TOOL_EXECUTION profile favors fast, reliable
       // models over always reaching for the strongest one.
-      const decision = await route({ classification: classifyTask({ text: input, needsStructuredOutput: true, needsTools: true }), tenantId });
-      const result = await chatWithFallback(
+      //
+      // M7-13c-2c-b: planning BLOCKS the whole turn (the reply waits for it), so it is routed as latency-sensitive: the router then
+      // weighs MEASURED latency in its task-fit term (scoring.ts scoreTaskMatch: <= 1.5 s -> 0.9, >= 4 s -> 0.2) instead of the neutral
+      // 0.5 every candidate got for a normal-sensitivity tool task. Live, the planner ran on a Gemini model averaging ~7 s (10 s that day)
+      // while Groq gpt-oss-120b averages ~1.8 s. No model is hardcoded; the router still picks from its proven trusted pool.
+      const baseClassification = classifyTask({ text: input, needsStructuredOutput: true, needsTools: true });
+      const decision = await route({ classification: { ...baseClassification, latencySensitivity: 'high' }, tenantId });
+      const attempt = (candidates: { provider: ProviderId; model: string }[], plannerRouting: 'fast' | 'previous') => chatWithFallback(
         [{ role: 'user', content: input }] as ChatMessage[],
         {
           // M7-13c-1: was 500 — too small for a reasoning model's hidden tokens plus the JSON plan.
-          systemPrompt, temperature: 0.1, maxTokens: 1200, candidates: decision.candidates,
+          systemPrompt, temperature: 0.1, maxTokens: 1200, candidates,
           usageContext: {
             operation: 'tool_planning',
             agentId,
             tenantId,
-            metadata: { taskType: decision.taskType, routingMode: decision.mode },
+            metadata: { taskType: decision.taskType, routingMode: decision.mode, plannerRouting },
           },
         }
       );
-      return this.parse(result.content, available);
+      // A call that fails or times out is already handled by chatWithFallback: it walks to the next candidate (12 s per attempt, 20 s overall).
+      const result = await attempt(decision.candidates, 'fast');
+      try {
+        return this.parse(result.content, available);
+      } catch (parseErr) {
+        if (!(parseErr instanceof ToolPlanningError)) throw parseErr;
+        // M7-13c-2c-b: the fast model answered but its output was not a usable plan (not valid JSON / unknown tool ids). Fall back to the
+        // router's PREVIOUS choice (the order the planner used before this change), skipping the model that just failed.
+        const previous = await route({ classification: baseClassification, tenantId });
+        const alternates = previous.candidates.filter((c) => !(c.provider === result.provider && c.model === result.model));
+        if (alternates.length === 0) throw parseErr;
+        logger.error('ToolPlanner: the fast planner model returned an unusable plan — retrying with the previous routing choice', {
+          failedProvider: result.provider, failedModel: result.model, timestamp: Date.now(),
+        });
+        const second = await attempt(alternates, 'previous');
+        return this.parse(second.content, available);
+      }
     } catch (err) {
       // parse() already logged and threw its own ToolPlanningError — don't
       // double-log or re-wrap it, just let it propagate.
@@ -145,9 +180,10 @@ Rules:
     agentId: string,
     permissions: ToolPermission[],
     tenantId?: string | null,
+    options?: ToolPlanOptions,
   ): Promise<{ plan: PlannerResponse | null; failure: ToolPlanningError | null }> {
     try {
-      return { plan: await this.plan(input, agentId, permissions, tenantId), failure: null };
+      return { plan: await this.plan(input, agentId, permissions, tenantId, options), failure: null };
     } catch (err) {
       if (err instanceof ToolPlanningError && err.code === 'no_tenant') return { plan: null, failure: err };
       throw err;

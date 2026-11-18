@@ -77,9 +77,10 @@ describe('sandbox: a read-only tool runs for real', () => {
     expect(r.simulated).toBeUndefined();
   });
 
-  it('the real built-in definitions: web.search is the only readOnly tool (every other tool stays fail-safe)', () => {
-    const readOnly = toolRegistry.list().filter((t) => t.readOnly === true && !t.id.startsWith('test.')).map((t) => t.id);
-    expect(readOnly).toEqual(['web.search']);
+  it('the real built-in definitions: only web.search and the three memory READ tools are readOnly (every other tool stays fail-safe)', () => {
+    // M7-13c-2c-b: was `['web.search']` only. memory.search / memory.recall / memory.timeline are SELECT-only and now run for real in Demo.
+    const readOnly = toolRegistry.list().filter((t) => t.readOnly === true && !t.id.startsWith('test.')).map((t) => t.id).sort();
+    expect(readOnly).toEqual(['memory.recall', 'memory.search', 'memory.timeline', 'web.search']);
   });
 });
 
@@ -159,13 +160,15 @@ describe('live mode is unchanged', () => {
   });
 });
 
-describe('memory tools: sandbox routing is unchanged', () => {
-  it('a memory-category tool in sandbox runs its handler against SANDBOX_TENANT_ID (not simulated, not the client tenant)', async () => {
+describe('memory tools: sandbox no longer routes to a separate tenant (M7-13c-2c-b)', () => {
+  // The sandbox tenant (…0002) has no members, so the memories INSERT policy (is_tenant_member) rejected every Demo write: it could never
+  // work. A memory-category tool that is not readOnly is now simulated in Demo, like every other category without an isolated environment.
+  it('a memory-category tool that is not readOnly is SIMULATED in sandbox: the handler is never called and nothing is written to SANDBOX_TENANT_ID', async () => {
     const r = await run('test.memory', {}, { agentId: 'echo' });
-    expect(memoryHandler).toHaveBeenCalledTimes(1);
-    expect((r.data as { tenantSeen: string }).tenantSeen).toBe(SANDBOX_TENANT_ID);
-    expect(r.simulated).toBeUndefined();
-    expect(r.executionMode).toBe('sandbox');
+    expect(memoryHandler).not.toHaveBeenCalled();
+    expect(r.simulated).toBe(true);
+    expect(r.executionMode).toBe('simulation');
+    expect(JSON.stringify(r.data)).not.toContain(SANDBOX_TENANT_ID);
   });
 
   it('in live the memory tool sees the real tenant', async () => {
@@ -174,7 +177,10 @@ describe('memory tools: sandbox routing is unchanged', () => {
     expect((r.data as { tenantSeen: string }).tenantSeen).toBe('client-tenant');
   });
 
-  it('no real memory.* tool is flagged readOnly (their sandbox routing must not change)', () => {
-    expect(toolRegistry.list().filter((t) => t.category === 'memory').every((t) => t.readOnly !== true)).toBe(true);
+  it('exactly the memory READ tools (search, recall, timeline) are flagged readOnly; every memory write/summarize tool is not', () => {
+    const flagged = toolRegistry.list().filter((t) => t.category === 'memory' && t.readOnly === true).map((t) => t.id).sort();
+    expect(flagged).toEqual(['memory.recall', 'memory.search', 'memory.timeline']);
+    const notFlagged = toolRegistry.list().filter((t) => t.category === 'memory' && t.readOnly !== true && !t.id.startsWith('test.')).map((t) => t.id).sort();
+    expect(notFlagged).toEqual(['memory.forget', 'memory.link', 'memory.store', 'memory.summarize', 'memory.update']);
   });
 });

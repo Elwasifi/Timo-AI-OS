@@ -13,8 +13,8 @@
 // lib/governance/entitlements.ts's checkBudget() (the same hard-gate
 // launchMission() already uses).
 
-import { loadSettings, type ProviderId } from '@/lib/settings/settings-service';
-import { checkBudget } from '@/lib/governance/entitlements';
+import { type ProviderId } from '@/lib/settings/settings-service';
+import { loadSettingsCached, checkBudgetCached } from '@/lib/ai/chatReads';
 import { estimateCost } from '@/lib/ai/pricing';
 import { getCandidateModels } from './modelCatalog';
 import { requiresByok, loadTenantProviderConfig } from '@/lib/settings/tenantConfiguredProviders';
@@ -78,7 +78,7 @@ function explain(top: ScoredCandidate | null, taskType: string, fallbackCount: n
  */
 export async function route(request: RoutingRequest): Promise<RoutingDecision> {
   try {
-    const settings = await loadSettings();
+    const settings = request.settings ?? await loadSettingsCached(request.tenantId); // M7-13c-2c-b: passed down by the caller, else a 20 s per-tenant cache
     const routingMode = settings.routing_mode ?? 'automatic';
     const routingStrategy: RoutingStrategy = settings.routing_strategy ?? 'balanced';
     const routingPreferences = settings.routing_preferences ?? {};
@@ -118,7 +118,7 @@ export async function route(request: RoutingRequest): Promise<RoutingDecision> {
     const [allCandidates, health, budget] = await Promise.all([
       getCandidateModels(tenantConfig ?? undefined),
       getAllHealth(),
-      request.tenantId ? checkBudget(request.tenantId) : Promise.resolve(null),
+      request.tenantId ? checkBudgetCached(request.tenantId) : Promise.resolve(null),
     ]);
 
     const tokenEstimate = {

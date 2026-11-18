@@ -4,7 +4,8 @@ import { AIIntentAnalyzer } from './ai-intent-analyzer';
 import { AgentRegistry } from './agent-registry';
 import { loadAgents } from '@/lib/agents/agentRegistryService';
 import { useAuthStore } from '@/stores/authStore';
-import { getClientProfile, buildIdentityDirective } from '@/lib/governance/clientProfile';
+import { buildIdentityDirective } from '@/lib/governance/clientProfile';
+import { loadSettingsCached, getClientProfileCached } from '@/lib/ai/chatReads';
 import { AgentState } from './agent-state';
 import { AgentMemory } from './agent-memory';
 import { getAgentGreeting } from './agent-responses';
@@ -12,7 +13,7 @@ import { buildSystemPrompt, buildTemoCoordinatorPrompt } from './agent-system-pr
 import { loadRecentMissionsBlock } from './recentMissions';
 import { chatWithFallback, streamWithFallback, type ChatMessage } from '@/lib/ai/ai-provider';
 import { route, classifyTask } from '@/lib/ai/router';
-import { loadSettings } from '@/lib/settings/settings-service';
+import type { AppSettings } from '@/lib/settings/settings-service';
 import { ConversationService } from '@/lib/ai/conversation-service';
 import { logger } from '@/lib/utils/logger';
 import { traceStep } from '@/lib/utils/sendTrace';
@@ -433,7 +434,7 @@ export class CrewCoordinator {
   /** V1 (Sections 15–16): append the tenant's assistant-name/language customization, if any. */
   private async withIdentity(systemPrompt: string): Promise<string> {
     const tenantId = useAuthStore.getState().currentTenantId;
-    const profile = await getClientProfile(tenantId);
+    const profile = await getClientProfileCached(tenantId);
     return systemPrompt + buildIdentityDirective(profile);
   }
 
@@ -448,6 +449,26 @@ export class CrewCoordinator {
     return block ? `${systemPrompt}\n\n${block}` : systemPrompt;
   }
 
+  /**
+   * M7-13c-2c-b: everything a chat reply needs from the database BEFORE the model call, loaded CONCURRENTLY instead of one after the
+   * other (settings, the recent-missions block [Temo only; keeps its own 4 s deadline and fails open to ''], the client profile).
+   * The resulting prompt text is byte-for-byte what withRecentMissions() + withIdentity() produced: base [+ RAG], then the missions
+   * block, then the identity directive. The settings are returned so route() and the fallback chain do not read them again.
+   */
+  private async loadPromptInputs(
+    agent: Agent,
+    basePrompt: string,
+    tenantId: string | null,
+  ): Promise<{ settings: AppSettings; fullSystemPrompt: string }> {
+    const [settings, missionsBlock, profile] = await Promise.all([
+      loadSettingsCached(tenantId),
+      agent.id === 'temo' ? loadRecentMissionsBlock(tenantId) : Promise.resolve(''),
+      getClientProfileCached(tenantId),
+    ]);
+    const withMissions = missionsBlock ? `${basePrompt}\n\n${missionsBlock}` : basePrompt;
+    return { settings, fullSystemPrompt: withMissions + buildIdentityDirective(profile) };
+  }
+
   private async generateResponse(
     agent: Agent | undefined,
     currentInput: string,
@@ -457,24 +478,21 @@ export class CrewCoordinator {
   ): Promise<string> {
     if (!agent) throw new Error('No agent selected');
 
-    const settings = await loadSettings();
+    const tenantId = useAuthStore.getState().currentTenantId;
 
     const systemPrompt = agent.id === 'temo'
       ? buildTemoCoordinatorPrompt(this.registry.getAll())
       : buildSystemPrompt(agent);
 
-    const fullSystemPrompt = await this.withIdentity(
-      await this.withRecentMissions(ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt, agent),
-    );
+    const { settings, fullSystemPrompt } = await this.loadPromptInputs(agent, ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt, tenantId);
 
     const messages: ChatMessage[] = [
       ...conversationHistory.slice(-10),
       { role: 'user', content: currentInput },
     ];
 
-    const tenantId = useAuthStore.getState().currentTenantId;
     const classification = classifyTask({ text: currentInput, isVoice });
-    const decision = await route({ classification, tenantId });
+    const decision = await route({ classification, tenantId, settings });
 
     const result = await chatWithFallback(messages, {
       systemPrompt: fullSystemPrompt,
@@ -500,7 +518,7 @@ export class CrewCoordinator {
   ): Promise<string> {
     if (!agent) throw new Error('No agent selected');
 
-    const settings = await loadSettings();
+    const settings = await loadSettingsCached(useAuthStore.getState().currentTenantId);
 
     const systemPrompt = agent.id === 'temo'
       ? buildTemoCoordinatorPrompt(this.registry.getAll())
@@ -524,7 +542,7 @@ ${payload}`;
     // structured/reliable-output task, not an open-ended chat turn —
     // classify it as such rather than reusing the general chat profile.
     const classification = classifyTask({ text: toolContext, needsStructuredOutput: true, needsTools: true });
-    const decision = await route({ classification, tenantId });
+    const decision = await route({ classification, tenantId, settings });
 
     const result = await chatWithFallback(messages, {
       systemPrompt: await this.withIdentity(systemPrompt),
@@ -547,15 +565,13 @@ ${payload}`;
   ): Promise<string> {
     if (!agent) throw new Error('No agent selected');
 
-    const settings = await loadSettings();
+    const tenantId = useAuthStore.getState().currentTenantId;
 
     const systemPrompt = agent.id === 'temo'
       ? buildTemoCoordinatorPrompt(this.registry.getAll())
       : buildSystemPrompt(agent);
 
-    const fullSystemPrompt = await this.withIdentity(
-      await this.withRecentMissions(ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt, agent),
-    );
+    const { settings, fullSystemPrompt } = await this.loadPromptInputs(agent, ragContext ? `${systemPrompt}\n\n${ragContext}` : systemPrompt, tenantId);
 
     const messages: ChatMessage[] = [
       ...conversationHistory.slice(-10),
@@ -563,14 +579,15 @@ ${payload}`;
     ];
 
     const classification = classifyTask({ text: currentInput, isVoice });
-    const decision = await route({ classification, tenantId: useAuthStore.getState().currentTenantId });
+    const decision = await route({ classification, tenantId, settings });
 
     return streamWithFallback(messages, {
       systemPrompt: fullSystemPrompt,
       temperature: settings.temperature,
       maxTokens: settings.max_tokens,
       candidates: decision.candidates,
-      usageContext: { operation: 'chat', agentId, tenantId: useAuthStore.getState().currentTenantId, metadata: { taskType: decision.taskType, routingMode: decision.mode } },
+      settings,
+      usageContext: { operation: 'chat', agentId, tenantId, metadata: { taskType: decision.taskType, routingMode: decision.mode } },
       onDelta: (delta, full) => {
         this.callbacks.onStreamDelta?.(agentId, delta, full);
       },

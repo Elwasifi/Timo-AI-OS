@@ -35,8 +35,16 @@ export const SANDBOX_TENANT_ID = '00000000-0000-0000-0000-000000000002';
  * behavior (confirmed decision, not a workaround) rather than either
  * silently running for real or fabricating a fake "isolated" execution
  * that doesn't actually exist.
+ *
+ * M7-13c-2c-b: THE SET IS NOW EMPTY. 'memory' used to be here, and sandbox memory writes were rewritten to
+ * SANDBOX_TENANT_ID — but that tenant has no members and the only INSERT policy on memories is
+ * is_tenant_member(tenant_id), so every Demo write from the browser failed with an RLS 403 and never worked.
+ * Demo memory writes are now simulated like every other category without an isolated environment (no DB
+ * call), and the memory READ tools are flagged readOnly (builtin-tools.ts) so they run for real against the
+ * user's own tenant. The mechanism (this set + the tenant rewrite in executor.ts) is kept for a future
+ * category that really has an isolated, reachable environment.
  */
-const CATEGORIES_WITH_REAL_SANDBOX_ISOLATION: ReadonlySet<ToolCategory> = new Set<ToolCategory>(['memory']);
+const CATEGORIES_WITH_REAL_SANDBOX_ISOLATION: ReadonlySet<ToolCategory> = new Set<ToolCategory>();
 
 export function categoryHasRealSandboxIsolation(category: ToolCategory): boolean {
   return CATEGORIES_WITH_REAL_SANDBOX_ISOLATION.has(category);

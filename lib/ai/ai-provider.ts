@@ -3,7 +3,7 @@ import { FALLBACK_ORDER, loadSettings, PROVIDER_KEY_FIELD, PROVIDER_MODEL_FIELD,
 import { logger } from '@/lib/utils/logger';
 import { recordUsage, type UsageContext } from './usageLedger';
 import { recordHealth, getHealth, getAllHealth, isProvenHealth } from './router/healthTracker';
-import { checkBudget } from '@/lib/governance/entitlements';
+import { loadSettingsCached, checkBudgetCached } from './chatReads';
 import { requiresByok, loadTenantProviderConfig, ByokNotConfiguredError } from '@/lib/settings/tenantConfiguredProviders';
 
 export interface ChatMessage {
@@ -34,6 +34,13 @@ export interface ChatOptions {
   deadlineAtMs?: number;
   /** M7-13c-1: INTERNAL — the full (un-shortened) per-attempt limit, so a timeout of a timer shortened by the remaining budget can be told apart from a full-budget timeout. */
   fullTimeoutMs?: number;
+  /** M7-13c-2c-b: app settings the caller has ALREADY loaded for this turn — streamWithFallback uses them instead of reading app_settings again. */
+  settings?: AppSettings;
+  /**
+   * M7-13c-2c-b: STREAMING only. If no visible token has arrived after this many ms AND another candidate remains, abort the request and
+   * move on to the next one. Omitted = FIRST_TOKEN_TIMEOUT_MS for interactive calls; 0 = never. Ignored for the last/only candidate.
+   */
+  firstTokenTimeoutMs?: number;
 }
 
 export interface ChatResult {
@@ -195,6 +202,15 @@ export function __getRetryPolicyForTesting(): typeof RETRY_POLICY {
  * to it and keep their 60-90s per-attempt limits unchanged.
  */
 export const INTERACTIVE_DEADLINE_MS = 30_000;
+
+/**
+ * M7-13c-2c-b: first-token budget for a STREAMED interactive reply. Live (2026-11-17): a greeting waited ~10 s for Gemini's first token
+ * while Groq answers in ~1.2 s. With another candidate left, waiting longer than this is worse than switching. It does NOT replace the
+ * 20 s idle limit or the 30 s deadline, and it never applies to the last/only candidate (a slow-but-only provider is not failed).
+ */
+export const FIRST_TOKEN_TIMEOUT_MS = 6_000;
+/** A provider that missed the first-token budget is deferred behind the others for this long (a soft cooldown: never opens a circuit, never touches health). */
+export const FIRST_TOKEN_COOLDOWN_MS = 60_000;
 /** Don't start another provider attempt with less than this left — it could not finish. */
 const MIN_ATTEMPT_MS = 1_500;
 
@@ -266,6 +282,8 @@ function startRequestTimer(providerId: ProviderId, ms: number = PROVIDER_REQUEST
     /** Reset the deadline (streaming: called per received chunk). */
     touch() { clearTimeout(timer); timer = setTimeout(fire, ms); },
     stop() { clearTimeout(timer); },
+    /** Abort the request WITHOUT marking it a timeout (the first-token watcher uses this). */
+    abort() { controller.abort(); },
     timedOut: () => timedOut,
     error: () => new AIProviderError(`${providerId} did not respond within ${Math.round(ms / 1000)}s`, 408, providerId, 'timeout'),
   };
@@ -369,6 +387,13 @@ class AIProviderImpl implements AIProvider {
     for (let attempt = 0; attempt <= 2; attempt++) {
       const attemptMs = Math.max(1, attemptTimeoutMs(options));
       const timer = startRequestTimer(this.id, attemptMs);
+      // M7-13c-2c-b: first-token watcher — armed only when it is shorter than the whole attempt budget; cleared by the first visible delta.
+      const firstTokenMs = options.firstTokenTimeoutMs ?? 0;
+      let firstTokenTimedOut = false;
+      let firstTokenTimer: ReturnType<typeof setTimeout> | undefined;
+      if (firstTokenMs > 0 && firstTokenMs < attemptMs) {
+        firstTokenTimer = setTimeout(() => { firstTokenTimedOut = true; timer.abort(); }, firstTokenMs);
+      }
       try {
         const body = {
           provider: this.id,
@@ -423,6 +448,7 @@ class AIProviderImpl implements AIProvider {
               const data = JSON.parse(trimmed);
               if (data.error) throw new AIProviderError(data.error, 500, this.id);
               if (data.delta) {
+                if (firstTokenTimer !== undefined) { clearTimeout(firstTokenTimer); firstTokenTimer = undefined; }
                 full += data.delta;
                 options.onDelta(data.delta, full);
               }
@@ -444,6 +470,12 @@ class AIProviderImpl implements AIProvider {
           model: options.model || '',
         };
       } catch (err) {
+        if (firstTokenTimedOut) {
+          // Our own budget, not evidence the model is down: flagged so the fallback loop neither records a failed health sample nor opens a circuit.
+          const e = new AIProviderError(`${this.id} sent no token within ${Math.round(firstTokenMs / 1000)}s`, 408, this.id, 'first_token_timeout');
+          e.budgetLimited = true;
+          throw e;
+        }
         if (timer.timedOut()) throw budgetLimitedTimeout(timer, options, attemptMs);
         if (err instanceof AIProviderError && (err.code === 'rate_limited' || (!isRetryable(err.status) && err.status !== 0))) {
           throw err;
@@ -457,6 +489,7 @@ class AIProviderImpl implements AIProvider {
           : new AIProviderError(err instanceof Error ? err.message : 'Stream failed', 0, this.id);
       } finally {
         timer.stop();
+        if (firstTokenTimer !== undefined) clearTimeout(firstTokenTimer);
       }
     }
     throw new AIProviderError('Exhausted retries', 500, this.id);
@@ -676,6 +709,17 @@ export function recordSoftFailure(tenantId: string | null | undefined, providerI
   return false;
 }
 
+/**
+ * M7-13c-2c-b: a candidate that missed the first-token budget is deferred behind the others for FIRST_TOKEN_COOLDOWN_MS. This is the
+ * ONLY thing a first-token abort touches: no circuit, no health sample, no empty-completion strike. Never shortens a longer cooldown.
+ */
+export function recordFirstTokenSlow(tenantId: string | null | undefined, providerId: ProviderId, model: string, now: number = Date.now()): void {
+  const key = circuitKey(tenantId, providerId, model);
+  const until = now + FIRST_TOKEN_COOLDOWN_MS;
+  if ((softCooldownUntil.get(key) ?? 0) < until) softCooldownUntil.set(key, until);
+  logger.provider(`${providerId}/${model} gave no token within ${FIRST_TOKEN_TIMEOUT_MS / 1000}s - trying the next candidate, deferring it for ${FIRST_TOKEN_COOLDOWN_MS / 1000}s`);
+}
+
 function clearSoftCooldown(tenantId: string | null | undefined, providerId: ProviderId, model: string): void {
   const key = circuitKey(tenantId, providerId, model);
   softCooldownUntil.delete(key);
@@ -776,7 +820,7 @@ async function applyBudgetGate(
 ): Promise<{ providerId: ProviderId; model: string }[]> {
   if (!tenantId) return pairs;
 
-  const budget = await checkBudget(tenantId);
+  const budget = await checkBudgetCached(tenantId); // M7-13c-2c-b: 5 s per-tenant cache — route() read the same budget a few ms earlier
   if (budget.withinBudget) return pairs;
 
   const freePairs = pairs.filter((p) => p.providerId === 'ollama');
@@ -913,6 +957,23 @@ export async function chatWithFallback(
   throw new Error(friendlyMessage);
 }
 
+// M7-13c-2c-b: usage records of streamed replies are written in the background. The set lets a test (or a shutdown path) wait for them.
+const pendingUsageRecords = new Set<Promise<void>>();
+
+function trackUsageRecord(start: () => Promise<void>): void {
+  let started: Promise<void>;
+  try { started = Promise.resolve(start()); } catch (err) { started = Promise.reject(err); }   // a synchronous throw must never look like a provider failure
+  const tracked: Promise<void> = started
+    .catch((err) => { logger.providerWarn(`Usage record failed (the reply was delivered): ${err instanceof Error ? err.message : String(err)}`); })
+    .finally(() => { pendingUsageRecords.delete(tracked); });
+  pendingUsageRecords.add(tracked);
+}
+
+/** Resolves when every background usage record started so far has finished (success or logged failure). Never rejects. */
+export async function flushPendingUsageRecords(): Promise<void> {
+  while (pendingUsageRecords.size > 0) await Promise.all(Array.from(pendingUsageRecords));
+}
+
 /**
  * Stream chat with automatic provider fallback.
  * If the active provider fails after retries, switches to the next.
@@ -924,7 +985,7 @@ export async function streamWithFallback(
   const deadlineMs = deadlineFor(options);
   const deadlineAt = deadlineMs === null ? null : Date.now() + deadlineMs;
   let deadlineHit = false;
-  const settings = await loadSettings();
+  const settings = options.settings ?? await loadSettingsCached(options.usageContext?.tenantId);
   let pairs = await resolveOrderedPairs(options, settings);
   pairs = await applyBudgetGate(pairs, options.usageContext?.tenantId);
   const prioritized = await prioritizePairs(pairs, !!(options.candidates && options.candidates.length > 0), options.usageContext?.tenantId);
@@ -932,7 +993,13 @@ export async function streamWithFallback(
 
   let lastError: AIProviderError | null = null;
 
-  for (const { providerId, model } of pairs) {
+  // M7-13c-2c-b: the attempt queue. A candidate that missed the first-token budget is re-queued at the END with the budget switched off,
+  // so a provider that is slow but is the only one that works still answers (a slow answer beats none).
+  const firstTokenBudgetMs = isInteractiveCall(options) ? (options.firstTokenTimeoutMs ?? FIRST_TOKEN_TIMEOUT_MS) : 0;
+  const queue: Array<ProviderPair & { noFirstTokenLimit?: boolean }> = [...pairs];
+
+  for (let qi = 0; qi < queue.length; qi++) {
+    const { providerId, model, noFirstTokenLimit } = queue[qi];
     if (!prioritized.lastResort && isCircuitOpen(options.usageContext?.tenantId, providerId, model)) {
       lastError = new AIProviderError(`${providerId} skipped (circuit open after a hard failure)`, 0, providerId);
       continue;
@@ -946,6 +1013,9 @@ export async function streamWithFallback(
     if (remainingMs < MIN_ATTEMPT_MS) { deadlineHit = true; break; }
     const provider = getProvider(providerId);
     const start = Date.now();
+    // The budget applies only while ANOTHER candidate is queued behind this one; the last/only one is never aborted for being slow.
+    const hasNext = qi < queue.length - 1;
+    const firstTokenTimeoutMs = !noFirstTokenLimit && hasNext ? firstTokenBudgetMs : 0;
     try {
       logger.provider(`Streaming via ${providerId}`, { model });
       const result = await provider.chatStream(messages, {
@@ -955,6 +1025,7 @@ export async function streamWithFallback(
         timeoutMs: Math.min(requestTimeoutFor(options), remainingMs),
         fullTimeoutMs: requestTimeoutFor(options),
         deadlineAtMs: deadlineAt ?? undefined,
+        firstTokenTimeoutMs,
       });
       const latencyMs = Date.now() - start;
       if (isEmptyResult(result.content)) {
@@ -970,19 +1041,28 @@ export async function streamWithFallback(
       // Mirrors chatWithFallback's usage recording — previously only the
       // non-streaming path recorded usage, so every streamed chat/voice
       // response was invisible to the Usage Ledger and budget governance.
-      await recordUsage({
+      // M7-13c-2c-b: fire-and-forget - the reply is already fully streamed, so the ledger insert must not delay the caller (it was awaited
+      // here). Still recorded; its own catch logs a failure; flushPendingUsageRecords() lets a test (or a shutdown path) wait for it.
+      trackUsageRecord(() => recordUsage({
         provider: result.provider,
         model: result.model,
         inputTokens: result.usage.inputTokens,
         outputTokens: result.usage.outputTokens,
         context: options.usageContext,
         latencyMs,
-      });
+      }));
       recordHealth({ provider: providerId, modelId: model, success: true, latencyMs, statusCode: 200 });
       clearSoftCooldown(options.usageContext?.tenantId, providerId, model);
       return result.content;
     } catch (err) {
       lastError = err instanceof AIProviderError ? err : new AIProviderError(String(err), 0, providerId);
+      // M7-13c-2c-b: a first-token abort is OUR budget: deferred for a minute, re-queued once without the budget, nothing else touched.
+      if (lastError.code === 'first_token_timeout') {
+        recordFirstTokenSlow(options.usageContext?.tenantId, providerId, model);
+        queue.push({ providerId, model, noFirstTokenLimit: true });
+        logger.providerWarn(`${providerId} stream: ${lastError.message}`);
+        continue;
+      }
       // M7-13c-1: a timeout caused by our own short/shortened budget says nothing about the model.
       const ownBudgetTimeout = lastError.code === 'timeout' && lastError.budgetLimited === true;
       if (!ownBudgetTimeout) {

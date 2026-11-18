@@ -450,6 +450,7 @@ function registerMemoryTools(): void {
     status: 'active',
     version: '1.0.0',
     supportedAgents: ['temo', 'flow', 'atlas', 'nova', 'luna', 'echo'],
+    readOnly: true, // M7-13c-2c-b: SELECT only - runs for real in Demo, against the user's own tenant
   };
 
   const memoryRecallTool: ToolDefinition = {
@@ -464,6 +465,7 @@ function registerMemoryTools(): void {
     status: 'active',
     version: '1.0.0',
     supportedAgents: ['temo', 'flow', 'atlas', 'nova', 'luna', 'echo'],
+    readOnly: true, // M7-13c-2c-b: single-row SELECT
   };
 
   const memoryForgetTool: ToolDefinition = {
@@ -499,6 +501,7 @@ function registerMemoryTools(): void {
     status: 'active',
     version: '1.0.0',
     supportedAgents: ['temo', 'flow', 'atlas', 'nova', 'luna', 'echo'],
+    readOnly: true, // M7-13c-2c-b: SELECT only
   };
 
   const memoryLinkTool: ToolDefinition = {
