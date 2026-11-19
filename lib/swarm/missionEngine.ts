@@ -41,6 +41,7 @@ import {
   classifyComplexity,
 } from './missionPlanner';
 import { dispatchTasks } from './swarmManager';
+import { deriveMissionTitle } from '@/lib/utils/missionTitle';
 import { computeMissionOutcome, dbStatusOf, outcomeMetadata, isInvalidEnumValueError } from './missionOutcome';
 import { checkEntitlement, consumeProjectSlot, checkBudget } from '@/lib/governance/entitlements';
 import {
@@ -538,10 +539,10 @@ export async function cancelMission(
   return { success: true };
 }
 
+// M7-13c-2e-a: the title is the name the user gave the mission, else the first clause of the request cut at a word boundary
+// (lib/utils/missionTitle.ts). It used to be the first 57 characters plus "...", cut mid-word.
 function deriveTitle(userRequest: string): string {
-  const trimmed = userRequest.trim();
-  if (trimmed.length <= 60) return trimmed;
-  return trimmed.slice(0, 57) + '...';
+  return deriveMissionTitle(userRequest);
 }
 
 function buildSummary(

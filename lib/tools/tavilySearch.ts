@@ -40,6 +40,8 @@ export interface TavilyResult {
   query: string;
   count: number;
   summary: string;
+  /** M7-13c-2e-a: Tavily's own answer text (already sanitized) as its own field, so the user-facing presenter never parses `summary`. Empty when Tavily gave none. */
+  answer: string;
   provider: 'tavily';
 }
 
@@ -111,7 +113,7 @@ export function mapTavilyResponse(data: TavilyResponse, query: string, maxResult
   const body = [answer ? `Answer: ${answer}` : '', lines.length > 0 ? `Sources:\n${lines.join('\n')}` : ''].filter(Boolean).join('\n\n');
   const summary = body ? `${header}\n${body}`.slice(0, TAVILY_SUMMARY_CAP) : '';
 
-  return { results, query, count: results.length, summary, provider: 'tavily' };
+  return { results, query, count: results.length, summary, answer, provider: 'tavily' };
 }
 
 /**

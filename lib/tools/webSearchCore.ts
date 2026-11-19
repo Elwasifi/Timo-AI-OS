@@ -47,6 +47,8 @@ export interface WebSearchResult {
   query: string;
   count: number;
   summary?: string;
+  /** M7-13c-2e-a: the provider's own answer text as a separate field (Tavily). For Gemini the answer text is `summary` itself. */
+  answer?: string;
   /** M7-13c-2a-6: which provider produced this result (the chain is Gemini -> Tavily). */
   provider?: 'gemini' | 'tavily';
 }

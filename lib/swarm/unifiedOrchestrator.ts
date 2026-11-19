@@ -26,6 +26,7 @@ import {
   type ExecutionState,
 } from './runtimeStore';
 import { route } from '@/lib/ai/router';
+import { hasArabic } from '@/lib/utils/arabicText';
 import { chatWithFallback } from '@/lib/ai/ai-provider';
 import { crewCoordinator } from '@/lib/crew/crew-coordinator';
 import { ConversationService } from '@/lib/ai/conversation-service';
@@ -47,7 +48,29 @@ import type { RoutingResult, TaskRecord } from '@/types';
 // sensitivity, high cost sensitivity) so it resolves on the quickest
 // available provider (usually Groq) well before the mission itself
 // finishes, not blocking mission kickoff either way (fire-and-forget below).
-const FALLBACK_ACKNOWLEDGMENT = "Got it — this needs a full mission, so I'm breaking it down and getting to work. I'll follow up here with the result.";
+// M7-13c-2e-a: the acknowledgment is produced BEFORE the plan exists (it runs in parallel with planning, see orchestrate()), so it
+// must be plan-independent: it can say a mission is being opened, never what the steps will be. The old fallback promised a
+// result "after breaking it down", and the model-written sentence once promised "then prepare a summary" that the plan did not
+// contain. Now: a generic template (English, or Arabic when the request is Arabic), a prompt that forbids promising steps, and a
+// post-check that replaces any model sentence that still does.
+export const FALLBACK_ACKNOWLEDGMENT = "Got it — I'm opening a mission for this. I'll post the actual steps and the result here.";
+export const FALLBACK_ACKNOWLEDGMENT_AR = 'تمام — هفتح ميشن لطلبك ده. هنزّل هنا الخطوات الفعلية والنتيجة.';
+
+export function fallbackAcknowledgment(userRequest: string): string {
+  return hasArabic(userRequest) ? FALLBACK_ACKNOWLEDGMENT_AR : FALLBACK_ACKNOWLEDGMENT;
+}
+
+const MAX_ACKNOWLEDGMENT_CHARS = 220;
+// Words that promise a step, a deliverable or a follow-up the plan may not contain.
+const PROMISE_PATTERN = /\b(?:then|afterwards?|after that|next|finally|once (?:that|it)|summar(?:y|ies|ize|ise)|report|follow[- ]?up|deliverables?|i(?:'|’)?ll (?:prepare|write|compile|draft|send|deliver|provide|share|put together|create|produce|build|make)|i will (?:prepare|write|compile|draft|send|deliver|provide|share|put together|create|produce|build|make)|going to (?:prepare|write|compile|draft|send|deliver|provide|create|produce))\b|ثم|بعد ذلك|بعدها|ملخص|تقرير|هجهز|هحضر|هكتب|هعمل|سأجهز|سأعد|سأكتب|سأحضر/i;
+
+/** A model-written acknowledgment is kept only if it is one short sentence that promises no step, summary or follow-up. */
+export function isHonestAcknowledgment(text: string): boolean {
+  const t = text.trim();
+  if (!t || t.length > MAX_ACKNOWLEDGMENT_CHARS) return false;
+  if (/[\n\r]/.test(t) || (t.match(/[.!?؟]\s+\S/g) ?? []).length > 0) return false; // more than one sentence
+  return !PROMISE_PATTERN.test(t);
+}
 
 /**
  * M7-13c-1: hard upper bound on how long the acknowledgment may take. It is
@@ -65,14 +88,14 @@ export const ACKNOWLEDGMENT_HARD_CAP_MS = 5_000;
 export async function generateFastAcknowledgment(userRequest: string, tenantId: string): Promise<string> {
   let capTimer: ReturnType<typeof setTimeout> | undefined;
   const cap = new Promise<string>((resolve) => {
-    capTimer = setTimeout(() => resolve(FALLBACK_ACKNOWLEDGMENT), ACKNOWLEDGMENT_HARD_CAP_MS);
+    capTimer = setTimeout(() => resolve(fallbackAcknowledgment(userRequest)), ACKNOWLEDGMENT_HARD_CAP_MS);
   });
   const attempt = generateAcknowledgmentUncapped(userRequest, tenantId);
   attempt.catch(() => {}); // if the cap wins, a late failure of the abandoned attempt must not become an unhandled rejection
   try {
     return await Promise.race([attempt, cap]);
   } catch {
-    return FALLBACK_ACKNOWLEDGMENT;
+    return fallbackAcknowledgment(userRequest);
   } finally {
     if (capTimer) clearTimeout(capTimer);
   }
@@ -99,7 +122,7 @@ async function generateAcknowledgmentUncapped(userRequest: string, tenantId: str
     const result = await chatWithFallback(
       [{ role: 'user', content: userRequest }],
       {
-        systemPrompt: "The user just sent a request that needs real planning and multi-step work — it will take a while. In ONE short, natural sentence, acknowledge specifically what they asked for and say you're getting started on it now. Do not answer the request itself. Do not use quotation marks.",
+        systemPrompt: "The user just sent a request that needs real planning and multi-step work — it will take a while. In ONE short, natural sentence, acknowledge what they asked for and say you're opening a mission for it. The plan does not exist yet: do NOT mention, list or promise any step, deliverable, summary, report or follow-up, and do not say 'then', 'after that' or 'next'. Reply in the language of the request. Do not answer the request itself. Do not use quotation marks.",
         temperature: 0.4,
         // M7-13c-1: was 60 — a reasoning model (groq/openai/gpt-oss-120b) spent the whole budget on hidden
         // reasoning and returned an empty completion. The one-sentence limit lives in the prompt above, not here.
@@ -108,9 +131,10 @@ async function generateAcknowledgmentUncapped(userRequest: string, tenantId: str
         usageContext: { operation: 'fast_acknowledgment', tenantId },
       },
     );
-    return result.content.trim() || FALLBACK_ACKNOWLEDGMENT;
+    const sentence = result.content.trim();
+    return isHonestAcknowledgment(sentence) ? sentence : fallbackAcknowledgment(userRequest);
   } catch {
-    return FALLBACK_ACKNOWLEDGMENT;
+    return fallbackAcknowledgment(userRequest);
   }
 }
 

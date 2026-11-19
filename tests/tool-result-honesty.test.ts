@@ -66,7 +66,9 @@ describe('a tool that returns nothing usable is a FAILURE, never the answer "Res
     expect(r.outcome).toBe('handled');
     expect(r.toolAnswer).toContain('Open-JARVIS');
     expect(r.toolAnswer).toContain('https://github.com/x/jarvis');
-    expect(r.toolAnswer).toContain('An open source assistant');
+    // M7-13c-2e-a: the user-facing text lists titles + Sources links; a snippet (model-facing data) is no longer shown to the user.
+    expect(r.toolAnswer).not.toContain('An open source assistant');
+    expect(r.toolAnswer).toContain('[Open-JARVIS](https://github.com/x/jarvis)');
     expect(isPlaceholderAnswer(r.toolAnswer as string)).toBe(false);
     expect(r.failureKind).toBeUndefined();
   });

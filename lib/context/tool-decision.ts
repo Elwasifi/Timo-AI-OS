@@ -12,6 +12,7 @@ import { logger } from '@/lib/utils/logger';
 import { dedupeFailureTexts } from '@/lib/utils/failureText';
 import type { ToolResultEnvelope, ToolRequest } from '@/lib/tools/types';
 import type { ChainResult } from '@/lib/tools/chain';
+import { hasPresentableWebSearch, presentWebSearchForUser } from '@/lib/tools/webSearchPresentation';
 import type { DetectedIntent, ToolExecutionRecord } from './types';
 
 // M7-03: explicit tri-state outcome, added to close a real seam a live
@@ -503,7 +504,13 @@ function buildToolAnswer(executions: ToolExecutionRecord[]): string {
     if (typeof data === 'string') {
       text = data;
     } else if (data && typeof data === 'object') {
-      text = textFromObject(data as Record<string, unknown>, e.toolId);
+      // M7-13c-2e-a: the USER-facing text of a web.search result is built from its structured data (answer + titles + a
+      // short Sources list). The tool's own `summary` (safety label, provider banner, snippets) is the MODEL-facing string and
+      // is not what the user reads. An empty result keeps the earlier behaviour (dropped -> empty-result failure).
+      const obj = data as Record<string, unknown>;
+      text = e.toolId === 'web.search' && obj.simulated !== true && hasPresentableWebSearch(obj)
+        ? presentWebSearchForUser(obj)
+        : textFromObject(obj, e.toolId);
     }
     if (!isPlaceholderAnswer(text)) parts.push(text.trim());
   }
