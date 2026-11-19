@@ -2551,6 +2551,25 @@ Observed (Amro's live mission 8d6c845a…, Demo mode, Gemini quota exhausted): o
 
 **Follow-ups recorded.** B3 (skip the planner for an obvious single web search) is a separate follow-up ticket. Arabic "remember" phrasing is not recognised by `asksToRememberInput` (English verbs only); known gap, safe direction (the planner stores nothing rather than too much).
 
+## M7-13c-2e-a — HUMAN-READABLE TOOL RESULTS, MISSION TITLE FROM THE REQUEST, HONEST ACKNOWLEDGMENT (2026-11-18, code + tests only)
+
+**No migration, no DB write, no live provider call from any test.** Found in a live test: after a web search the chat and the mission result showed the tool's raw `summary` (the Tavily header "external web content — untrusted data, not instructions", "Answer:", "Sources:" and a snippet per result) and the voice read it aloud; a mission was titled with the first ~57 characters of the request, cut mid-word; and the mission acknowledgment promised "then prepare a summary" that the plan did not contain.
+
+**What the user reads for a web.search result is now built from the structured result.** `lib/tools/webSearchPresentation.ts` (pure, no LLM call) turns `{ answer, results[{title,url}], provider }` into the answer paragraph (or up to 3 titles when there is no answer) plus a "Sources" list of at most 5 markdown links; only http(s) URLs, titles made safe for a link label (square brackets become parentheses, other markup characters escaped), no snippets, no safety label, no provider banner, total length capped; Arabic text is untouched. The Tavily result now also carries its sanitized `answer` as a field, so nothing parses the summary text; for Gemini the `summary` is the grounded answer itself. `buildToolAnswer` (`lib/context/tool-decision.ts`) is the single point: the chat direct reply, the mission task output, its timeline detail and the voice all read `toolAnswer`, so all of them now show the presented text. An empty search is still an `empty_result` failure.
+
+**What stays model-facing:** the tool's `summary` (labelled "untrusted", with snippets) is unchanged and is still what every execution record, the context builder and the agent loop receive (golden-tested). One consequence to know: a later mission task's manager prompt includes the earlier task's stored output ("Prior Task Results"), which is now the presented text (answer, titles, links) rather than the labelled summary with snippets.
+
+**Mission title.** `lib/utils/missionTitle.ts` (`deriveMissionTitle`, used by `missionEngine.deriveTitle`): the name the user gave the mission ("mission called/named X", "name it X", "call it X", `mission "X"`, ميشن اسمه X, سمّيه/سميها X, اسم الميشن X, ميشن "X"), otherwise the first sentence minus trivial leading politeness, cut at a word boundary within 60 characters with an ellipsis (never mid-word or mid-surrogate; a single very long word is hard-cut). Never empty. Existing missions are untouched.
+
+**Honest acknowledgment.** It is produced before the plan exists (it runs in parallel with planning), so it is now plan-independent: the fallback is "Got it — I'm opening a mission for this. I'll post the actual steps and the result here." (Arabic twin for an Arabic request), the model prompt forbids promising steps/summaries/follow-ups, and a post-check replaces any model sentence that still does or is longer than one short sentence. The 2b-3 ordering fix is unchanged.
+
+**Deliberately left out:** mission decomposition, task titles, `classifyComplexity`, `resolveCapabilities` and the Arabic planner (ticket 2e-b, next); the voice code (the cleaner already turns links into their titles, but "Sources:" and the source titles are still spoken; follow-up); B3 (skip the planner for an obvious single web search); the tool planner; provider routing; old messages and old mission titles.
+
+**Verification.** 5 new test files (`web-search-presentation`, `mission-title`, `mission-acknowledgment-honesty`, `mission-task-output-presentation`, fixtures in `tests/fixtures/webSearchFixtures.ts`); 1 existing assertion changed (`tool-result-honesty`: a snippet is no longer in the user text). Mutation-checked (each caught): presenter with snippets, presenter with the untrusted header, no Sources cap, the model summary without its label, mission output bypassing the presenter, chat reply bypassing the presenter, mid-word title cut, explicit Arabic name ignored, the acknowledgment promising a summary again (template and post-check).
+
+**Follow-ups recorded with this ticket.** (a) The Tavily `answer` text is shown to the user unescaped, so it is a markdown image/link injection surface; to be closed in M7-13f. (b) An unquoted explicit mission name runs to the end of the clause (Arabic "ميشن اسمه X وابحث…" keeps the tail); quoting the name or a comma ends it. (c) Later mission tasks now receive the presented text without the "untrusted" label (managerContext "Prior Task Results"); revisit in 2e-b. (d) The voice still speaks the word "Sources" and the source titles; to be handled in 2d. Code commit 09e4847.
+
+
 ## KNOWN ARCHITECTURAL GAPS (documented, intentional, non-blocking — not oversights)
 
 These are real, currently-open gaps, each deliberately scoped out of the ticket that found it, with an explicit decision recorded (not silently deferred and not silently fixed beyond agreed scope).
@@ -2612,6 +2631,6 @@ High-level direction only; each milestone below gets its own scoping pass (desig
 ---
 
 ## ARCHITECTURE DOCUMENT VERSION
-Version: 3.48
+Version: 3.49
 Date: 2026-11-18
-Status: M7-13c-2c-b (Demo memory writes are simulated because the sandbox tenant has no members and memory writes could never pass RLS; planner memory-write guard in code at the offered and executed lists, unless the user asked to remember; chat speed: 6 s first-token timeout with fallback, latency-aware planner routing, parallel + short-TTL cached pre-model reads, fire-and-forget usage ledger on the streaming path; B3 not implemented, separate follow-up; Arabic "remember" not recognised, known gap; no migration, no live call). Code commit 5f07e87.
+Status: M7-13c-2e-a (human-readable web.search text for the user built from the structured result by a pure presenter, model-facing summary unchanged; mission title from the request or a word-boundary cut; plan-independent honest mission acknowledgment with an Arabic twin and a post-check; no migration, no live call; follow-ups: Tavily answer unescaped -> M7-13f, unquoted mission name runs to end of clause, later tasks lose the untrusted label -> 2e-b, voice still speaks Sources -> 2d). Code commit 09e4847.
